@@ -9,4 +9,6 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIR}/run-common"
 
-run_cmd "vajra-reek" sh -c "cd \"${REPO_ROOT}/gems/vajra\" && bin/reek"
+ruby_suites | while IFS= read -r suite_dir; do
+  run_optional_ruby_bin "${suite_dir}" "reek"
+done

@@ -9,4 +9,6 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIR}/run-common"
 
-run_cmd "vajra-rspec-e2e" sh -c "cd \"${REPO_ROOT}/gems/vajra\" && bin/rspec-e2e"
+ruby_suites | while IFS= read -r suite_dir; do
+  run_optional_ruby_bin "${suite_dir}" "rspec-e2e"
+done

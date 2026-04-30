@@ -15,10 +15,100 @@ if [ "${REPO_ROOT:-}" = "" ]; then
 fi
 
 TMP_DIR="${REPO_ROOT}/tmp/run-all"
+
 mkdir -p "${TMP_DIR}"
 
-suite_name() {
-  basename "$1"
+reset_terminal_color() {
+  printf '\033[0m'
+}
+
+runtime_ruby_version() {
+  ruby -v 2>/dev/null || true
+}
+
+print_runtime_context() {
+  ruby_version=$(runtime_ruby_version)
+
+  if [ "${ruby_version}" != "" ]; then
+    echo "ruby: ${ruby_version}"
+  fi
+
+  echo "pwd: $(pwd)"
+
+  if [ "${RUN_ALL_BUNDLE_GEMFILE:-}" != "" ]; then
+    echo "gemfile: $(basename "${RUN_ALL_BUNDLE_GEMFILE}")"
+  fi
+}
+
+print_run_summary() {
+  log_file="$1"
+  summary_lines=$(
+    grep -E 'Finished in|examples?, [0-9]+ failures|files? inspected|offenses? detected|total warnings?|Line Coverage:|Branch Coverage:|built in|tests? passed|failed|passed ' "${log_file}" \
+      | tail -n 5 || true
+  )
+
+  if [ "${summary_lines}" = "" ]; then
+    summary_lines=$(
+      tail -n 8 "${log_file}" \
+        | sed '/^[[:space:]]*$/d' \
+        | tail -n 5
+    )
+  fi
+
+  [ "${summary_lines}" = "" ] && return 0
+
+  echo "run summary:"
+  printf '%s\n' "${summary_lines}"
+}
+
+run_cmd() {
+  name="$1"
+  shift
+  log_file="${TMP_DIR}/${name}.log"
+
+  reset_terminal_color
+  echo "==> ${name}"
+  print_runtime_context
+
+  if "$@" >"${log_file}" 2>&1; then
+    reset_terminal_color
+    print_run_summary "${log_file}"
+    reset_terminal_color
+    echo
+    rm -f "${log_file}"
+    return 0
+  fi
+
+  reset_terminal_color
+  echo "-- ${name} failed --"
+  cat "${log_file}"
+  reset_terminal_color
+  return 1
+}
+
+run_cmd_env() {
+  name="$1"
+  shift
+  log_file="${TMP_DIR}/${name}.log"
+
+  reset_terminal_color
+  echo "==> ${name}"
+  print_runtime_context
+
+  if env "$@" >"${log_file}" 2>&1; then
+    reset_terminal_color
+    print_run_summary "${log_file}"
+    reset_terminal_color
+    echo
+    rm -f "${log_file}"
+    return 0
+  fi
+
+  reset_terminal_color
+  echo "-- ${name} failed --"
+  cat "${log_file}"
+  reset_terminal_color
+  return 1
 }
 
 ruby_suites() {
@@ -27,20 +117,93 @@ gems/vajra
 EOF
 }
 
-run_cmd() {
-  name="$1"
-  shift
-  log_file="${TMP_DIR}/${name}.log"
+docs_suites() {
+  cat <<'EOF'
+docs
+EOF
+}
 
-  echo "==> ${name}"
-  if "$@" >"${log_file}" 2>&1; then
-    tail -n 20 "${log_file}" | sed '/^[[:space:]]*$/d' | tail -n 8 || true
-    echo
-    rm -f "${log_file}"
+suite_name() {
+  basename "$1"
+}
+
+current_ruby_series() {
+  ruby -e 'print RUBY_VERSION.split(".").first(2).join(".")'
+}
+
+suite_supports_current_ruby() {
+  suite_dir="$1"
+
+  case "${suite_dir}" in
+    docs)
+      [ "$(current_ruby_series)" != "4.0" ]
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+suite_gemfiles() {
+  suite_dir="$1"
+  return 1
+}
+
+with_repo_dir() {
+  suite_dir="$1"
+  shift
+  cd "${REPO_ROOT}/${suite_dir}"
+  "$@"
+}
+
+has_executable() {
+  suite_dir="$1"
+  file_name="$2"
+  [ -x "${REPO_ROOT}/${suite_dir}/${file_name}" ]
+}
+
+suite_needs_native_compile() {
+  case "$1" in
+    gems/vajra)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+prepare_native_extension_if_needed() {
+  suite_dir="$1"
+  bin_name="${2:-}"
+
+  case "${bin_name}" in
+    rspec|rspec-unit|rspec-e2e)
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  if ! suite_needs_native_compile "${suite_dir}"; then
     return 0
   fi
 
-  echo "-- ${name} failed --"
-  cat "${log_file}"
-  return 1
+  echo "Preparing native extension for $(suite_name "${suite_dir}")"
+  cd "${REPO_ROOT}/${suite_dir}"
+  bundle exec rake compile >/dev/null
+}
+
+run_optional_ruby_bin() {
+  suite_dir="$1"
+  bin_name="$2"
+  label="$(suite_name "${suite_dir}")-${bin_name}"
+
+  if has_executable "${suite_dir}" "bin/${bin_name}"; then
+    prepare_native_extension_if_needed "${suite_dir}" "${bin_name}"
+    with_repo_dir "${suite_dir}" run_cmd "${label}" "bin/${bin_name}"
+    return 0
+  fi
+
+  echo "Skipping $(suite_name "${suite_dir}") ${bin_name}: missing bin/${bin_name}"
 }

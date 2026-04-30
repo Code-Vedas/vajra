@@ -9,4 +9,6 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIR}/run-common"
 
-run_cmd "vajra-clean-build" sh -c "cd \"${REPO_ROOT}/gems/vajra\" && bundle exec rake clobber compile build"
+ruby_suites | while IFS= read -r suite_dir; do
+  run_cmd "$(suite_name "${suite_dir}")-clean-build" sh -c "cd \"${REPO_ROOT}/${suite_dir}\" && bundle exec rake clobber compile build"
+done

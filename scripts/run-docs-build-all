@@ -9,4 +9,11 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIR}/run-common"
 
-run_cmd "docs-build" sh -c "cd \"${REPO_ROOT}/docs\" && bundle exec jekyll build"
+docs_suites | while IFS= read -r suite_dir; do
+  if ! suite_supports_current_ruby "${suite_dir}"; then
+    echo "Skipping $(suite_name "${suite_dir}") build on Ruby $(current_ruby_series)"
+    continue
+  fi
+
+  run_cmd "$(suite_name "${suite_dir}")-build" sh -c "cd \"${REPO_ROOT}/${suite_dir}\" && bundle exec jekyll build"
+done

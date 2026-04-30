@@ -10,7 +10,7 @@ env:
   BUNDLE_PATH: ${{ github.workspace }}/vendor/bundle
   BUNDLE_JOBS: "4"
   BUNDLE_RETRY: "3"
-  RUBY_VERSION: "3.4.3"
+  RUBY_VERSION: 3.4.3
 
 on:
   workflow_call:
@@ -19,6 +19,9 @@ on:
         required: false
         type: boolean
         default: false
+    secrets:
+      QLTY_COVERAGE_TOKEN:
+        required: false
 
 jobs:
   rubocop:
@@ -137,6 +140,13 @@ jobs:
           CI_RUBY_VERSION: ${{ matrix.ruby_version }}
       - name: Run unit tests
         run: scripts/run-rspec-unit-all
+      - name: Publish coverage to Qlty
+        if: inputs.upload_coverage && matrix.ruby_version == '3.4'
+        uses: qltysh/qlty-action/coverage@v2
+        with:
+          token: ${{ secrets.QLTY_COVERAGE_TOKEN }}
+          files: |
+            ${{ github.workspace }}/gems/vajra/coverage/.resultset.json
 
   test_e2e:
     name: E2E Tests · Ruby ${{ matrix.ruby_version }}

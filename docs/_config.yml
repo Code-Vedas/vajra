@@ -8,7 +8,7 @@ description: >-
   Vajra is a native Ruby application server with a Ruby package, native
   runtime, and product documentation focused on setup, runtime behavior, and
   operations.
-url: "https://vajra.codevedas.com"
+url: https://vajra.codevedas.com
 baseurl: ""
 repository: Code-Vedas/vajra
 theme: just-the-docs

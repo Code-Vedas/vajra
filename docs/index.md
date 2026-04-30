@@ -47,17 +47,17 @@ Vajra is organized as one gem with one clear runtime boundary.
 
 ## Support Snapshot
 
-| Area | Position |
-| --- | --- |
-| Canonical package | `gems/vajra` |
-| Native source tree | `gems/vajra/ext/vajra` |
-| Runtime executable | `gems/vajra/exe/vajra` |
-| Default local startup | `bundle exec exe/vajra` |
-| Native build flow | `bundle exec rake compile` |
-| Package validation | `bin/rspec-unit`, `bin/rubocop`, `bin/reek`, `bundle exec rbs -I sig validate` |
-| Repository validation | `scripts/ci-install-bundles`, `scripts/run-all` |
-| Docs surface | Jekyll + Just the Docs under `docs/` |
-| Public docs host | `https://vajra.codevedas.com` |
+| Area                  | Position                                                                       |
+| --------------------- | ------------------------------------------------------------------------------ |
+| Canonical package     | `gems/vajra`                                                                   |
+| Native source tree    | `gems/vajra/ext/vajra`                                                         |
+| Runtime executable    | `gems/vajra/exe/vajra`                                                         |
+| Default local startup | `bundle exec exe/vajra`                                                        |
+| Native build flow     | `bundle exec rake compile`                                                     |
+| Package validation    | `bin/rspec-unit`, `bin/rubocop`, `bin/reek`, `bundle exec rbs -I sig validate` |
+| Repository validation | `scripts/ci-install-bundles`, `scripts/run-all`                                |
+| Docs surface          | Jekyll + Just the Docs under `docs/`                                           |
+| Public docs host      | `https://vajra.codevedas.com`                                                  |
 
 ## Explore The Docs
 

@@ -31,16 +31,16 @@ families:
 
 ## Repository Boundaries
 
-| Path | Role |
-| --- | --- |
-| `gems/vajra/lib/` | Ruby package entrypoints and load boundary |
-| `gems/vajra/exe/` | executable startup path |
-| `gems/vajra/ext/vajra/` | native extension sources and build entrypoint |
-| `gems/vajra/sig/` | RBS truth for the Ruby package surface |
-| `gems/vajra/spec/` | package-local validation and smoke coverage |
-| `docs/` | product documentation and docs-site build |
-| `.github/` | workflows, issue templates, and release automation |
-| `scripts/` | repository-level verification entrypoints |
+| Path                    | Role                                               |
+| ----------------------- | -------------------------------------------------- |
+| `gems/vajra/lib/`       | Ruby package entrypoints and load boundary         |
+| `gems/vajra/exe/`       | executable startup path                            |
+| `gems/vajra/ext/vajra/` | native extension sources and build entrypoint      |
+| `gems/vajra/sig/`       | RBS truth for the Ruby package surface             |
+| `gems/vajra/spec/`      | package-local validation and smoke coverage        |
+| `docs/`                 | product documentation and docs-site build          |
+| `.github/`              | workflows, issue templates, and release automation |
+| `scripts/`              | repository-level verification entrypoints          |
 
 ## Native Boundary
 

@@ -37,4 +37,10 @@ assignees: ""
 - Browser (if applicable): [e.g., Chrome, Firefox, Safari]
 - Version: [e.g., 1.0.0]
 
+### Checklist
+
+- [ ] I have searched for a similar issue and didn't find any duplicates.
+- [ ] I have included all the required information.
+- [ ] I have tagged the issue with the label "bug."
+
 <!-- Feel free to add any additional details or context that might be helpful in resolving the issue. -->

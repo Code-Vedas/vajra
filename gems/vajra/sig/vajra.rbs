@@ -1,0 +1,9 @@
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+module Vajra
+  VERSION: String
+  # See the writing guide of rbs: https://github.com/ruby/rbs#guides
+end

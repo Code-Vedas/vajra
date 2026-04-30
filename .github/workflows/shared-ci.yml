@@ -1,0 +1,125 @@
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+name: Shared CI
+permissions:
+  contents: read
+env:
+  BUNDLE_PATH: ${{ github.workspace }}/vendor/bundle
+  BUNDLE_JOBS: "4"
+  BUNDLE_RETRY: "3"
+  RUBY_VERSION: "3.4.3"
+
+on:
+  workflow_call:
+
+jobs:
+  rubocop:
+    name: RuboCop
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.RUBY_VERSION }}
+          bundler-cache: false
+      - name: Install bundles
+        run: scripts/ci-install-bundles
+      - name: Run RuboCop
+        run: scripts/run-rubocop-all
+
+  reek:
+    name: Reek and RBS
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.RUBY_VERSION }}
+          bundler-cache: false
+      - name: Install bundles
+        run: scripts/ci-install-bundles
+      - name: Run Reek
+        run: scripts/run-reek-all
+      - name: Validate RBS
+        run: scripts/run-rbs-all
+
+  test:
+    name: Unit Tests
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    needs: [rubocop, reek]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.RUBY_VERSION }}
+          bundler-cache: false
+      - name: Install bundles
+        run: scripts/ci-install-bundles
+      - name: Run unit tests
+        run: scripts/run-rspec-unit-all
+
+  test_e2e:
+    name: E2E Tests
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    needs: [rubocop, reek]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.RUBY_VERSION }}
+          bundler-cache: false
+      - name: Install bundles
+        run: scripts/ci-install-bundles
+      - name: Run e2e tests
+        run: scripts/run-rspec-e2e-all
+
+  build_package:
+    name: Build Package
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    needs: [rubocop, reek]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.RUBY_VERSION }}
+          bundler-cache: false
+      - name: Install bundles
+        run: scripts/ci-install-bundles
+      - name: Build package
+        run: scripts/run-package-build-all
+
+  build_docs:
+    name: Build Docs
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    needs: [rubocop, reek]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.RUBY_VERSION }}
+          bundler-cache: false
+      - name: Install bundles
+        run: scripts/ci-install-bundles
+      - name: Build docs
+        run: scripts/run-docs-build-all

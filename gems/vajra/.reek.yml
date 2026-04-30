@@ -1,0 +1,14 @@
+detectors:
+  UncommunicativeVariableName:
+    accept:
+      - e
+      - _
+  TooManyStatements:
+    enabled: true
+    max_statements: 25
+  UtilityFunction:
+    enabled: false
+exclude_paths:
+  - spec/**/*
+  - bin/*
+  - tmp/**/*

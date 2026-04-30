@@ -1,0 +1,17 @@
+#!/bin/sh
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+"${SCRIPT_DIR}/run-rubocop-all"
+"${SCRIPT_DIR}/run-reek-all"
+"${SCRIPT_DIR}/run-rbs-all"
+"${SCRIPT_DIR}/run-rspec-unit-all"
+"${SCRIPT_DIR}/run-rspec-e2e-all"
+"${SCRIPT_DIR}/run-package-build-all"
+"${SCRIPT_DIR}/run-docs-build-all"

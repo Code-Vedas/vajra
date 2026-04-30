@@ -1,0 +1,60 @@
+#!/bin/sh
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "${SCRIPT_DIR}/run-common"
+BUNDLE_PATH="${BUNDLE_PATH:-${REPO_ROOT}/vendor/bundle}"
+
+export BUNDLE_PATH
+
+install_bundle_if_present() {
+  suite_dir="$1"
+  gemfile_path="${2:-}"
+
+  [ -f "${REPO_ROOT}/${suite_dir}/Gemfile" ] || return 0
+
+  cd "${REPO_ROOT}/${suite_dir}"
+
+  if [ "${gemfile_path}" = "" ]; then
+    ruby -S bundle check || ruby -S bundle install
+    return 0
+  fi
+
+  absolute_gemfile="${REPO_ROOT}/${suite_dir}/${gemfile_path}"
+  BUNDLE_GEMFILE="${absolute_gemfile}" ruby -S bundle check || BUNDLE_GEMFILE="${absolute_gemfile}" ruby -S bundle install
+}
+
+install_supported_bundle() {
+  suite_dir="$1"
+
+  if ! suite_supports_current_ruby "${suite_dir}"; then
+    echo "Skipping $(suite_name "${suite_dir}") bundle install on Ruby $(current_ruby_series)"
+    return 0
+  fi
+
+  install_bundle_if_present "${suite_dir}"
+
+  gemfiles=$(suite_gemfiles "${suite_dir}" || true)
+  if [ "${gemfiles}" != "" ]; then
+    for gemfile in ${gemfiles}; do
+      install_bundle_if_present "${suite_dir}" "${gemfile}"
+    done
+  fi
+}
+
+while IFS= read -r suite_dir; do
+  install_supported_bundle "${suite_dir}"
+done <<EOF
+$(ruby_suites)
+EOF
+
+while IFS= read -r suite_dir; do
+  install_supported_bundle "${suite_dir}"
+done <<EOF
+$(docs_suites)
+EOF

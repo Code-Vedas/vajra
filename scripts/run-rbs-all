@@ -1,0 +1,32 @@
+#!/bin/sh
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "${SCRIPT_DIR}/run-common"
+
+run_suite() {
+  suite_dir="$1"
+  suite_label="$(suite_name "${suite_dir}")"
+
+  if [ ! -d "${REPO_ROOT}/${suite_dir}/sig" ]; then
+    echo "Skipping ${suite_label} rbs: missing sig/"
+    return 0
+  fi
+
+  if grep -R -n -w -E 'untyped|top|Object|BasicObject' "${REPO_ROOT}/${suite_dir}/sig" >/dev/null 2>&1; then
+    echo "Strict RBS check failed for ${suite_label}: found forbidden generic types in sig/"
+    grep -R -n -w -E 'untyped|top|Object|BasicObject' "${REPO_ROOT}/${suite_dir}/sig"
+    return 1
+  fi
+
+  run_cmd "${suite_label}-rbs" sh -c "cd \"${REPO_ROOT}/${suite_dir}\" && rbs -I sig validate"
+}
+
+ruby_suites | while IFS= read -r suite_dir; do
+  run_suite "${suite_dir}"
+done

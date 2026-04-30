@@ -1,0 +1,19 @@
+#!/bin/sh
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "${SCRIPT_DIR}/run-common"
+
+docs_suites | while IFS= read -r suite_dir; do
+  if ! suite_supports_current_ruby "${suite_dir}"; then
+    echo "Skipping $(suite_name "${suite_dir}") build on Ruby $(current_ruby_series)"
+    continue
+  fi
+
+  run_cmd "$(suite_name "${suite_dir}")-build" sh -c "cd \"${REPO_ROOT}/${suite_dir}\" && bundle exec jekyll build"
+done

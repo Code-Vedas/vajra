@@ -1,0 +1,23 @@
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+version: 2
+updates:
+  - package-ecosystem: bundler
+    directory: /danger
+    schedule:
+      interval: daily
+  - package-ecosystem: bundler
+    directory: /gems/vajra
+    schedule:
+      interval: daily
+  - package-ecosystem: bundler
+    directory: /docs
+    schedule:
+      interval: daily
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily

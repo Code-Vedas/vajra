@@ -1,0 +1,56 @@
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+name: Release
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - v*
+
+concurrency:
+  group: release
+  cancel-in-progress: true
+
+env:
+  RUBY_VERSION: 3.4.3
+
+jobs:
+  verify_release:
+    name: Verify release
+    permissions:
+      contents: read
+    uses: ./.github/workflows/shared-ci.yml
+    secrets: inherit
+    with:
+      upload_coverage: false
+
+  publish_vajra:
+    name: Publish gems/vajra
+    runs-on: ubuntu-latest
+    needs: [verify_release]
+    permissions:
+      contents: write
+      id-token: write
+    environment: release
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.RUBY_VERSION }}
+          bundler-cache: true
+          working-directory: ${{ github.workspace }}/gems/vajra
+      - name: Configure RubyGems Credentials
+        uses: rubygems/configure-rubygems-credentials@cb088735f97e735ff769f8f7c24158151cc9ca6b
+      - name: Build and push gem
+        working-directory: ${{ github.workspace }}/gems/vajra
+        run: |
+          gem build vajra.gemspec
+          gem push vajra-*.gem

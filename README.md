@@ -1,43 +1,72 @@
 # Vajra
 
-TODO: Delete this and the text below, and describe your gem
+Vajra is a native Ruby application server implemented in C++ and packaged as a
+Ruby extension.
 
-Welcome to your new gem! In this directory, you'll find the files you need to be able to package up your Ruby library into a gem. Put your Ruby code in the file `lib/vajra`. To experiment with that code, run `bin/console` for an interactive prompt.
+The repository contains the canonical gem under `gems/vajra`, the published
+documentation site under `docs/`, and the GitHub automation and contributor
+guidance needed to build, validate, and release the project.
 
-## Installation
+## Product Shape
 
-TODO: Replace `UPDATE_WITH_YOUR_GEM_NAME_IMMEDIATELY_AFTER_RELEASE_TO_RUBYGEMS_ORG` with your gem name right after releasing it to RubyGems.org. Please do not do it earlier due to security reasons. Alternatively, replace this section with instructions to install your gem from git if you don't plan to release to RubyGems.org.
+Vajra keeps one deliberate ownership split:
 
-Install the gem and add to the application's Gemfile by executing:
+- Ruby owns packaging, executable boot, signatures, and build diagnostics.
+- C++ owns the native listener, request loop, connection handling, and shutdown
+  behavior.
+- `docs/` owns the full product story for installation, runtime behavior,
+  observability, troubleshooting, and development workflow.
+
+## Repository Map
+
+- `gems/vajra`: canonical gem, executable, signatures, and native extension
+  sources
+- `docs/`: product documentation site built with Jekyll and Just the Docs
+- `.github/`: issue templates, workflows, release drafting, and repository
+  instructions
+- `scripts/`: root-level convenience commands for CI and local verification
+
+## Local Development
+
+Install dependencies and run the shared repository validation flow from the
+repository root:
 
 ```bash
-bundle add UPDATE_WITH_YOUR_GEM_NAME_IMMEDIATELY_AFTER_RELEASE_TO_RUBYGEMS_ORG
+scripts/ci-install-bundles
+scripts/run-all
 ```
 
-If bundler is not being used to manage dependencies, install the gem by executing:
+For focused gem work:
 
 ```bash
-gem install UPDATE_WITH_YOUR_GEM_NAME_IMMEDIATELY_AFTER_RELEASE_TO_RUBYGEMS_ORG
+cd gems/vajra
+bin/setup
+bin/rspec-unit
+bin/rspec-e2e
+bin/rubocop
+bin/reek
+bundle exec exe/vajra
 ```
 
-## Usage
+`bin/rspec-unit` is the covered unit lane. `bin/rspec-e2e` is the integration
+lane and runs without coverage.
 
-TODO: Write usage instructions here
+## Documentation
 
-## Development
+The docs site under `docs/` is the authoritative product documentation surface
+for installation, runtime behavior, operations, and troubleshooting.
 
-After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake spec` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
+Start with:
 
-To install this gem onto your local machine, run `bundle exec rake install`. To release a new version, update the version number in `version.rb`, and then run `bundle exec rake release`, which will create a git tag for the version, push git commits and the created tag, and push the `.gem` file to [rubygems.org](https://rubygems.org).
+- [`docs/index.md`](docs/index.md)
+- [`docs/pages/getting-started.md`](docs/pages/getting-started.md)
+- [`docs/pages/installation.md`](docs/pages/installation.md)
+- [`docs/pages/runtime-model.md`](docs/pages/runtime-model.md)
+- [`docs/pages/architecture.md`](docs/pages/architecture.md)
+- [`docs/pages/troubleshooting.md`](docs/pages/troubleshooting.md)
+- [`docs/pages/development.md`](docs/pages/development.md)
 
 ## Contributing
 
-Bug reports and pull requests are welcome on GitHub at https://github.com/[USERNAME]/vajra. This project is intended to be a safe, welcoming space for collaboration, and contributors are expected to adhere to the [code of conduct](https://github.com/[USERNAME]/vajra/blob/main/CODE_OF_CONDUCT.md).
-
-## License
-
-The gem is available as open source under the terms of the [MIT License](https://opensource.org/licenses/MIT).
-
-## Code of Conduct
-
-Everyone interacting in the Vajra project's codebases, issue trackers, chat rooms and mailing lists is expected to follow the [code of conduct](https://github.com/[USERNAME]/vajra/blob/main/CODE_OF_CONDUCT.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, workflow, documentation, and
+release guidance.

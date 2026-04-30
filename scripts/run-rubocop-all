@@ -1,0 +1,14 @@
+#!/bin/sh
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "${SCRIPT_DIR}/run-common"
+
+ruby_suites | while IFS= read -r suite_dir; do
+  run_optional_ruby_bin "${suite_dir}" "rubocop"
+done

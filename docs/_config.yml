@@ -1,0 +1,36 @@
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+title: Vajra
+description: >-
+  Vajra is a native Ruby application server with a Ruby package, native
+  runtime, and product documentation focused on setup, runtime behavior, and
+  operations.
+url: "https://vajra.codevedas.com"
+baseurl: ""
+repository: Code-Vedas/vajra
+theme: just-the-docs
+markdown: kramdown
+plugins:
+  - jekyll-feed
+callouts:
+  note:
+    title: Note
+    color: blue
+toc:
+  depth: 2
+  min_heading_level: 2
+  max_heading_level: 3
+aux_links:
+  - title: " 🌙 / ☀️ "
+    url: "#toggle-theme"
+    new_tab: false
+  - title: Repository
+    url: https://github.com/Code-Vedas/vajra
+    new_tab: true
+aux_links_new_tab: true
+nav_enabled: true
+heading_anchors: true
+enable_copy_code_button: true

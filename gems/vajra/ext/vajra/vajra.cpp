@@ -1,0 +1,166 @@
+// Copyright Codevedas Inc. 2025-present
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
+#include "vajra.hpp"
+#include "ruby.h"
+
+#include <csignal>
+#include <iostream>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
+#include <cstring>
+
+namespace
+{
+  volatile std::sig_atomic_t shutting_down = 0;
+  std::mutex server_mutex;
+  std::unique_ptr<Server> server_instance;
+
+  void handle_signal(int sig)
+  {
+    if (sig == SIGINT || sig == SIGTERM)
+    {
+      shutting_down = 1;
+    }
+  }
+
+  class SignalHandlerGuard
+  {
+  public:
+    SignalHandlerGuard()
+    {
+      std::memset(&new_action_, 0, sizeof(new_action_));
+      std::memset(&previous_int_action_, 0, sizeof(previous_int_action_));
+      std::memset(&previous_term_action_, 0, sizeof(previous_term_action_));
+      new_action_.sa_handler = handle_signal;
+      sigemptyset(&new_action_.sa_mask);
+    }
+
+    void install()
+    {
+      if (sigaction(SIGINT, &new_action_, &previous_int_action_) != 0)
+      {
+        throw std::runtime_error("failed to install SIGINT handler");
+      }
+      if (sigaction(SIGTERM, &new_action_, &previous_term_action_) != 0)
+      {
+        sigaction(SIGINT, &previous_int_action_, nullptr);
+        throw std::runtime_error("failed to install SIGTERM handler");
+      }
+      installed_ = true;
+    }
+
+    ~SignalHandlerGuard()
+    {
+      if (!installed_)
+      {
+        return;
+      }
+
+      sigaction(SIGINT, &previous_int_action_, nullptr);
+      sigaction(SIGTERM, &previous_term_action_, nullptr);
+    }
+
+  private:
+    struct sigaction new_action_;
+    struct sigaction previous_int_action_;
+    struct sigaction previous_term_action_;
+    bool installed_ = false;
+  };
+
+  [[noreturn]] void raise_ruby_runtime_error(const char *prefix, const std::exception &error)
+  {
+    rb_raise(rb_eRuntimeError, "%s: %s", prefix, error.what());
+  }
+
+  VALUE rb_vajra_start(VALUE self)
+  {
+    (void)self;
+    try
+    {
+      VajraNative::start();
+    }
+    catch (const std::exception &error)
+    {
+      raise_ruby_runtime_error("Unable to start Vajra", error);
+    }
+    return Qnil;
+  }
+
+  VALUE rb_vajra_stop(VALUE self)
+  {
+    (void)self;
+    try
+    {
+      VajraNative::stop();
+    }
+    catch (const std::exception &error)
+    {
+      raise_ruby_runtime_error("Unable to stop Vajra", error);
+    }
+    return Qnil;
+  }
+}
+
+namespace VajraNative
+{
+  bool shutdown_requested()
+  {
+    return shutting_down != 0;
+  }
+
+  void start()
+  {
+    SignalHandlerGuard signal_handler_guard;
+    signal_handler_guard.install();
+
+    try
+    {
+      Server *server = nullptr;
+      {
+        std::lock_guard<std::mutex> lock(server_mutex);
+        if (server_instance)
+        {
+          std::cout << "Vajra already running" << std::endl;
+          return;
+        }
+
+        shutting_down = 0;
+        server_instance = std::make_unique<Server>(3000);
+        server = server_instance.get();
+      }
+
+      server->start();
+    }
+    catch (...)
+    {
+      std::lock_guard<std::mutex> lock(server_mutex);
+      server_instance.reset();
+      throw;
+    }
+
+    std::lock_guard<std::mutex> lock(server_mutex);
+    server_instance.reset();
+  }
+
+  void stop()
+  {
+    std::lock_guard<std::mutex> lock(server_mutex);
+    if (!server_instance)
+    {
+      return;
+    }
+
+    server_instance->stop();
+  }
+}
+
+extern "C" void Init_vajra()
+{
+  VALUE mVajra = rb_define_module("Vajra");
+  rb_define_singleton_method(mVajra, "start", RUBY_METHOD_FUNC(rb_vajra_start), 0);
+  rb_define_singleton_method(mVajra, "stop", RUBY_METHOD_FUNC(rb_vajra_stop), 0);
+}

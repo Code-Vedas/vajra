@@ -59,6 +59,17 @@ void Server::setup_socket()
     throw startup_error("bind", port_, error_number);
   }
 
+  sockaddr_in bound_addr{};
+  socklen_t bound_addr_len = sizeof(bound_addr);
+  if (getsockname(socket_fd, reinterpret_cast<sockaddr *>(&bound_addr), &bound_addr_len) < 0)
+  {
+    const int error_number = errno;
+    close(socket_fd);
+    throw startup_error("bound port discovery", port_, error_number);
+  }
+
+  port_ = ntohs(bound_addr.sin_port);
+
   if (listen(socket_fd, 128) < 0)
   {
     const int error_number = errno;

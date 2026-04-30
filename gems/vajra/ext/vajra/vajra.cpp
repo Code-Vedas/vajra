@@ -16,6 +16,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <cstring>
+#include <string>
 
 namespace
 {
@@ -113,10 +114,11 @@ namespace
     errno = 0;
     char *end = nullptr;
     const long port = std::strtol(port_value, &end, 10);
-    if (errno != 0 || end == port_value || *end != '\0' || port <= 0 || port > 65'535)
+    if (errno != 0 || end == port_value || *end != '\0' || port < 0 || port > 65'535)
     {
       throw std::runtime_error(
-          std::string("invalid VAJRA_PORT: ") + port_value + ". Expected an integer between 1 and 65535.");
+          std::string("invalid VAJRA_PORT: ") + port_value +
+          ". Expected an integer between 0 and 65535. Use 0 to request an ephemeral port.");
     }
 
     return static_cast<int>(port);

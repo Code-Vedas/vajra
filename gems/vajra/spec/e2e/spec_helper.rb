@@ -24,13 +24,6 @@ module VajraE2EHelpers
     ['bundle', 'exec', RbConfig.ruby, '-Ilib', '-e', script]
   end
 
-  def available_listener_port
-    server = TCPServer.new(LISTENER_BIND_HOST, 0)
-    server.addr[1]
-  ensure
-    server&.close
-  end
-
   def vajra_env(port)
     { 'VAJRA_PORT' => port.to_s }
   end
@@ -39,13 +32,14 @@ module VajraE2EHelpers
     "Vajra listening on port #{port}"
   end
 
-  def wait_for_banner(output, port:)
+  def wait_for_banner(output)
     Timeout.timeout(15) do
       loop do
         line = output.gets
         raise 'vajra exited before startup banner' if line.nil?
 
-        return if line.include?(listener_banner(port))
+        match = line.match(/Vajra listening on port (\d+)/)
+        return Integer(match[1]) if match
       end
     end
   end

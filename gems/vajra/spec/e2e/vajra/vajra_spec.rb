@@ -17,17 +17,44 @@ RSpec.describe Vajra, :e2e, :integration do
       response = socket.read
       socket.close
 
-      Process.kill('INT', wait_thread.pid)
-      status = wait_thread.value
+      Process.kill('KILL', wait_thread.pid)
+      wait_thread.value
 
-      { exitstatus: status.exitstatus, response: response }
+      response
     end
   end
 
+  def startup_failure
+    Open3.popen2e(*vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      status = Timeout.timeout(15) { wait_thread.value }
+      { exitstatus: status.exitstatus, output: output.read }
+    end
+  end
+
+  def bind_port
+    TCPServer.new('0.0.0.0', 3000)
+  end
+
   it 'boots and serves a basic HTTP response' do
-    expect(request_response).to match(
-      exitstatus: 0,
-      response: a_string_including('HTTP/1.1 200 OK')
-    )
+    expect(request_response).to include('HTTP/1.1 200 OK')
+  end
+
+  it 'fails startup with actionable bind diagnostics and releases startup resources' do
+    blocking_server = bind_port
+
+    begin
+      failure = startup_failure
+
+      expect(failure).to match(
+        exitstatus: a_value > 0,
+        output: a_string_including('Unable to start Vajra: listener bind failed for port 3000')
+      )
+      expect(failure[:output]).not_to include('Vajra listening on port 3000')
+    ensure
+      blocking_server.close
+    end
+
+    rebound_server = bind_port
+    rebound_server.close
   end
 end

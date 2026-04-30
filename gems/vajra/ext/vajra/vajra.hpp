@@ -10,6 +10,7 @@
 
 namespace VajraNative
 {
+  bool shutdown_requested();
   void start();
   void stop();
 }

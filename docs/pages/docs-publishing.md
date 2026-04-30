@@ -62,7 +62,7 @@ The supported GitHub-hosted publication path is:
 
 1. merge docs changes to the main line
 2. let shared CI validate the docs build
-3. deploy through `.github/workflows/jekyll-gh-pages.yml`
+3. let `.github/workflows/jekyll-gh-pages.yml` publish the site from pushes to `main`
 4. publish to GitHub Pages with `vajra.codevedas.com` as the served hostname
 
 Manual local publication is outside the supported path.

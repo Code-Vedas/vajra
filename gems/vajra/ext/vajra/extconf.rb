@@ -5,9 +5,9 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-require "mkmf"
+require 'mkmf'
 
-append_cppflags("-std=c++17")
-append_cflags("-fvisibility=hidden")
+append_cppflags('-std=c++17')
+append_cflags('-fvisibility=hidden')
 
-create_makefile("vajra/vajra")
+create_makefile('vajra/vajra')

@@ -5,7 +5,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-require_relative "vajra/version"
+require_relative 'vajra/version'
 
 module Vajra
   # Base error type for Ruby-side Vajra failures.
@@ -16,9 +16,9 @@ module Vajra
     module_function
 
     def load!(loader: method(:require_relative))
-      loader.call("vajra/vajra")
+      loader.call('vajra/vajra')
     rescue LoadError => e
-      raise LoadError, <<~MESSAGE
+      raise LoadError, <<~MESSAGE, e.backtrace
         Unable to load the Vajra native extension.
         Run `bundle exec rake compile` from the `gems/vajra/` package directory and retry.
         Original error: #{e.message}

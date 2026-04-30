@@ -6,5 +6,5 @@
 # LICENSE file in the root directory of this source tree.
 
 module Vajra
-  VERSION = "0.1.0"
+  VERSION = '0.1.0'
 end

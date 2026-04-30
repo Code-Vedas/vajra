@@ -2,16 +2,16 @@
   "folders": [
     {
       "name": "docs",
-      "path": "docs",
+      "path": "docs"
     },
     {
       "name": "vajra",
-      "path": "vajra",
+      "path": "gems/vajra"
     },
     {
       "name": "root",
-      "path": ".",
-    },
+      "path": "."
+    }
   ],
   "settings": {
     "editor.formatOnSave": true,
@@ -23,10 +23,10 @@
       "*.ru": "ruby",
       "*.erb": "erb",
       "*.arb": "json",
-      "*.rb": "ruby",
+      "*.rb": "ruby"
     },
     "emmet.includeLanguages": {
-      "erb": "html",
+      "erb": "html"
     },
     "rubyLsp": {
       "enabledFeatures": {
@@ -47,20 +47,20 @@
         "definition": true,
         "workspaceSymbol": true,
         "signatureHelp": true,
-        "typeHierarchy": true,
+        "typeHierarchy": true
       },
       "erbSupport": true,
       "featureFlags": {
-        "all": true,
+        "all": true
       },
       "sigOpacityLevel": "1",
       "formatter": "auto",
       "addonSettings": {
         "Ruby LSP RSpec": {
           "enabled": true,
-          "debug": true,
-        },
-      },
+          "debug": true
+        }
+      }
     },
 
     "[ruby]": {
@@ -73,17 +73,17 @@
       "files.insertFinalNewline": true,
       "files.trimFinalNewlines": true,
       "editor.rulers": [120],
-      "editor.semanticHighlighting.enabled": true,
+      "editor.semanticHighlighting.enabled": true
     },
     "[erb]": {
       "editor.formatOnSave": true,
       "editor.defaultFormatter": "elia.erb-formatter",
-      "editor.formatOnType": true,
+      "editor.formatOnType": true
     },
     "[gemfile]": {
-      "editor.formatOnSave": true,
+      "editor.formatOnSave": true
     },
     "erb-formatter.commandPath": "wrapped-erb-formatter",
-    "erb-formatter.lineLength": 160,
-  },
+    "erb-formatter.lineLength": 160
+  }
 }

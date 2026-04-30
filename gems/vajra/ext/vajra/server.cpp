@@ -4,6 +4,7 @@
 // LICENSE file in the root directory of this source tree.
 
 #include "server.hpp"
+#include "vajra.hpp"
 
 #include <arpa/inet.h>
 #include <cerrno>
@@ -69,7 +70,14 @@ void Server::start()
     if (client_fd < 0)
     {
       if (!running_)
+      {
         break;
+      }
+      if (errno == EINTR && VajraNative::shutdown_requested())
+      {
+        running_ = false;
+        break;
+      }
       std::cerr << "accept failed: " << std::strerror(errno) << std::endl;
       continue;
     }
@@ -88,9 +96,6 @@ void Server::start()
       {
         break;
       }
-
-      std::cout.write(buffer, bytes_read);
-      std::cout.flush();
 
       std::string chunk(buffer, bytes_read);
       if (chunk.find("\r\n\r\n") != std::string::npos)

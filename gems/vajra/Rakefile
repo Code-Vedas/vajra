@@ -5,33 +5,33 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-require "bundler/gem_tasks"
-require "rspec/core/rake_task"
-require "rake/extensiontask"
-require "rubocop/rake_task"
+require 'bundler/gem_tasks'
+require 'rspec/core/rake_task'
+require 'rake/extensiontask'
+require 'rubocop/rake_task'
 
 RSpec::Core::RakeTask.new(:spec)
 RSpec::Core::RakeTask.new(:spec_e2e) do |task|
-  task.pattern = "spec/e2e/**/*_spec.rb"
-  task.rspec_opts = "--tag integration"
+  task.pattern = 'spec/e2e/**/*_spec.rb'
+  task.rspec_opts = '--tag integration'
 end
 RuboCop::RakeTask.new(:rubocop)
 
-desc "Run Reek against the package"
+desc 'Run Reek against the package'
 task :reek do
-  sh "bundle exec reek"
+  sh 'bundle exec reek'
 end
 
-desc "Validate RBS signatures"
+desc 'Validate RBS signatures'
 task :rbs do
-  sh "bundle exec rbs -I sig validate"
+  sh 'bundle exec rbs -I sig validate'
 end
 
-GEMSPEC = Gem::Specification.load("vajra.gemspec")
+GEMSPEC = Gem::Specification.load('vajra.gemspec')
 
-Rake::ExtensionTask.new("vajra", GEMSPEC) do |ext|
-  ext.ext_dir = "ext/vajra"
-  ext.lib_dir = "lib/vajra"
+Rake::ExtensionTask.new('vajra', GEMSPEC) do |ext|
+  ext.ext_dir = 'ext/vajra'
+  ext.lib_dir = 'lib/vajra'
 end
 
 task default: %i[clobber compile spec spec_e2e rubocop reek rbs]

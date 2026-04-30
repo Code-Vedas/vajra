@@ -7,23 +7,37 @@
 
 RSpec.describe Vajra do
   let(:failing_loader) do
-    proc { |_path| raise LoadError, "cannot load such file -- vajra/vajra" }
+    proc { |_path| raise LoadError, 'cannot load such file -- vajra/vajra' }
   end
 
-  it "has a version number" do
+  it 'has a version number' do
     expect(Vajra::VERSION).not_to be_nil
   end
 
-  it "loads the native extension through the canonical require path" do
+  it 'loads the native extension through the canonical require path' do
     expect(
       [described_class.respond_to?(:start), described_class.respond_to?(:stop)]
     ).to eq([true, true])
   end
 
-  it "raises an actionable error when the native extension cannot be loaded" do
+  it 'raises an actionable error when the native extension cannot be loaded' do
     expect { described_class::NativeExtension.load!(loader: failing_loader) }.to raise_error(
       LoadError,
       /bundle exec rake compile/
     )
+  end
+
+  it 'preserves the original load error backtrace' do
+    failing_loader = proc do |_path|
+      raise LoadError, 'cannot load such file -- vajra/vajra'
+    rescue LoadError => e
+      raise e, e.message, ['/tmp/native_extension.rb:12']
+    end
+
+    begin
+      described_class::NativeExtension.load!(loader: failing_loader)
+    rescue LoadError => e
+      expect(e.backtrace.first).to eq('/tmp/native_extension.rb:12')
+    end
   end
 end

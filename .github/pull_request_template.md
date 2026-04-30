@@ -1,16 +1,16 @@
 <!--
 The title of the GitHub must follow the following format:
-[BUG/DOCS/FEATURE/SECURITY/TRANSLATION] Briefly describe the changes made in this pull request.
+<type>: Briefly describe the changes made in this pull request.
 
-If your pull request doesn't fall under any of the above categories, please use the label "OTHER" and describe the changes in the title.
+Supported title prefixes:
+feat:, bugfix:, docs:, release:, chore:, refactor:, test:, style:, ci:, perf:, build:
 
 For example:
-[FEATURE] Add a new feature to the project
-[BUG] Fix bug in the project
-[DOCS] Update documentation
-[SECURITY] Fix security vulnerability
-[TRANSLATION] Translate content into a new language
-[OTHER] Briefly describe the changes made in this pull request
+feat: Add a new feature to the project
+bugfix: Fix bug in the project
+docs: Update documentation
+ci: Update GitHub Actions workflow
+build: Update package build configuration
 
 A CLA is required for this pull request. Please read and sign the CLA at https://cla.developers.codevedas.com
 -->

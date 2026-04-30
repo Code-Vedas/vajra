@@ -6,6 +6,8 @@
 #ifndef SERVER_HPP
 #define SERVER_HPP
 
+#include <atomic>
+
 class Server
 {
 public:
@@ -18,7 +20,7 @@ public:
 private:
   int port_;
   int server_fd_;
-  bool running_;
+  std::atomic<bool> running_;
 
   void setup_socket();
 };

@@ -48,7 +48,7 @@ jobs:
           bundler-cache: true
           working-directory: ${{ github.workspace }}/gems/vajra
       - name: Configure RubyGems Credentials
-        uses: rubygems/configure-rubygems-credentials@720fbb1addb287ba7f0a0416d905217c77cd88ec
+        uses: rubygems/configure-rubygems-credentials@762a4b77c3300434bb57c7ce80b20e36231927aa
       - name: Build and push gem
         working-directory: ${{ github.workspace }}/gems/vajra
         run: |

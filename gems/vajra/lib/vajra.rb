@@ -15,8 +15,8 @@ module Vajra
   module NativeExtension
     module_function
 
-    def load!(loader: method(:require_relative))
-      loader.call('vajra/vajra')
+    def load!(loader: method(:require), extension_path: File.expand_path('vajra/vajra', __dir__))
+      loader.call(extension_path)
     rescue LoadError => e
       raise LoadError, <<~MESSAGE, e.backtrace
         Unable to load the Vajra native extension.

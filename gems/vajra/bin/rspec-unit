@@ -4,7 +4,4 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 set -euo pipefail
-
-ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-
-"${ROOT_DIR}/bin/rspec" --tag ~integration --tag ~e2e "$@"
+bin/rspec --tag ~feature --tag ~integration --tag ~e2e "$@"

@@ -37,13 +37,16 @@ bin/rspec-unit
 bin/rspec-e2e
 bin/rubocop
 bin/reek
+bin/clint
+bin/ctest
 rbs -I sig validate
 bundle exec exe/vajra
 ```
 
 `bin/rspec-unit` runs the committed package spec suite, including the clean
 Ruby/package behavior checks. `bin/rspec-e2e` runs the integration-style boot
-check without coverage.
+check without coverage. `bin/clint` runs the native C++ lint lane, and
+`bin/ctest` builds and runs the native C++ lifecycle tests.
 
 ## Native Extension
 

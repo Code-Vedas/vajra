@@ -162,10 +162,10 @@ RSpec.describe Vajra, :e2e, :integration do
     expect(shutdown[:exitstatus]).to eq(0)
     expect(shutdown[:output]).not_to include('accept failed')
 
-    rebound_server = bind_port
+    rebound_server = bind_port(port: shutdown[:port])
     rebound_server.close
 
-    expect(request_response).to include(
+    expect(request_response(port: shutdown[:port])).to include(
       exitstatus: 0,
       response: a_string_including('HTTP/1.1 200 OK')
     )
@@ -201,17 +201,22 @@ RSpec.describe Vajra, :e2e, :integration do
   end
 
   it 'survives repeated process start stop thrashing and releases the listener every time' do
+    current_port = disposable_listener_port
+
     thrash_cycles.times do
-      expect(request_response).to include(
+      request = request_response(port: current_port)
+
+      expect(request).to include(
         exitstatus: 0,
         response: a_string_including('HTTP/1.1 200 OK')
       )
+      current_port = request[:port]
 
-      shutdown = idle_shutdown
+      shutdown = idle_shutdown(port: current_port)
       expect(shutdown[:exitstatus]).to eq(0)
       expect(shutdown[:output]).not_to include('accept failed')
 
-      rebound_server = bind_port
+      rebound_server = bind_port(port: current_port)
       rebound_server.close
     end
   end

@@ -89,7 +89,6 @@ void Server::close_listener_fd(bool interrupt_accept)
 
 void Server::start()
 {
-  stop_requested_ = false;
   setup_socket();
 
   if (stop_requested_.load())

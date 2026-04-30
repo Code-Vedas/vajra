@@ -99,6 +99,8 @@ jobs:
           CI_RUBY_VERSION: ${{ matrix.ruby_version }}
       - name: Run Reek
         run: scripts/run-reek-all
+      - name: Run C++ lint
+        run: scripts/run-clint-all
       - name: Validate RBS
         run: scripts/run-rbs-all
 
@@ -218,6 +220,8 @@ jobs:
           CI_RUBY_VERSION: ${{ env.RUBY_VERSION }}
       - name: Build package
         run: scripts/run-package-build-all
+      - name: Run native C++ tests
+        run: scripts/run-ctest-all
 
   build_docs:
     name: Build Docs

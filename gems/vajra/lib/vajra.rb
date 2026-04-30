@@ -7,6 +7,7 @@
 
 require_relative 'vajra/version'
 
+# Ruby entrypoint for booting the native Vajra HTTP listener.
 module Vajra
   # Base error type for Ruby-side Vajra failures.
   class Error < StandardError; end
@@ -25,6 +26,27 @@ module Vajra
       MESSAGE
     end
   end
-end
 
-Vajra::NativeExtension.load!
+  NativeExtension.load!
+
+  class << self
+    alias native_start start
+
+    def start
+      puts header
+      native_start
+    end
+
+    def header
+      art = <<~'TEXT'
+        __      __  _         _   ____       _
+        \ \    / / / \       | | |  _ \     / \
+         \ \  / / / _ \   _  | | | |_) |   / _ \
+          \ \/ / / ___ \ | |_| | |  _ <   / ___ \
+           \__/ /_/   \_\ \___/  |_| \_\ /_/   \_\
+      TEXT
+
+      "#{art}\nv#{Vajra::VERSION}\n"
+    end
+  end
+end

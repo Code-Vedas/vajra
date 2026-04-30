@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+set -euo pipefail
+IFS=$'\n\t'
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+RUBY_CPPFLAGS_ARRAY=()
+while IFS= read -r line; do
+  RUBY_CPPFLAGS_ARRAY+=("$line")
+done < <(
+  ruby -rrbconfig -e '
+    require "shellwords"
+    flags = RbConfig::CONFIG.values_at("CPPFLAGS", "CXXFLAGS").compact.flat_map { |value| Shellwords.split(value) }
+    flags.each { |flag| puts flag }
+  '
+)
+RUBY_INCLUDE_FLAGS_ARRAY=()
+while IFS= read -r line; do
+  RUBY_INCLUDE_FLAGS_ARRAY+=("$line")
+done < <(
+  ruby -rrbconfig -e '
+    [RbConfig::CONFIG["rubyhdrdir"], RbConfig::CONFIG["rubyarchhdrdir"]].compact.uniq.each do |dir|
+      puts "-isystem"
+      puts dir
+    end
+  '
+)
+
+COMMON_FLAGS=(
+  -std=c++17
+  -Wall
+  -Wextra
+  -Wpedantic
+  -Werror
+  -fsyntax-only
+)
+
+clang++ \
+  "${COMMON_FLAGS[@]}" \
+  "${RUBY_CPPFLAGS_ARRAY[@]}" \
+  "${RUBY_INCLUDE_FLAGS_ARRAY[@]}" \
+  -I"$ROOT_DIR/ext/vajra" \
+  "$ROOT_DIR/ext/vajra/server.cpp" \
+  "$ROOT_DIR/ext/vajra/vajra.cpp" \
+  "$@"

@@ -1,0 +1,191 @@
+// Copyright Codevedas Inc. 2025-present
+//
+// This source code is licensed under the MIT license found in the
+// LICENSE file in the root directory of this source tree.
+
+#include "server.hpp"
+
+#include <arpa/inet.h>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <exception>
+#include <iostream>
+#include <netinet/in.h>
+#include <stdexcept>
+#include <string>
+#include <sys/socket.h>
+#include <thread>
+#include <unistd.h>
+
+namespace VajraNative
+{
+  bool shutdown_requested()
+  {
+    return false;
+  }
+}
+
+namespace
+{
+  using namespace std::chrono_literals;
+
+  [[noreturn]] void fail(const std::string &message)
+  {
+    throw std::runtime_error(message);
+  }
+
+  int available_port()
+  {
+    const int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+    {
+      fail("socket failed while allocating test port");
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(0);
+
+    if (bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0)
+    {
+      close(fd);
+      fail("bind failed while allocating test port");
+    }
+
+    socklen_t len = sizeof(addr);
+    if (getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len) < 0)
+    {
+      close(fd);
+      fail("getsockname failed while allocating test port");
+    }
+
+    const int port = ntohs(addr.sin_port);
+    close(fd);
+    return port;
+  }
+
+  int connect_to_listener(int port)
+  {
+    const int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+    {
+      fail("socket failed while connecting to test listener");
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    if (connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0)
+    {
+      close(fd);
+      return -1;
+    }
+
+    return fd;
+  }
+
+  void wait_until_listening(int port)
+  {
+    for (int attempt = 0; attempt < 200; ++attempt)
+    {
+      const int fd = connect_to_listener(port);
+      if (fd >= 0)
+      {
+        close(fd);
+        return;
+      }
+
+      std::this_thread::sleep_for(10ms);
+    }
+
+    fail("server did not begin listening in time");
+  }
+
+  void assert_can_rebind(int port)
+  {
+    const int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+    {
+      fail("socket failed while checking port rebind");
+    }
+
+    int opt = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+    {
+      close(fd);
+      fail("setsockopt failed while checking port rebind");
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(port);
+
+    if (bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0)
+    {
+      close(fd);
+      fail("listener port was not released after stop");
+    }
+
+    close(fd);
+  }
+
+  void test_start_and_stop_release_listener()
+  {
+    const int port = available_port();
+    Server server(port);
+    std::exception_ptr server_error;
+
+    std::thread server_thread([&]() {
+      try
+      {
+        server.start();
+      }
+      catch (...)
+      {
+        server_error = std::current_exception();
+      }
+    });
+
+    wait_until_listening(port);
+    server.stop();
+
+    server_thread.join();
+
+    if (server_error)
+    {
+      std::rethrow_exception(server_error);
+    }
+
+    assert_can_rebind(port);
+  }
+
+  void test_stop_before_start_exits_cleanly()
+  {
+    const int port = available_port();
+    Server server(port);
+    server.stop();
+    server.start();
+    assert_can_rebind(port);
+  }
+}
+
+int main()
+{
+  try
+  {
+    test_start_and_stop_release_listener();
+    test_stop_before_start_exits_cleanly();
+  }
+  catch (const std::exception &error)
+  {
+    std::cerr << error.what() << '\n';
+    return EXIT_FAILURE;
+  }
+
+  return EXIT_SUCCESS;
+}

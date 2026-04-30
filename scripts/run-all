@@ -10,8 +10,10 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 "${SCRIPT_DIR}/run-rubocop-all"
 "${SCRIPT_DIR}/run-reek-all"
+"${SCRIPT_DIR}/run-clint-all"
 "${SCRIPT_DIR}/run-rbs-all"
 "${SCRIPT_DIR}/run-rspec-unit-all"
 "${SCRIPT_DIR}/run-rspec-e2e-all"
+"${SCRIPT_DIR}/run-ctest-all"
 "${SCRIPT_DIR}/run-package-build-all"
 "${SCRIPT_DIR}/run-docs-build-all"

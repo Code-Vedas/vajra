@@ -20,6 +20,18 @@ RSpec.describe Vajra do
     ).to eq([true, true])
   end
 
+  it 'builds a versioned ASCII header' do
+    expect(described_class.header).to include('__      __')
+    expect(described_class.header).to include('v0.1.0')
+  end
+
+  it 'prints the header before delegating to the native start entrypoint' do
+    allow(described_class).to receive(:native_start)
+
+    expect { described_class.start }.to output(include('v0.1.0')).to_stdout
+    expect(described_class).to have_received(:native_start)
+  end
+
   it 'raises an actionable error when the native extension cannot be loaded' do
     expect { described_class::NativeExtension.load!(loader: failing_loader) }.to raise_error(
       LoadError,

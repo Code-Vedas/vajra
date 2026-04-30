@@ -25,7 +25,7 @@ module VajraE2EHelpers
   end
 
   def available_listener_port
-    server = TCPServer.new(LISTENER_HOST, 0)
+    server = TCPServer.new(LISTENER_BIND_HOST, 0)
     server.addr[1]
   ensure
     server&.close

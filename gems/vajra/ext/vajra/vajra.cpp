@@ -115,7 +115,8 @@ namespace
     const long port = std::strtol(port_value, &end, 10);
     if (errno != 0 || end == port_value || *end != '\0' || port <= 0 || port > 65'535)
     {
-      throw std::runtime_error(std::string("invalid VAJRA_PORT: ") + port_value);
+      throw std::runtime_error(
+          std::string("invalid VAJRA_PORT: ") + port_value + ". Expected an integer between 1 and 65535.");
     }
 
     return static_cast<int>(port);

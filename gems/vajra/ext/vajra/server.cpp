@@ -110,6 +110,12 @@ void Server::start()
 
   running_ = true;
 
+  if (stop_requested_.load() || server_fd_.load() < 0)
+  {
+    close_listener_fd(false);
+    return;
+  }
+
   std::cout << "Vajra listening on port " << port_ << std::endl;
 
   while (running_)

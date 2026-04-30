@@ -25,11 +25,9 @@ RSpec.describe Vajra do
     expect(described_class.header).to include("v#{described_class::VERSION}")
   end
 
-  it 'prints the header before delegating to the native start entrypoint' do
-    allow(described_class).to receive(:native_start)
-
-    expect { described_class.start }.to output(include("v#{described_class::VERSION}")).to_stdout
-    expect(described_class).to have_received(:native_start)
+  it 'keeps the native start entrypoint public' do
+    expect(described_class).to respond_to(:start)
+    expect(described_class.singleton_methods).not_to include(:native_start)
   end
 
   it 'raises an actionable error when the native extension cannot be loaded' do

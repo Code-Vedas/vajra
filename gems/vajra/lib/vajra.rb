@@ -30,13 +30,6 @@ module Vajra
   NativeExtension.load!
 
   class << self
-    alias native_start start
-
-    def start
-      puts header
-      native_start
-    end
-
     def header
       art = <<~'TEXT'
         __      __  _         _   ____       _

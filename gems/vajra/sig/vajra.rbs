@@ -7,6 +7,6 @@ module Vajra
   VERSION: String
 
   def self.header: () -> String
-  def self.start: () -> untyped
-  def self.stop: () -> untyped
+  def self.start: () -> nil
+  def self.stop: () -> nil
 end

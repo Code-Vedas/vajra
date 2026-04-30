@@ -5,4 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 set -euo pipefail
 
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "${ROOT_DIR}"
+
 bundle exec rspec "$@"

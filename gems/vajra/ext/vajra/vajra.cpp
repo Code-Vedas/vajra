@@ -5,10 +5,12 @@
 
 #include "vajra.hpp"
 #include "ruby.h"
+#include "ruby/thread.h"
 
 #include <csignal>
 #include <cstdlib>
 #include <cerrno>
+#include <exception>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -72,6 +74,28 @@ namespace
     struct sigaction previous_term_action_;
     bool installed_ = false;
   };
+
+  struct ServerStartContext
+  {
+    Server *server;
+    std::exception_ptr error;
+  };
+
+  void *run_server_without_gvl(void *data)
+  {
+    auto *context = static_cast<ServerStartContext *>(data);
+
+    try
+    {
+      context->server->start();
+    }
+    catch (...)
+    {
+      context->error = std::current_exception();
+    }
+
+    return nullptr;
+  }
 
   [[noreturn]] void raise_ruby_runtime_error(const char *prefix, const std::exception &error)
   {
@@ -154,7 +178,12 @@ namespace VajraNative
         server = server_instance.get();
       }
 
-      server->start();
+      ServerStartContext context{server, nullptr};
+      rb_thread_call_without_gvl(run_server_without_gvl, &context, RUBY_UBF_IO, nullptr);
+      if (context.error)
+      {
+        std::rethrow_exception(context.error);
+      }
     }
     catch (...)
     {

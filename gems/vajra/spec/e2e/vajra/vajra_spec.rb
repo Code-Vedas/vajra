@@ -75,6 +75,49 @@ RSpec.describe Vajra, :e2e, :integration do
     end
   end
 
+  def programmatic_shutdown(port: listener_port)
+    script = <<~RUBY
+      require "socket"
+      require "timeout"
+      require "vajra"
+
+      port = Integer(ENV.fetch("VAJRA_PORT"))
+      host = "#{VajraE2EHelpers::LISTENER_HOST}"
+      bind_host = "#{VajraE2EHelpers::LISTENER_BIND_HOST}"
+      Thread.report_on_exception = false
+
+      def listener_ready?(host, port)
+        socket = TCPSocket.new(host, port)
+        socket.close
+        true
+      rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH
+        false
+      end
+
+      server_thread = Thread.new { Vajra.start }
+
+      Timeout.timeout(5) do
+        loop do
+          break if listener_ready?(host, port)
+          sleep 0.01
+        end
+      end
+
+      Vajra.stop
+      Timeout.timeout(5) { server_thread.join }
+
+      rebound_server = TCPServer.new(bind_host, port)
+      rebound_server.close
+    RUBY
+
+    Open3.popen2e(vajra_env(port), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      status = Timeout.timeout(15) { wait_thread.value }
+      { exitstatus: status.exitstatus, output: output.read }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
   def bind_port(port: listener_port)
     TCPServer.new(VajraE2EHelpers::LISTENER_BIND_HOST, port)
   end
@@ -103,6 +146,13 @@ RSpec.describe Vajra, :e2e, :integration do
       exitstatus: 0,
       response: a_string_including('HTTP/1.1 200 OK')
     )
+  end
+
+  it 'supports programmatic Vajra.stop and releases the listener' do
+    shutdown = programmatic_shutdown
+
+    expect(shutdown[:exitstatus]).to eq(0), shutdown[:output]
+    expect(shutdown[:output]).not_to include('accept failed')
   end
 
   it 'fails startup with actionable bind diagnostics and releases startup resources' do

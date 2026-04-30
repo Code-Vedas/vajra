@@ -22,3 +22,5 @@ jobs:
       contents: read
     uses: ./.github/workflows/shared-ci.yml
     secrets: inherit
+    with:
+      upload_coverage: true

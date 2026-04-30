@@ -35,6 +35,27 @@ namespace
     throw std::runtime_error(message);
   }
 
+  bool bind_conflict(const std::exception_ptr &error)
+  {
+    if (!error)
+    {
+      return false;
+    }
+
+    try
+    {
+      std::rethrow_exception(error);
+    }
+    catch (const std::runtime_error &runtime_error)
+    {
+      return std::string(runtime_error.what()).find("Address already in use") != std::string::npos;
+    }
+    catch (...)
+    {
+      return false;
+    }
+  }
+
   int available_port()
   {
     const int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -159,32 +180,55 @@ namespace
 
   void test_start_and_stop_release_listener()
   {
-    const int port = available_port();
-    Server server(port);
-    std::exception_ptr server_error;
+    for (int attempt = 0; attempt < 10; ++attempt)
+    {
+      const int port = available_port();
+      Server server(port);
+      std::exception_ptr server_error;
 
-    std::thread server_thread([&]() {
+      std::thread server_thread([&]() {
+        try
+        {
+          server.start();
+        }
+        catch (...)
+        {
+          server_error = std::current_exception();
+        }
+      });
+
       try
       {
-        server.start();
+        wait_until_listening(port);
+        server.stop();
+        server_thread.join();
+
+        if (server_error)
+        {
+          std::rethrow_exception(server_error);
+        }
+
+        assert_can_rebind(port);
+        return;
       }
       catch (...)
       {
-        server_error = std::current_exception();
+        if (server_thread.joinable())
+        {
+          server.stop();
+          server_thread.join();
+        }
+
+        if (bind_conflict(server_error) && attempt < 9)
+        {
+          continue;
+        }
+
+        throw;
       }
-    });
-
-    wait_until_listening(port);
-    server.stop();
-
-    server_thread.join();
-
-    if (server_error)
-    {
-      std::rethrow_exception(server_error);
     }
 
-    assert_can_rebind(port);
+    fail("server could not obtain a reusable listener port after retries");
   }
 
   void test_stop_before_start_exits_cleanly()

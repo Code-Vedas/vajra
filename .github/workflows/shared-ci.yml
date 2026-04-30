@@ -42,7 +42,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            build-essential clang git libyaml-dev pkg-config
+            build-essential git libyaml-dev pkg-config
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
@@ -80,7 +80,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            build-essential cmake git libyaml-dev pkg-config
+            build-essential clang git libyaml-dev pkg-config
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
@@ -123,7 +123,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            build-essential git libyaml-dev pkg-config
+            build-essential cmake git libyaml-dev pkg-config
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:

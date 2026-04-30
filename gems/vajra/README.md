@@ -48,6 +48,14 @@ Ruby/package behavior checks. `bin/rspec-e2e` runs the integration-style boot
 check without coverage. `bin/clint` runs the native C++ lint lane, and
 `bin/ctest` builds and runs the native C++ lifecycle tests.
 
+## Runtime Configuration
+
+Vajra reads `VAJRA_PORT` at boot to choose the listener port.
+
+- unset defaults to `3000`
+- any integer in the `0..65535` range is accepted
+- `0` asks the OS for an ephemeral port, which Vajra prints in the startup banner
+
 ## Native Extension
 
 The canonical native source tree lives under `ext/vajra/`.

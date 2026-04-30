@@ -88,6 +88,25 @@ namespace
     return fd;
   }
 
+  bool complete_probe_request(int fd)
+  {
+    const char *request =
+        "GET / HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+
+    const ssize_t bytes_sent = send(fd, request, std::strlen(request), 0);
+    if (bytes_sent < 0)
+    {
+      return false;
+    }
+
+    char buffer[4096];
+    const ssize_t bytes_read = recv(fd, buffer, sizeof(buffer), 0);
+    return bytes_read > 0;
+  }
+
   void wait_until_listening(int port)
   {
     for (int attempt = 0; attempt < 200; ++attempt)
@@ -95,8 +114,12 @@ namespace
       const int fd = connect_to_listener(port);
       if (fd >= 0)
       {
+        const bool completed_request = complete_probe_request(fd);
         close(fd);
-        return;
+        if (completed_request)
+        {
+          return;
+        }
       }
 
       std::this_thread::sleep_for(10ms);

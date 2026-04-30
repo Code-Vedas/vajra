@@ -186,7 +186,7 @@ RSpec.describe Vajra, :e2e, :integration do
       failure = startup_failure(port: blocked_port)
 
       expect(failure).to match(
-        exitstatus: a_value > 0,
+        exitstatus: be_positive,
         output: a_string_including(
           "Unable to start Vajra: listener bind failed for port #{blocked_port}"
         )

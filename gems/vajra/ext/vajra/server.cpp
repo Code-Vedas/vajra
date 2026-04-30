@@ -24,7 +24,7 @@ namespace
   }
 }
 
-Server::Server(int port) : port_(port), server_fd_(-1), running_(false) {}
+Server::Server(int port) : port_(port), server_fd_(-1), running_(false), stop_requested_(false) {}
 
 Server::~Server()
 {
@@ -89,7 +89,15 @@ void Server::close_listener_fd(bool interrupt_accept)
 
 void Server::start()
 {
+  stop_requested_ = false;
   setup_socket();
+
+  if (stop_requested_.load())
+  {
+    close_listener_fd(false);
+    return;
+  }
+
   running_ = true;
 
   std::cout << "Vajra listening on port " << port_ << std::endl;
@@ -108,7 +116,7 @@ void Server::start()
     int client_fd = accept(listener_fd, reinterpret_cast<sockaddr *>(&client_addr), &client_len);
     if (client_fd < 0)
     {
-      if (!running_ || VajraNative::shutdown_requested())
+      if (!running_ || stop_requested_.load() || VajraNative::shutdown_requested())
       {
         break;
       }
@@ -155,5 +163,6 @@ void Server::start()
 
 void Server::stop()
 {
+  stop_requested_ = true;
   close_listener_fd(true);
 }

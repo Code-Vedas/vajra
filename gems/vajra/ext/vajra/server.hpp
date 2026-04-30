@@ -21,6 +21,7 @@ private:
   int port_;
   std::atomic<int> server_fd_;
   std::atomic<bool> running_;
+  std::atomic<bool> stop_requested_;
 
   void setup_socket();
   void close_listener_fd(bool interrupt_accept);

@@ -8,6 +8,8 @@
 require_relative '../spec_helper'
 
 RSpec.describe Vajra, :e2e, :integration do
+  let(:listener_port) { available_listener_port }
+
   def wait_for_exit(wait_thread, timeout: 5)
     Timeout.timeout(timeout) { wait_thread.value }
   end
@@ -35,11 +37,11 @@ RSpec.describe Vajra, :e2e, :integration do
     output.close unless output.closed?
   end
 
-  def request_response
-    Open3.popen2e(*vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
-      wait_for_banner(output)
+  def request_response(port: listener_port)
+    Open3.popen2e(vajra_env(port), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      wait_for_banner(output, port: port)
 
-      socket = TCPSocket.new('127.0.0.1', 3000)
+      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, port)
       socket.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
       response = socket.read
       socket.close
@@ -52,9 +54,9 @@ RSpec.describe Vajra, :e2e, :integration do
     end
   end
 
-  def idle_shutdown
-    Open3.popen2e(*vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
-      wait_for_banner(output)
+  def idle_shutdown(port: listener_port)
+    Open3.popen2e(vajra_env(port), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      wait_for_banner(output, port: port)
 
       status = stop_process(wait_thread)
 
@@ -64,8 +66,8 @@ RSpec.describe Vajra, :e2e, :integration do
     end
   end
 
-  def startup_failure
-    Open3.popen2e(*vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+  def startup_failure(port: listener_port)
+    Open3.popen2e(vajra_env(port), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       status = Timeout.timeout(15) { wait_thread.value }
       { exitstatus: status.exitstatus, output: output.read }
     ensure
@@ -73,8 +75,12 @@ RSpec.describe Vajra, :e2e, :integration do
     end
   end
 
-  def bind_port
-    TCPServer.new('0.0.0.0', 3000)
+  def bind_port(port: listener_port)
+    TCPServer.new(VajraE2EHelpers::LISTENER_BIND_HOST, port)
+  end
+
+  def thrash_cycles
+    5
   end
 
   it 'boots and serves a basic HTTP response' do
@@ -101,20 +107,39 @@ RSpec.describe Vajra, :e2e, :integration do
 
   it 'fails startup with actionable bind diagnostics and releases startup resources' do
     blocking_server = bind_port
+    blocked_port = blocking_server.addr[1]
 
     begin
-      failure = startup_failure
+      failure = startup_failure(port: blocked_port)
 
       expect(failure).to match(
         exitstatus: a_value > 0,
-        output: a_string_including('Unable to start Vajra: listener bind failed for port 3000')
+        output: a_string_including(
+          "Unable to start Vajra: listener bind failed for port #{blocked_port}"
+        )
       )
-      expect(failure[:output]).not_to include('Vajra listening on port 3000')
+      expect(failure[:output]).not_to include(listener_banner(blocked_port))
     ensure
       blocking_server.close
     end
 
-    rebound_server = bind_port
+    rebound_server = bind_port(port: blocked_port)
     rebound_server.close
+  end
+
+  it 'survives repeated process start stop thrashing and releases the listener every time' do
+    thrash_cycles.times do
+      expect(request_response).to match(
+        exitstatus: 0,
+        response: a_string_including('HTTP/1.1 200 OK')
+      )
+
+      shutdown = idle_shutdown
+      expect(shutdown[:exitstatus]).to eq(0)
+      expect(shutdown[:output]).not_to include('accept failed')
+
+      rebound_server = bind_port
+      rebound_server.close
+    end
   end
 end

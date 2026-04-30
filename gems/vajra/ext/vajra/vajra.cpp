@@ -7,6 +7,8 @@
 #include "ruby.h"
 
 #include <csignal>
+#include <cstdlib>
+#include <cerrno>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -76,6 +78,25 @@ namespace
     rb_raise(rb_eRuntimeError, "%s: %s", prefix, error.what());
   }
 
+  int configured_listener_port()
+  {
+    const char *port_value = std::getenv("VAJRA_PORT");
+    if (port_value == nullptr || port_value[0] == '\0')
+    {
+      return 3000;
+    }
+
+    errno = 0;
+    char *end = nullptr;
+    const long port = std::strtol(port_value, &end, 10);
+    if (errno != 0 || end == port_value || *end != '\0' || port <= 0 || port > 65'535)
+    {
+      throw std::runtime_error(std::string("invalid VAJRA_PORT: ") + port_value);
+    }
+
+    return static_cast<int>(port);
+  }
+
   VALUE rb_vajra_start(VALUE self)
   {
     (void)self;
@@ -129,7 +150,7 @@ namespace VajraNative
         }
 
         shutting_down = 0;
-        server_instance = std::make_unique<Server>(3000);
+        server_instance = std::make_unique<Server>(configured_listener_port());
         server = server_instance.get();
       }
 

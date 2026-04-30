@@ -52,6 +52,18 @@ RSpec.describe Vajra, :e2e, :integration do
     end
   end
 
+  def idle_shutdown
+    Open3.popen2e(*vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      wait_for_banner(output)
+
+      status = stop_process(wait_thread)
+
+      { exitstatus: status.exitstatus, output: output.read }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
   def startup_failure
     Open3.popen2e(*vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       status = Timeout.timeout(15) { wait_thread.value }
@@ -66,6 +78,21 @@ RSpec.describe Vajra, :e2e, :integration do
   end
 
   it 'boots and serves a basic HTTP response' do
+    expect(request_response).to match(
+      exitstatus: 0,
+      response: a_string_including('HTTP/1.1 200 OK')
+    )
+  end
+
+  it 'shuts down cleanly while idle and releases the listener for immediate restart' do
+    shutdown = idle_shutdown
+
+    expect(shutdown[:exitstatus]).to eq(0)
+    expect(shutdown[:output]).not_to include('accept failed')
+
+    rebound_server = bind_port
+    rebound_server.close
+
     expect(request_response).to match(
       exitstatus: 0,
       response: a_string_including('HTTP/1.1 200 OK')

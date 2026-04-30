@@ -19,10 +19,11 @@ public:
 
 private:
   int port_;
-  int server_fd_;
+  std::atomic<int> server_fd_;
   std::atomic<bool> running_;
 
   void setup_socket();
+  void close_listener_fd(bool interrupt_accept);
 };
 
 #endif

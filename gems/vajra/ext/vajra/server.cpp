@@ -28,10 +28,7 @@ Server::Server(int port) : port_(port), server_fd_(-1), running_(false) {}
 
 Server::~Server()
 {
-  if (server_fd_ >= 0)
-  {
-    close(server_fd_);
-  }
+  close_listener_fd(false);
 }
 
 void Server::setup_socket()
@@ -69,7 +66,25 @@ void Server::setup_socket()
     throw startup_error("listen", port_, error_number);
   }
 
-  server_fd_ = socket_fd;
+  server_fd_.store(socket_fd);
+}
+
+void Server::close_listener_fd(bool interrupt_accept)
+{
+  running_ = false;
+
+  const int listener_fd = server_fd_.exchange(-1);
+  if (listener_fd < 0)
+  {
+    return;
+  }
+
+  if (interrupt_accept)
+  {
+    shutdown(listener_fd, SHUT_RDWR);
+  }
+
+  close(listener_fd);
 }
 
 void Server::start()
@@ -81,19 +96,20 @@ void Server::start()
 
   while (running_)
   {
+    const int listener_fd = server_fd_.load();
+    if (listener_fd < 0)
+    {
+      break;
+    }
+
     sockaddr_in client_addr{};
     socklen_t client_len = sizeof(client_addr);
 
-    int client_fd = accept(server_fd_, reinterpret_cast<sockaddr *>(&client_addr), &client_len);
+    int client_fd = accept(listener_fd, reinterpret_cast<sockaddr *>(&client_addr), &client_len);
     if (client_fd < 0)
     {
-      if (!running_)
+      if (!running_ || VajraNative::shutdown_requested())
       {
-        break;
-      }
-      if (errno == EINTR && VajraNative::shutdown_requested())
-      {
-        running_ = false;
         break;
       }
       std::cerr << "accept failed: " << std::strerror(errno) << std::endl;
@@ -133,15 +149,11 @@ void Server::start()
     send(client_fd, response, std::strlen(response), 0);
     close(client_fd);
   }
+
+  close_listener_fd(false);
 }
 
 void Server::stop()
 {
-  running_ = false;
-
-  if (server_fd_ >= 0)
-  {
-    close(server_fd_);
-    server_fd_ = -1;
-  }
+  close_listener_fd(true);
 }

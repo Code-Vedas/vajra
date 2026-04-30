@@ -14,6 +14,16 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+namespace
+{
+  std::runtime_error startup_error(const char *stage, int port, int error_number)
+  {
+    return std::runtime_error(
+        std::string("listener ") + stage + " failed for port " + std::to_string(port) + ": " +
+        std::strerror(error_number));
+  }
+}
+
 Server::Server(int port) : port_(port), server_fd_(-1), running_(false) {}
 
 Server::~Server()
@@ -26,16 +36,18 @@ Server::~Server()
 
 void Server::setup_socket()
 {
-  server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-  if (server_fd_ < 0)
+  const int socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (socket_fd < 0)
   {
-    throw std::runtime_error(std::string("socket failed: ") + std::strerror(errno));
+    throw startup_error("socket creation", port_, errno);
   }
 
   int opt = 1;
-  if (setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+  if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
   {
-    throw std::runtime_error(std::string("setsockopt failed: ") + std::strerror(errno));
+    const int error_number = errno;
+    close(socket_fd);
+    throw startup_error("socket option setup", port_, error_number);
   }
 
   sockaddr_in addr{};
@@ -43,15 +55,21 @@ void Server::setup_socket()
   addr.sin_addr.s_addr = INADDR_ANY;
   addr.sin_port = htons(port_);
 
-  if (bind(server_fd_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0)
+  if (bind(socket_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0)
   {
-    throw std::runtime_error(std::string("bind failed: ") + std::strerror(errno));
+    const int error_number = errno;
+    close(socket_fd);
+    throw startup_error("bind", port_, error_number);
   }
 
-  if (listen(server_fd_, 128) < 0)
+  if (listen(socket_fd, 128) < 0)
   {
-    throw std::runtime_error(std::string("listen failed: ") + std::strerror(errno));
+    const int error_number = errno;
+    close(socket_fd);
+    throw startup_error("listen", port_, error_number);
   }
+
+  server_fd_ = socket_fd;
 }
 
 void Server::start()

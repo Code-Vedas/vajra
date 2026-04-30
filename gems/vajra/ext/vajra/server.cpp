@@ -100,6 +100,11 @@ void Server::close_listener_fd(bool interrupt_accept)
 
 void Server::start()
 {
+  if (stop_requested_.load())
+  {
+    return;
+  }
+
   setup_socket();
 
   if (stop_requested_.load())

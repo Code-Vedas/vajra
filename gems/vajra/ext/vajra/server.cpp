@@ -11,6 +11,7 @@
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -24,14 +25,11 @@ namespace
   }
 }
 
-Server::Server(int port) : port_(port), server_fd_(-1), running_(false) {}
+Server::Server(int port) : port_(port), server_fd_(-1), running_(false), stop_requested_(false) {}
 
 Server::~Server()
 {
-  if (server_fd_ >= 0)
-  {
-    close(server_fd_);
-  }
+  close_listener_fd(false);
 }
 
 void Server::setup_socket()
@@ -62,6 +60,17 @@ void Server::setup_socket()
     throw startup_error("bind", port_, error_number);
   }
 
+  sockaddr_in bound_addr{};
+  socklen_t bound_addr_len = sizeof(bound_addr);
+  if (getsockname(socket_fd, reinterpret_cast<sockaddr *>(&bound_addr), &bound_addr_len) < 0)
+  {
+    const int error_number = errno;
+    close(socket_fd);
+    throw startup_error("bound port discovery", port_, error_number);
+  }
+
+  port_ = ntohs(bound_addr.sin_port);
+
   if (listen(socket_fd, 128) < 0)
   {
     const int error_number = errno;
@@ -69,31 +78,68 @@ void Server::setup_socket()
     throw startup_error("listen", port_, error_number);
   }
 
-  server_fd_ = socket_fd;
+  server_fd_.store(socket_fd);
+}
+
+void Server::close_listener_fd(bool interrupt_accept)
+{
+  running_ = false;
+
+  const int listener_fd = server_fd_.exchange(-1);
+  if (listener_fd < 0)
+  {
+    return;
+  }
+
+  if (interrupt_accept)
+  {
+    shutdown(listener_fd, SHUT_RDWR);
+  }
+
+  close(listener_fd);
 }
 
 void Server::start()
 {
+  if (stop_requested_.load())
+  {
+    return;
+  }
+
   setup_socket();
+
+  if (stop_requested_.load())
+  {
+    close_listener_fd(false);
+    return;
+  }
+
   running_ = true;
+
+  if (stop_requested_.load() || server_fd_.load() < 0)
+  {
+    close_listener_fd(false);
+    return;
+  }
 
   std::cout << "Vajra listening on port " << port_ << std::endl;
 
   while (running_)
   {
+    const int listener_fd = server_fd_.load();
+    if (listener_fd < 0)
+    {
+      break;
+    }
+
     sockaddr_in client_addr{};
     socklen_t client_len = sizeof(client_addr);
 
-    int client_fd = accept(server_fd_, reinterpret_cast<sockaddr *>(&client_addr), &client_len);
+    int client_fd = accept(listener_fd, reinterpret_cast<sockaddr *>(&client_addr), &client_len);
     if (client_fd < 0)
     {
-      if (!running_)
+      if (!running_ || stop_requested_.load() || VajraNative::shutdown_requested())
       {
-        break;
-      }
-      if (errno == EINTR && VajraNative::shutdown_requested())
-      {
-        running_ = false;
         break;
       }
       std::cerr << "accept failed: " << std::strerror(errno) << std::endl;
@@ -133,15 +179,12 @@ void Server::start()
     send(client_fd, response, std::strlen(response), 0);
     close(client_fd);
   }
+
+  close_listener_fd(false);
 }
 
 void Server::stop()
 {
-  running_ = false;
-
-  if (server_fd_ >= 0)
-  {
-    close(server_fd_);
-    server_fd_ = -1;
-  }
+  stop_requested_ = true;
+  close_listener_fd(true);
 }

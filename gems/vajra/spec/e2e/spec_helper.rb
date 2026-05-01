@@ -13,9 +13,23 @@ require 'timeout'
 
 module VajraE2EHelpers
   PACKAGE_ROOT = File.expand_path('../..', __dir__)
+  LISTENER_HOST = '127.0.0.1'
+  LISTENER_BIND_HOST = '0.0.0.0'
 
   def vajra_command(*args)
     ['bundle', 'exec', RbConfig.ruby, '-Ilib', 'exe/vajra', *args]
+  end
+
+  def inline_ruby_command(script)
+    ['bundle', 'exec', RbConfig.ruby, '-Ilib', '-e', script]
+  end
+
+  def vajra_env(port)
+    { 'VAJRA_PORT' => port.to_s }
+  end
+
+  def listener_banner(port)
+    "Vajra listening on port #{port}"
   end
 
   def wait_for_banner(output)
@@ -24,7 +38,8 @@ module VajraE2EHelpers
         line = output.gets
         raise 'vajra exited before startup banner' if line.nil?
 
-        return if line.include?('Vajra listening on port 3000')
+        match = line.match(/Vajra listening on port (\d+)/)
+        return Integer(match[1]) if match
       end
     end
   end

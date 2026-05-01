@@ -37,13 +37,24 @@ bin/rspec-unit
 bin/rspec-e2e
 bin/rubocop
 bin/reek
+bin/clint
+bin/ctest
 rbs -I sig validate
 bundle exec exe/vajra
 ```
 
 `bin/rspec-unit` runs the committed package spec suite, including the clean
 Ruby/package behavior checks. `bin/rspec-e2e` runs the integration-style boot
-check without coverage.
+check without coverage. `bin/clint` runs the native C++ lint lane, and
+`bin/ctest` builds and runs the native C++ lifecycle tests.
+
+## Runtime Configuration
+
+Vajra reads `VAJRA_PORT` at boot to choose the listener port.
+
+- unset defaults to `3000`
+- any integer in the `0..65535` range is accepted
+- `0` asks the OS for an ephemeral port, which Vajra prints in the startup banner
 
 ## Native Extension
 

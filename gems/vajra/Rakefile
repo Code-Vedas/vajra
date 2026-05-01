@@ -22,6 +22,16 @@ task :reek do
   sh 'bundle exec reek'
 end
 
+desc 'Lint native C++ sources'
+task :clint do
+  sh 'bin/clint'
+end
+
+desc 'Run native C++ tests'
+task :ctest do
+  sh 'bin/ctest'
+end
+
 desc 'Validate RBS signatures'
 task :rbs do
   sh 'bundle exec rbs -I sig validate'
@@ -34,4 +44,4 @@ Rake::ExtensionTask.new('vajra', GEMSPEC) do |ext|
   ext.lib_dir = 'lib/vajra'
 end
 
-task default: %i[clobber compile spec spec_e2e rubocop reek rbs]
+task default: %i[clobber compile spec spec_e2e rubocop reek clint ctest rbs]

@@ -227,6 +227,36 @@ RSpec.describe Vajra, :e2e, :integration do
     end
   end
 
+  def request_with_body_result(env:, body:)
+    Open3.popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      selected_port = wait_for_banner(output)
+
+      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+      socket.write(
+        "POST / HTTP/1.1\r\n" \
+        "Host: localhost\r\n" \
+        "Content-Length: #{body.bytesize}\r\n" \
+        "Connection: close\r\n\r\n" \
+        "#{body}"
+      )
+      response = +''
+      begin
+        loop do
+          response << socket.readpartial(4096)
+        end
+      rescue EOFError, Errno::ECONNRESET
+        nil
+      end
+      socket.close
+
+      status = stop_process(wait_thread)
+
+      { exitstatus: status.exitstatus, response:, output: output.read, port: selected_port }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
   def thrash_cycles
     5
   end
@@ -363,6 +393,21 @@ RSpec.describe Vajra, :e2e, :integration do
     expect(result[:exitstatus]).to eq(0)
     expect(result[:response]).to eq('')
     expect(result[:output]).to include('request parsing failed: request head exceeds maximum size')
+  end
+
+  it 'accepts a request when only bytes after the header boundary exceed the configured limit' do
+    body = 'b' * 4096
+    result = request_with_body_result(
+      env: {
+        'VAJRA_PORT' => disposable_listener_port.to_s,
+        'VAJRA_MAX_REQUEST_HEAD_BYTES' => '128'
+      },
+      body:
+    )
+
+    expect(result[:exitstatus]).to eq(0)
+    expect(result[:response]).to include('HTTP/1.1 200 OK')
+    expect(result[:output]).not_to include('request head exceeds maximum size')
   end
 
   it 'survives repeated process start stop thrashing and releases the listener every time' do

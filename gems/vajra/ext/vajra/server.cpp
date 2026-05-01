@@ -262,17 +262,24 @@ void Server::start()
       }
 
       request_head.append(buffer, bytes_read);
-      if (request_head.size() > max_request_head_bytes_)
-      {
-        std::cerr << "request parsing failed: request head exceeds maximum size" << std::endl;
-        break;
-      }
-
       const std::size_t header_boundary = request_head.find(kHeaderBoundary);
       if (header_boundary != std::string::npos)
       {
-        request_head.resize(header_boundary + std::strlen(kHeaderBoundary));
+        const std::size_t request_head_bytes = header_boundary + std::strlen(kHeaderBoundary);
+        if (request_head_bytes > max_request_head_bytes_)
+        {
+          std::cerr << "request parsing failed: request head exceeds maximum size" << std::endl;
+          break;
+        }
+
+        request_head.resize(request_head_bytes);
         request_complete = true;
+        break;
+      }
+
+      if (request_head.size() > max_request_head_bytes_)
+      {
+        std::cerr << "request parsing failed: request head exceeds maximum size" << std::endl;
         break;
       }
     }

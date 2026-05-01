@@ -7,6 +7,7 @@
 #define SERVER_HPP
 
 #include <atomic>
+#include <cstddef>
 #include <string>
 #include <vector>
 

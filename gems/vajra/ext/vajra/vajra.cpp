@@ -189,11 +189,11 @@ namespace
 
   RuntimeConfig configured_runtime(VALUE options)
   {
-    const long ruby_port = configured_integer_from_ruby(options, id_port, "start port", 3000, 0, 65'535);
+    const long ruby_port = configured_integer_from_ruby(options, id_port, "port option", 3000, 0, 65'535);
     const long ruby_max_request_head_bytes = configured_integer_from_ruby(
         options,
         id_max_request_head_bytes,
-        "start max_request_head_bytes",
+        "max_request_head_bytes option",
         static_cast<long>(kDefaultMaxRequestHeadBytes),
         1,
         std::numeric_limits<int>::max());

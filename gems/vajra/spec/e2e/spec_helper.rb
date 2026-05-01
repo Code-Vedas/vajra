@@ -25,7 +25,10 @@ module VajraE2EHelpers
   end
 
   def vajra_env(port: nil, max_request_head_bytes: nil)
-    {}.tap do |env|
+    {
+      'VAJRA_PORT' => nil,
+      'VAJRA_MAX_REQUEST_HEAD_BYTES' => nil
+    }.tap do |env|
       env['VAJRA_PORT'] = port.to_s unless port.nil?
       env['VAJRA_MAX_REQUEST_HEAD_BYTES'] = max_request_head_bytes.to_s unless max_request_head_bytes.nil?
     end

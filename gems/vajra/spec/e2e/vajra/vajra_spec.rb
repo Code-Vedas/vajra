@@ -111,6 +111,15 @@ RSpec.describe Vajra, :e2e, :integration do
     end
   end
 
+  def startup_failure_with_inline_start(env)
+    Open3.popen2e(env, *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      status = Timeout.timeout(15) { wait_thread.value }
+      { exitstatus: status.exitstatus, output: output.read }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
   def inline_start_command
     inline_ruby_command(<<~RUBY)
       require "vajra"
@@ -294,6 +303,16 @@ RSpec.describe Vajra, :e2e, :integration do
       )
     )
     expect(failure[:output]).to include('Expected an integer between 1 and 2147483647')
+  end
+
+  it 'fails startup with actionable Ruby option validation errors' do
+    failure = startup_failure_with_inline_start('RUBY_PORT' => '-1')
+
+    expect(failure).to match(
+      exitstatus: be_positive,
+      output: a_string_including('Unable to start Vajra: invalid port option: -1')
+    )
+    expect(failure[:output]).to include('Expected an integer between 0 and 65535')
   end
 
   it 'lets Ruby configure the listener port when VAJRA_PORT is unset' do

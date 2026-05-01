@@ -63,7 +63,7 @@ Environment variables take precedence when both are present.
   - Ruby: `Vajra.start(max_request_head_bytes: 32768)`
   - env: `VAJRA_MAX_REQUEST_HEAD_BYTES`
   - default: `16384` (`16 KiB`)
-  - accepted range: integers greater than `0`
+  - accepted range: `1..2147483647`
 
 ## Native Extension
 

@@ -45,6 +45,12 @@ namespace
     VALUE result;
   };
 
+  struct OptionValidationContext
+  {
+    bool valid;
+    std::string invalid_option_name;
+  };
+
   void handle_signal(int sig)
   {
     if (sig == SIGINT || sig == SIGTERM)
@@ -161,6 +167,27 @@ namespace
     const VALUE hash = lookup[0];
     const VALUE key = lookup[1];
     return rb_hash_lookup(hash, key);
+  }
+
+  int validate_start_option_key(VALUE key, VALUE, VALUE data)
+  {
+    auto *context = reinterpret_cast<OptionValidationContext *>(data);
+    if (!SYMBOL_P(key))
+    {
+      context->valid = false;
+      context->invalid_option_name = "non-symbol keyword";
+      return ST_STOP;
+    }
+
+    const ID key_id = SYM2ID(key);
+    if (key_id == id_port || key_id == id_max_request_head_bytes)
+    {
+      return ST_CONTINUE;
+    }
+
+    context->valid = false;
+    context->invalid_option_name = rb_id2name(key_id);
+    return ST_STOP;
   }
 
   VALUE protected_ruby_call_value(VALUE (*func)(VALUE), VALUE data, const char *failure_context)
@@ -283,8 +310,25 @@ namespace
     return parsed_value;
   }
 
+  void validate_supported_ruby_options(VALUE options)
+  {
+    if (NIL_P(options))
+    {
+      return;
+    }
+
+    OptionValidationContext context{true, ""};
+    rb_hash_foreach(options, validate_start_option_key, reinterpret_cast<VALUE>(&context));
+    if (!context.valid)
+    {
+      throw std::runtime_error("unknown start option: " + context.invalid_option_name);
+    }
+  }
+
   RuntimeConfig configured_runtime(VALUE options)
   {
+    validate_supported_ruby_options(options);
+
     const long ruby_port = configured_integer_from_ruby(options, id_port, "port option", 3000, 0, 65'535);
     const long ruby_max_request_head_bytes = configured_integer_from_ruby(
         options,

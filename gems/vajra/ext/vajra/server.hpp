@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstddef>
 #include "listener/listener_socket.hpp"
+#include "request/request_head_error.hpp"
 #include "request/request_processor.hpp"
 
 namespace Vajra

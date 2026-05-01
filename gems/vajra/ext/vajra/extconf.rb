@@ -21,7 +21,7 @@ $VPATH.concat(
     .map { |directory| "$(srcdir)/#{directory}" }
 )
 
-$srcs = source_files.map { |path| File.expand_path(path, __dir__) }
+$srcs = source_files
 # rubocop:enable Style/GlobalVars
 
 create_makefile('vajra/vajra')

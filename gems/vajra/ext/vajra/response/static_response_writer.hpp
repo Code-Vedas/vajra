@@ -20,6 +20,7 @@ namespace Vajra
       void log_request_head_error(const Vajra::request::HeadError &error) const;
 
     private:
+      void suppress_sigpipe(int client_fd) const;
       bool send_response_message(int client_fd, const char *response) const;
       const char *request_head_failure_label(Vajra::request::HeadFailureKind kind) const;
       const char *request_head_failure_response(Vajra::request::HeadFailureKind kind) const;

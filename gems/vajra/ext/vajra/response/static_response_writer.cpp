@@ -33,6 +33,12 @@ namespace
       "Connection: close\r\n"
       "\r\n"
       "OK";
+
+#ifdef MSG_NOSIGNAL
+  constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+  constexpr int kSendFlags = 0;
+#endif
 }
 
 bool Vajra::response::StaticResponseWriter::send_success_response(int client_fd) const
@@ -55,11 +61,13 @@ void Vajra::response::StaticResponseWriter::log_request_head_error(const Vajra::
 
 bool Vajra::response::StaticResponseWriter::send_response_message(int client_fd, const char *response) const
 {
+  suppress_sigpipe(client_fd);
+
   const std::size_t response_length = std::strlen(response);
   std::size_t bytes_sent = 0;
   while (bytes_sent < response_length)
   {
-    const ssize_t sent = send(client_fd, response + bytes_sent, response_length - bytes_sent, 0);
+    const ssize_t sent = send(client_fd, response + bytes_sent, response_length - bytes_sent, kSendFlags);
     if (sent < 0)
     {
       std::cerr << "send failed: " << std::strerror(errno) << std::endl;
@@ -70,6 +78,19 @@ bool Vajra::response::StaticResponseWriter::send_response_message(int client_fd,
   }
 
   return true;
+}
+
+void Vajra::response::StaticResponseWriter::suppress_sigpipe(int client_fd) const
+{
+#ifdef SO_NOSIGPIPE
+  int opt = 1;
+  if (setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt)) < 0)
+  {
+    std::cerr << "setsockopt(SO_NOSIGPIPE) failed: " << std::strerror(errno) << std::endl;
+  }
+#else
+  (void)client_fd;
+#endif
 }
 
 const char *Vajra::response::StaticResponseWriter::request_head_failure_label(

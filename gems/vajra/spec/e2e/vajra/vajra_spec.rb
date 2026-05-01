@@ -89,6 +89,19 @@ RSpec.describe Vajra, :e2e, :integration do
     end
   end
 
+  def startup_failure_with_env(port_value)
+    Open3.popen2e(
+      { 'VAJRA_PORT' => port_value },
+      *vajra_command,
+      chdir: VajraE2EHelpers::PACKAGE_ROOT
+    ) do |_stdin, output, wait_thread|
+      status = Timeout.timeout(15) { wait_thread.value }
+      { exitstatus: status.exitstatus, output: output.read }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
   def programmatic_shutdown(max_attempts: 3)
     script = <<~RUBY
       require "socket"
@@ -198,6 +211,17 @@ RSpec.describe Vajra, :e2e, :integration do
 
     rebound_server = bind_port(port: blocked_port)
     rebound_server.close
+  end
+
+  it 'fails startup with actionable VAJRA_PORT validation errors' do
+    failure = startup_failure_with_env('not-a-port')
+
+    expect(failure).to match(
+      exitstatus: be_positive,
+      output: a_string_including('Unable to start Vajra: invalid VAJRA_PORT: not-a-port')
+    )
+    expect(failure[:output]).to include('Expected an integer between 0 and 65535')
+    expect(failure[:output]).to include('Use 0 to request an ephemeral port')
   end
 
   it 'survives repeated process start stop thrashing and releases the listener every time' do

@@ -4,6 +4,7 @@
 // LICENSE file in the root directory of this source tree.
 
 #include "server.hpp"
+#include "vajra.hpp"
 
 #include <arpa/inet.h>
 #include <chrono>

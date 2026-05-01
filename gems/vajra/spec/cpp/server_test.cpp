@@ -184,7 +184,7 @@ namespace
     for (int attempt = 0; attempt < 10; ++attempt)
     {
       const int port = available_port();
-      Server server(port);
+      Server server(port, kDefaultMaxRequestHeadBytes);
       std::exception_ptr server_error;
 
       std::thread server_thread([&]() {
@@ -235,7 +235,7 @@ namespace
   void test_stop_before_start_exits_cleanly()
   {
     const int port = available_port();
-    Server server(port);
+    Server server(port, kDefaultMaxRequestHeadBytes);
     server.stop();
     server.start();
     assert_can_rebind(port);
@@ -281,64 +281,52 @@ namespace
     }
   }
 
-  void test_parse_request_head_rejects_malformed_request_line()
+  void expect_parse_error_contains(const std::string &request_head, const std::string &expected_message)
   {
     try
     {
-      (void)parse_request_head(
-          "GET /only-two-parts\r\n"
-          "Host: example.test\r\n"
-          "\r\n");
+      (void)parse_request_head(request_head);
     }
     catch (const std::runtime_error &error)
     {
-      if (std::string(error.what()).find("invalid request line") != std::string::npos)
+      if (std::string(error.what()).find(expected_message) != std::string::npos)
       {
         return;
       }
+
+      fail(
+          "unexpected parse error. expected message containing \"" + expected_message + "\", got: " +
+          error.what());
     }
 
-    fail("malformed request line was not rejected");
+    fail("request head was not rejected");
+  }
+
+  void test_parse_request_head_rejects_malformed_request_line()
+  {
+    expect_parse_error_contains(
+        "GET /only-two-parts\r\n"
+        "Host: example.test\r\n"
+        "\r\n",
+        "invalid request line");
   }
 
   void test_parse_request_head_rejects_invalid_header_line()
   {
-    try
-    {
-      (void)parse_request_head(
-          "GET / HTTP/1.1\r\n"
-          "Host example.test\r\n"
-          "\r\n");
-    }
-    catch (const std::runtime_error &error)
-    {
-      if (std::string(error.what()).find("invalid header line") != std::string::npos)
-      {
-        return;
-      }
-    }
-
-    fail("invalid header line was not rejected");
+    expect_parse_error_contains(
+        "GET / HTTP/1.1\r\n"
+        "Host example.test\r\n"
+        "\r\n",
+        "invalid header line");
   }
 
   void test_parse_request_head_rejects_invalid_http_version()
   {
-    try
-    {
-      (void)parse_request_head(
-          "GET / HTTP/2.0\r\n"
-          "Host: example.test\r\n"
-          "\r\n");
-    }
-    catch (const std::runtime_error &error)
-    {
-      if (std::string(error.what()).find("invalid HTTP version") != std::string::npos)
-      {
-        return;
-      }
-    }
-
-    fail("invalid HTTP version was not rejected");
+    expect_parse_error_contains(
+        "GET / HTTP/2.0\r\n"
+        "Host: example.test\r\n"
+        "\r\n",
+        "invalid HTTP version");
   }
 }
 

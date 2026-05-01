@@ -11,7 +11,7 @@
 namespace VajraNative
 {
   bool shutdown_requested();
-  void start();
+  void start(int port = 3000, std::size_t max_request_head_bytes = kDefaultMaxRequestHeadBytes);
   void stop();
 }
 

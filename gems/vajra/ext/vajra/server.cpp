@@ -116,7 +116,14 @@ ParsedRequest parse_request_head(const std::string &request_head)
   throw parse_error("missing header terminator");
 }
 
-Server::Server(int port) : port_(port), server_fd_(-1), running_(false), stop_requested_(false) {}
+Server::Server(int port, std::size_t max_request_head_bytes)
+    : port_(port),
+      max_request_head_bytes_(max_request_head_bytes),
+      server_fd_(-1),
+      running_(false),
+      stop_requested_(false)
+{
+}
 
 Server::~Server()
 {
@@ -255,6 +262,12 @@ void Server::start()
       }
 
       request_head.append(buffer, bytes_read);
+      if (request_head.size() > max_request_head_bytes_)
+      {
+        std::cerr << "request parsing failed: request head exceeds maximum size" << std::endl;
+        break;
+      }
+
       const std::size_t header_boundary = request_head.find(kHeaderBoundary);
       if (header_boundary != std::string::npos)
       {

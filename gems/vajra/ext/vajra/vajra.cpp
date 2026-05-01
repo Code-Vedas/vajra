@@ -14,6 +14,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <limits>
 #include <stdexcept>
 #include <cstring>
 #include <string>
@@ -23,6 +24,14 @@ namespace
   volatile std::sig_atomic_t shutting_down = 0;
   std::mutex server_mutex;
   std::unique_ptr<Server> server_instance;
+  ID id_port;
+  ID id_max_request_head_bytes;
+
+  struct RuntimeConfig
+  {
+    int port;
+    std::size_t max_request_head_bytes;
+  };
 
   void handle_signal(int sig)
   {
@@ -103,33 +112,117 @@ namespace
     rb_raise(rb_eRuntimeError, "%s: %s", prefix, error.what());
   }
 
-  int configured_listener_port()
+  long parse_integer_value(const char *name, const std::string &value, long minimum, long maximum)
   {
-    const char *port_value = std::getenv("VAJRA_PORT");
-    if (port_value == nullptr || port_value[0] == '\0')
-    {
-      return 3000;
-    }
-
     errno = 0;
     char *end = nullptr;
-    const long port = std::strtol(port_value, &end, 10);
-    if (errno != 0 || end == port_value || *end != '\0' || port < 0 || port > 65'535)
+    const long parsed_value = std::strtol(value.c_str(), &end, 10);
+    if (errno != 0 || end == value.c_str() || *end != '\0' || parsed_value < minimum || parsed_value > maximum)
     {
       throw std::runtime_error(
-          std::string("invalid VAJRA_PORT: ") + port_value +
-          ". Expected an integer between 0 and 65535. Use 0 to request an ephemeral port.");
+          "invalid " + std::string(name) + ": " + value + ". Expected an integer between " +
+          std::to_string(minimum) + " and " + std::to_string(maximum) + ".");
     }
 
-    return static_cast<int>(port);
+    return parsed_value;
   }
 
-  VALUE rb_vajra_start(VALUE self)
+  long configured_integer_from_env(
+      const char *name,
+      long default_value,
+      long minimum,
+      long maximum,
+      const char *extra_guidance = nullptr)
+  {
+    const char *env_value = std::getenv(name);
+    if (env_value == nullptr || env_value[0] == '\0')
+    {
+      return default_value;
+    }
+
+    try
+    {
+      return parse_integer_value(name, env_value, minimum, maximum);
+    }
+    catch (const std::runtime_error &error)
+    {
+      if (extra_guidance == nullptr)
+      {
+        throw;
+      }
+
+      throw std::runtime_error(std::string(error.what()) + " " + extra_guidance);
+    }
+  }
+
+  long configured_integer_from_ruby(
+      VALUE options,
+      ID key,
+      const char *name,
+      long default_value,
+      long minimum,
+      long maximum)
+  {
+    if (NIL_P(options))
+    {
+      return default_value;
+    }
+
+    const VALUE option_value = rb_hash_lookup(options, ID2SYM(key));
+    if (NIL_P(option_value))
+    {
+      return default_value;
+    }
+
+    const VALUE integer_value = rb_Integer(option_value);
+    const long parsed_value = NUM2LONG(integer_value);
+    if (parsed_value < minimum || parsed_value > maximum)
+    {
+      VALUE option_string = rb_obj_as_string(option_value);
+      throw std::runtime_error(
+          "invalid " + std::string(name) + ": " + StringValueCStr(option_string) +
+          ". Expected an integer between " + std::to_string(minimum) + " and " + std::to_string(maximum) + ".");
+    }
+
+    return parsed_value;
+  }
+
+  RuntimeConfig configured_runtime(VALUE options)
+  {
+    const long ruby_port = configured_integer_from_ruby(options, id_port, "start port", 3000, 0, 65'535);
+    const long ruby_max_request_head_bytes = configured_integer_from_ruby(
+        options,
+        id_max_request_head_bytes,
+        "start max_request_head_bytes",
+        static_cast<long>(kDefaultMaxRequestHeadBytes),
+        1,
+        std::numeric_limits<int>::max());
+
+    const int port = static_cast<int>(configured_integer_from_env(
+        "VAJRA_PORT",
+        ruby_port,
+        0,
+        65'535,
+        "Use 0 to request an ephemeral port."));
+
+    const std::size_t max_request_head_bytes = static_cast<std::size_t>(configured_integer_from_env(
+        "VAJRA_MAX_REQUEST_HEAD_BYTES",
+        ruby_max_request_head_bytes,
+        1,
+        std::numeric_limits<int>::max()));
+
+    return RuntimeConfig{port, max_request_head_bytes};
+  }
+
+  VALUE rb_vajra_start(int argc, VALUE *argv, VALUE self)
   {
     (void)self;
     try
     {
-      VajraNative::start();
+      VALUE options = Qnil;
+      rb_scan_args(argc, argv, "0:", &options);
+      const RuntimeConfig config = configured_runtime(options);
+      VajraNative::start(config.port, config.max_request_head_bytes);
     }
     catch (const std::exception &error)
     {
@@ -160,7 +253,7 @@ namespace VajraNative
     return shutting_down != 0;
   }
 
-  void start()
+  void start(int port, std::size_t max_request_head_bytes)
   {
     SignalHandlerGuard signal_handler_guard;
     signal_handler_guard.install();
@@ -177,7 +270,7 @@ namespace VajraNative
         }
 
         shutting_down = 0;
-        server_instance = std::make_unique<Server>(configured_listener_port());
+        server_instance = std::make_unique<Server>(port, max_request_head_bytes);
         server = server_instance.get();
       }
 
@@ -213,7 +306,9 @@ namespace VajraNative
 
 extern "C" void Init_vajra()
 {
+  id_port = rb_intern("port");
+  id_max_request_head_bytes = rb_intern("max_request_head_bytes");
   VALUE mVajra = rb_define_module("Vajra");
-  rb_define_singleton_method(mVajra, "start", RUBY_METHOD_FUNC(rb_vajra_start), 0);
+  rb_define_singleton_method(mVajra, "start", RUBY_METHOD_FUNC(rb_vajra_start), -1);
   rb_define_singleton_method(mVajra, "stop", RUBY_METHOD_FUNC(rb_vajra_stop), 0);
 }

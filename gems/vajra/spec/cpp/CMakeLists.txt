@@ -7,9 +7,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Threads REQUIRED)
 
+file(GLOB_RECURSE VAJRA_SERVER_SOURCES CONFIGURE_DEPENDS ../../ext/vajra/*.cpp)
+list(FILTER VAJRA_SERVER_SOURCES EXCLUDE REGEX ".*/vajra\\.cpp$")
+
 add_executable(vajra_server_test
   server_test.cpp
-  ../../ext/vajra/server.cpp
+  ${VAJRA_SERVER_SOURCES}
 )
 
 target_include_directories(vajra_server_test PRIVATE ../../ext/vajra)

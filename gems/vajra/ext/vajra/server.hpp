@@ -8,50 +8,30 @@
 
 #include <atomic>
 #include <cstddef>
-#include <string>
-#include <vector>
+#include "listener/listener_socket.hpp"
+#include "request/request_processor.hpp"
 
-constexpr std::size_t kDefaultMaxRequestHeadBytes = 16 * 1024;
-
-struct ParsedHeader
+namespace Vajra
 {
-  std::string name;
-  std::string value;
-};
+  class Server
+  {
+  public:
+    explicit Server(int port, std::size_t max_request_head_bytes = request::kDefaultMaxRequestHeadBytes);
+    ~Server();
 
-struct ParsedRequestLine
-{
-  std::string method;
-  std::string target;
-  std::string version;
-};
+    void start();
+    void stop();
 
-struct ParsedRequest
-{
-  ParsedRequestLine request_line;
-  std::vector<ParsedHeader> headers;
-};
+  private:
+    int port_;
+    std::atomic<int> server_fd_;
+    std::atomic<bool> running_;
+    std::atomic<bool> stop_requested_;
+    listener::Socket listener_socket_;
+    request::RequestProcessor request_processor_;
 
-ParsedRequest parse_request_head(const std::string &request_head);
-
-class Server
-{
-public:
-  explicit Server(int port, std::size_t max_request_head_bytes = kDefaultMaxRequestHeadBytes);
-  ~Server();
-
-  void start();
-  void stop();
-
-private:
-  int port_;
-  std::size_t max_request_head_bytes_;
-  std::atomic<int> server_fd_;
-  std::atomic<bool> running_;
-  std::atomic<bool> stop_requested_;
-
-  void setup_socket();
-  void close_listener_fd(bool interrupt_accept);
-};
+    void close_listener_fd(bool interrupt_accept);
+  };
+}
 
 #endif

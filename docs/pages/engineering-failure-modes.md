@@ -15,6 +15,7 @@ Today the most important failure boundaries are:
 
 - native extension missing or stale at load time
 - listener bind failure during startup
+- malformed or oversized request heads rejected at the parser boundary
 - request-read or socket-level failure during the runtime path
 - shutdown while the listener is active
 
@@ -24,6 +25,7 @@ The runtime favors explicit failure over hidden fallback:
 
 - package load fails with actionable diagnostics
 - startup fails early when the listener cannot be established
+- malformed request heads are rejected deterministically with bounded error behavior
 - transport, protocol, and platform behavior remains explicit rather than
   silently degraded
 

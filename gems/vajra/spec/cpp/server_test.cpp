@@ -184,7 +184,7 @@ namespace
     for (int attempt = 0; attempt < 10; ++attempt)
     {
       const int port = available_port();
-      Server server(port, kDefaultMaxRequestHeadBytes);
+      Vajra::Server server(port, Vajra::request::kDefaultMaxRequestHeadBytes);
       std::exception_ptr server_error;
 
       std::thread server_thread([&]() {
@@ -235,7 +235,7 @@ namespace
   void test_stop_before_start_exits_cleanly()
   {
     const int port = available_port();
-    Server server(port, kDefaultMaxRequestHeadBytes);
+    Vajra::Server server(port, Vajra::request::kDefaultMaxRequestHeadBytes);
     server.stop();
     server.start();
     assert_can_rebind(port);
@@ -243,7 +243,8 @@ namespace
 
   void test_parse_request_head_parses_request_line_and_headers()
   {
-    const ParsedRequest request = parse_request_head(
+    Vajra::request::RequestHeadParser parser;
+    const Vajra::request::ParsedRequest request = parser.parse(
         "GET /projects?filter=active HTTP/1.1\r\n"
         "Host: example.test\r\n"
         "User-Agent: vajra-test\r\n"
@@ -281,14 +282,23 @@ namespace
     }
   }
 
-  void expect_parse_error_contains(const std::string &request_head, const std::string &expected_message)
+  void expect_parse_error(
+      const std::string &request_head,
+      Vajra::request::HeadFailureKind expected_kind,
+      const std::string &expected_message)
   {
     try
     {
-      (void)parse_request_head(request_head);
+      Vajra::request::RequestHeadParser parser;
+      (void)parser.parse(request_head);
     }
-    catch (const std::runtime_error &error)
+    catch (const Vajra::request::HeadError &error)
     {
+      if (error.kind() != expected_kind)
+      {
+        fail("unexpected parse error kind");
+      }
+
       if (std::string(error.what()).find(expected_message) != std::string::npos)
       {
         return;
@@ -304,29 +314,57 @@ namespace
 
   void test_parse_request_head_rejects_malformed_request_line()
   {
-    expect_parse_error_contains(
+    expect_parse_error(
         "GET /only-two-parts\r\n"
         "Host: example.test\r\n"
         "\r\n",
+        Vajra::request::HeadFailureKind::bad_request,
         "invalid request line");
   }
 
   void test_parse_request_head_rejects_invalid_header_line()
   {
-    expect_parse_error_contains(
+    expect_parse_error(
         "GET / HTTP/1.1\r\n"
         "Host example.test\r\n"
         "\r\n",
+        Vajra::request::HeadFailureKind::bad_request,
         "invalid header line");
   }
 
   void test_parse_request_head_rejects_invalid_http_version()
   {
-    expect_parse_error_contains(
+    expect_parse_error(
         "GET / HTTP/2.0\r\n"
         "Host: example.test\r\n"
         "\r\n",
+        Vajra::request::HeadFailureKind::bad_request,
         "invalid HTTP version");
+  }
+
+  void test_validate_request_head_size_rejects_oversized_request_head()
+  {
+    try
+    {
+      Vajra::request::RequestHeadSizeValidator validator(Vajra::request::kDefaultMaxRequestHeadBytes);
+      validator.validate(Vajra::request::kDefaultMaxRequestHeadBytes + 1);
+    }
+    catch (const Vajra::request::HeadError &error)
+    {
+      if (error.kind() != Vajra::request::HeadFailureKind::header_too_large)
+      {
+        fail("oversized request head used the wrong failure kind");
+      }
+
+      if (std::string(error.what()).find("request head exceeds maximum size") == std::string::npos)
+      {
+        fail("oversized request head used the wrong failure message");
+      }
+
+      return;
+    }
+
+    fail("oversized request head was not rejected");
   }
 }
 
@@ -340,6 +378,7 @@ int main()
     test_parse_request_head_rejects_malformed_request_line();
     test_parse_request_head_rejects_invalid_header_line();
     test_parse_request_head_rejects_invalid_http_version();
+    test_validate_request_head_size_rejects_oversized_request_head();
   }
   catch (const std::exception &error)
   {

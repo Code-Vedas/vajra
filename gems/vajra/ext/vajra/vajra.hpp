@@ -7,11 +7,12 @@
 #define VAJRA_EXTENSION_HPP
 
 #include "server.hpp"
+#include "request/request_head_error.hpp"
 
 namespace VajraNative
 {
   bool shutdown_requested();
-  void start(int port = 3000, std::size_t max_request_head_bytes = kDefaultMaxRequestHeadBytes);
+  void start(int port = 3000, std::size_t max_request_head_bytes = Vajra::request::kDefaultMaxRequestHeadBytes);
   void stop();
 }
 

@@ -10,4 +10,6 @@ gems/vajra/coverage/
 gems/vajra/pkg/
 gems/vajra/tmp/
 gems/vajra/lib/vajra/*.bundle
+gems/vajra/ext/vajra/Makefile
+*.gem
 *.log

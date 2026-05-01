@@ -30,6 +30,11 @@ done < <(
   '
 )
 
+CPP_SOURCES=()
+while IFS= read -r line; do
+  CPP_SOURCES+=("$line")
+done < <(find "$ROOT_DIR/ext/vajra" -type f -name '*.cpp' | sort)
+
 COMMON_FLAGS=(
   -std=c++17
   -Wall
@@ -44,6 +49,5 @@ clang++ \
   "${RUBY_CPPFLAGS_ARRAY[@]}" \
   "${RUBY_INCLUDE_FLAGS_ARRAY[@]}" \
   -I"$ROOT_DIR/ext/vajra" \
-  "$ROOT_DIR/ext/vajra/server.cpp" \
-  "$ROOT_DIR/ext/vajra/vajra.cpp" \
+  "${CPP_SOURCES[@]}" \
   "$@"

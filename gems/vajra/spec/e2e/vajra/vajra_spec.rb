@@ -266,6 +266,38 @@ RSpec.describe Vajra, :e2e, :integration do
     end
   end
 
+  def raw_request_result(request:, port: disposable_listener_port, env: {}, timeout: 15)
+    script = <<~RUBY
+      require "vajra"
+      Thread.report_on_exception = false
+
+      server_thread = Thread.new { Vajra.start }
+      begin
+        STDIN.read
+      ensure
+        Vajra.stop
+        server_thread.join
+      end
+    RUBY
+
+    Open3.popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |stdin, output, wait_thread|
+      selected_port = wait_for_banner(output)
+
+      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+      socket.write(request)
+      socket.close_write
+      response = socket.read
+      socket.close
+
+      stdin.close
+      status = Timeout.timeout(timeout) { wait_thread.value }
+
+      { exitstatus: status.exitstatus, response:, output: output.read, port: selected_port }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
   def thrash_cycles
     5
   end
@@ -275,6 +307,28 @@ RSpec.describe Vajra, :e2e, :integration do
       exitstatus: 0,
       response: a_string_including('HTTP/1.1 200 OK')
     )
+  end
+
+  it 'rejects a malformed request line with 400 Bad Request' do
+    result = raw_request_result(
+      request: "GET /only-two-parts\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+
+    expect(result[:exitstatus]).to eq(0)
+    expect(result[:response]).to include('HTTP/1.1 400 Bad Request')
+    expect(result[:response]).to include('Bad Request')
+    expect(result[:output]).to include('request rejected (400 bad request)')
+    expect(result[:output]).not_to include('HTTP/1.1 200 OK')
+  end
+
+  it 'rejects an invalid HTTP version with 400 Bad Request' do
+    result = raw_request_result(
+      request: "GET / HTTP/2.0\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+
+    expect(result[:exitstatus]).to eq(0)
+    expect(result[:response]).to include('HTTP/1.1 400 Bad Request')
+    expect(result[:response]).to include('Bad Request')
   end
 
   it 'shuts down cleanly while idle and releases the listener for immediate restart' do
@@ -412,8 +466,21 @@ RSpec.describe Vajra, :e2e, :integration do
     )
 
     expect(result[:exitstatus]).to eq(0)
-    expect(result[:response]).to eq('')
-    expect(result[:output]).to include('request parsing failed: request head exceeds maximum size')
+    expect(result[:response]).to include('HTTP/1.1 431 Request Header Fields Too Large')
+    expect(result[:output]).to include('request rejected (431 request header fields too large)')
+  end
+
+  it 'rejects an oversized header section with 431 Request Header Fields Too Large' do
+    result = raw_request_result(
+      port: disposable_listener_port,
+      env: { 'VAJRA_MAX_REQUEST_HEAD_BYTES' => '128' },
+      request: "GET / HTTP/1.1\r\nHost: localhost\r\nX-Oversized: #{'a' * 256}\r\nConnection: close\r\n\r\n"
+    )
+
+    expect(result[:exitstatus]).to eq(0)
+    expect(result[:response]).to include('HTTP/1.1 431 Request Header Fields Too Large')
+    expect(result[:response]).to include('Request Header Fields Too Large')
+    expect(result[:output]).to include('request rejected (431 request header fields too large)')
   end
 
   it 'accepts a request when only bytes after the header boundary exceed the configured limit' do
@@ -429,6 +496,17 @@ RSpec.describe Vajra, :e2e, :integration do
     expect(result[:exitstatus]).to eq(0)
     expect(result[:response]).to include('HTTP/1.1 200 OK')
     expect(result[:output]).not_to include('request head exceeds maximum size')
+  end
+
+  it 'closes an incomplete request without producing a success response' do
+    result = raw_request_result(
+      request: "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
+    )
+
+    expect(result[:exitstatus]).to eq(0)
+    expect(result[:response]).to eq('')
+    expect(result[:output]).not_to include('request rejected (400 bad request)')
+    expect(result[:output]).not_to include('HTTP/1.1 200 OK')
   end
 
   it 'survives repeated process start stop thrashing and releases the listener every time' do

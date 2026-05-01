@@ -91,7 +91,7 @@ RSpec.describe Vajra, :e2e, :integration do
 
   def startup_failure_with_env(port_value)
     Open3.popen2e(
-      { 'VAJRA_PORT' => port_value },
+      vajra_env.merge('VAJRA_PORT' => port_value),
       *vajra_command,
       chdir: VajraE2EHelpers::PACKAGE_ROOT
     ) do |_stdin, output, wait_thread|

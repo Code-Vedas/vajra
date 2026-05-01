@@ -17,12 +17,103 @@
 
 namespace
 {
+  constexpr const char *kHeaderBoundary = "\r\n\r\n";
+
   std::runtime_error startup_error(const char *stage, int port, int error_number)
   {
     return std::runtime_error(
         std::string("listener ") + stage + " failed for port " + std::to_string(port) + ": " +
         std::strerror(error_number));
   }
+
+  std::runtime_error parse_error(const std::string &message)
+  {
+    return std::runtime_error("request parsing failed: " + message);
+  }
+
+  std::string strip_leading_header_whitespace(std::string value)
+  {
+    const std::size_t first_non_whitespace = value.find_first_not_of(" \t");
+    if (first_non_whitespace == std::string::npos)
+    {
+      return "";
+    }
+
+    return value.substr(first_non_whitespace);
+  }
+}
+
+ParsedRequest parse_request_head(const std::string &request_head)
+{
+  const std::size_t request_line_end = request_head.find("\r\n");
+  if (request_line_end == std::string::npos)
+  {
+    throw parse_error("missing request line terminator");
+  }
+
+  const std::string request_line = request_head.substr(0, request_line_end);
+  const std::size_t first_space = request_line.find(' ');
+  if (first_space == std::string::npos || first_space == 0)
+  {
+    throw parse_error("invalid request line");
+  }
+
+  const std::size_t second_space = request_line.find(' ', first_space + 1);
+  if (second_space == std::string::npos || second_space == first_space + 1)
+  {
+    throw parse_error("invalid request line");
+  }
+
+  if (request_line.find(' ', second_space + 1) != std::string::npos)
+  {
+    throw parse_error("invalid request line");
+  }
+
+  ParsedRequest parsed_request{
+      ParsedRequestLine{
+          request_line.substr(0, first_space),
+          request_line.substr(first_space + 1, second_space - first_space - 1),
+          request_line.substr(second_space + 1)},
+      {}};
+
+  if (parsed_request.request_line.version != "HTTP/1.1")
+  {
+    throw parse_error("invalid HTTP version");
+  }
+
+  std::size_t cursor = request_line_end + 2;
+  while (cursor < request_head.size())
+  {
+    const std::size_t line_end = request_head.find("\r\n", cursor);
+    if (line_end == std::string::npos)
+    {
+      throw parse_error("unterminated header line");
+    }
+
+    if (line_end == cursor)
+    {
+      return parsed_request;
+    }
+
+    const std::string header_line = request_head.substr(cursor, line_end - cursor);
+    const std::size_t delimiter = header_line.find(':');
+    if (delimiter == std::string::npos || delimiter == 0)
+    {
+      throw parse_error("invalid header line");
+    }
+
+    const std::string header_name = header_line.substr(0, delimiter);
+    if (header_name.find_first_of(" \t") != std::string::npos)
+    {
+      throw parse_error("invalid header name");
+    }
+
+    parsed_request.headers.push_back(
+        ParsedHeader{header_name, strip_leading_header_whitespace(header_line.substr(delimiter + 1))});
+    cursor = line_end + 2;
+  }
+
+  throw parse_error("missing header terminator");
 }
 
 Server::Server(int port) : port_(port), server_fd_(-1), running_(false), stop_requested_(false) {}
@@ -147,6 +238,8 @@ void Server::start()
     }
 
     char buffer[4096];
+    bool request_complete = false;
+    std::string request_head;
     while (true)
     {
       ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer), 0);
@@ -161,11 +254,31 @@ void Server::start()
         break;
       }
 
-      std::string chunk(buffer, bytes_read);
-      if (chunk.find("\r\n\r\n") != std::string::npos)
+      request_head.append(buffer, bytes_read);
+      const std::size_t header_boundary = request_head.find(kHeaderBoundary);
+      if (header_boundary != std::string::npos)
       {
+        request_head.resize(header_boundary + std::strlen(kHeaderBoundary));
+        request_complete = true;
         break;
       }
+    }
+
+    if (!request_complete)
+    {
+      close(client_fd);
+      continue;
+    }
+
+    try
+    {
+      (void)parse_request_head(request_head);
+    }
+    catch (const std::exception &error)
+    {
+      std::cerr << error.what() << std::endl;
+      close(client_fd);
+      continue;
     }
 
     const char *response =

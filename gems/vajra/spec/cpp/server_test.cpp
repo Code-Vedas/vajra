@@ -240,6 +240,106 @@ namespace
     server.start();
     assert_can_rebind(port);
   }
+
+  void test_parse_request_head_parses_request_line_and_headers()
+  {
+    const ParsedRequest request = parse_request_head(
+        "GET /projects?filter=active HTTP/1.1\r\n"
+        "Host: example.test\r\n"
+        "User-Agent: vajra-test\r\n"
+        "X-Trace-Id: abc123\r\n"
+        "\r\n");
+
+    if (request.request_line.method != "GET")
+    {
+      fail("request method was not parsed correctly");
+    }
+
+    if (request.request_line.target != "/projects?filter=active")
+    {
+      fail("request target was not parsed correctly");
+    }
+
+    if (request.request_line.version != "HTTP/1.1")
+    {
+      fail("request version was not parsed correctly");
+    }
+
+    if (request.headers.size() != 3)
+    {
+      fail("request headers were not parsed correctly");
+    }
+
+    if (request.headers[0].name != "Host" || request.headers[0].value != "example.test")
+    {
+      fail("first request header was not parsed correctly");
+    }
+
+    if (request.headers[2].name != "X-Trace-Id" || request.headers[2].value != "abc123")
+    {
+      fail("later request headers were not parsed correctly");
+    }
+  }
+
+  void test_parse_request_head_rejects_malformed_request_line()
+  {
+    try
+    {
+      (void)parse_request_head(
+          "GET /only-two-parts\r\n"
+          "Host: example.test\r\n"
+          "\r\n");
+    }
+    catch (const std::runtime_error &error)
+    {
+      if (std::string(error.what()).find("invalid request line") != std::string::npos)
+      {
+        return;
+      }
+    }
+
+    fail("malformed request line was not rejected");
+  }
+
+  void test_parse_request_head_rejects_invalid_header_line()
+  {
+    try
+    {
+      (void)parse_request_head(
+          "GET / HTTP/1.1\r\n"
+          "Host example.test\r\n"
+          "\r\n");
+    }
+    catch (const std::runtime_error &error)
+    {
+      if (std::string(error.what()).find("invalid header line") != std::string::npos)
+      {
+        return;
+      }
+    }
+
+    fail("invalid header line was not rejected");
+  }
+
+  void test_parse_request_head_rejects_invalid_http_version()
+  {
+    try
+    {
+      (void)parse_request_head(
+          "GET / HTTP/2.0\r\n"
+          "Host: example.test\r\n"
+          "\r\n");
+    }
+    catch (const std::runtime_error &error)
+    {
+      if (std::string(error.what()).find("invalid HTTP version") != std::string::npos)
+      {
+        return;
+      }
+    }
+
+    fail("invalid HTTP version was not rejected");
+  }
 }
 
 int main()
@@ -248,6 +348,10 @@ int main()
   {
     test_start_and_stop_release_listener();
     test_stop_before_start_exits_cleanly();
+    test_parse_request_head_parses_request_line_and_headers();
+    test_parse_request_head_rejects_malformed_request_line();
+    test_parse_request_head_rejects_invalid_header_line();
+    test_parse_request_head_rejects_invalid_http_version();
   }
   catch (const std::exception &error)
   {

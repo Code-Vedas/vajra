@@ -7,6 +7,29 @@
 #define SERVER_HPP
 
 #include <atomic>
+#include <string>
+#include <vector>
+
+struct ParsedHeader
+{
+  std::string name;
+  std::string value;
+};
+
+struct ParsedRequestLine
+{
+  std::string method;
+  std::string target;
+  std::string version;
+};
+
+struct ParsedRequest
+{
+  ParsedRequestLine request_line;
+  std::vector<ParsedHeader> headers;
+};
+
+ParsedRequest parse_request_head(const std::string &request_head);
 
 class Server
 {

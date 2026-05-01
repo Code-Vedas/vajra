@@ -70,7 +70,18 @@ bool Vajra::response::StaticResponseWriter::send_response_message(int client_fd,
     const ssize_t sent = send(client_fd, response + bytes_sent, response_length - bytes_sent, kSendFlags);
     if (sent < 0)
     {
+      if (errno == EINTR)
+      {
+        continue;
+      }
+
       std::cerr << "send failed: " << std::strerror(errno) << std::endl;
+      return false;
+    }
+
+    if (sent == 0)
+    {
+      std::cerr << "send failed: connection closed before response completed" << std::endl;
       return false;
     }
 

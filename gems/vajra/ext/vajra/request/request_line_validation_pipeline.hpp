@@ -8,7 +8,6 @@
 
 #include "request_head_error.hpp"
 
-#include <array>
 #include <cstddef>
 #include <string>
 
@@ -22,17 +21,10 @@ namespace Vajra
       std::size_t second_space;
     };
 
-    class RequestLineValidationStep
+    class RequestLineStructureValidator
     {
     public:
-      virtual ~RequestLineValidationStep() = default;
-      virtual void validate(const std::string &request_line, const RequestLineTokens &tokens) const = 0;
-    };
-
-    class RequestLineStructureValidator : public RequestLineValidationStep
-    {
-    public:
-      void validate(const std::string &request_line, const RequestLineTokens &tokens) const override
+      void validate(const std::string &request_line, const RequestLineTokens &tokens) const
       {
         if (tokens.first_space == std::string::npos || tokens.first_space == 0)
         {
@@ -51,10 +43,10 @@ namespace Vajra
       }
     };
 
-    class HttpVersionValidator : public RequestLineValidationStep
+    class HttpVersionValidator
     {
     public:
-      void validate(const std::string &request_line, const RequestLineTokens &tokens) const override
+      void validate(const std::string &request_line, const RequestLineTokens &tokens) const
       {
         if (request_line.substr(tokens.second_space + 1) != "HTTP/1.1")
         {
@@ -66,20 +58,15 @@ namespace Vajra
     class RequestLineValidationPipeline
     {
     public:
-      RequestLineValidationPipeline() : steps_{&structure_validator_, &http_version_validator_} {}
-
       void validate(const std::string &request_line, const RequestLineTokens &tokens) const
       {
-        for (const auto *step : steps_)
-        {
-          step->validate(request_line, tokens);
-        }
+        structure_validator_.validate(request_line, tokens);
+        http_version_validator_.validate(request_line, tokens);
       }
 
     private:
       RequestLineStructureValidator structure_validator_;
       HttpVersionValidator http_version_validator_;
-      std::array<const RequestLineValidationStep *, 2> steps_;
     };
   }
 }

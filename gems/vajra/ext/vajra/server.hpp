@@ -7,11 +7,37 @@
 #define SERVER_HPP
 
 #include <atomic>
+#include <cstddef>
+#include <string>
+#include <vector>
+
+constexpr std::size_t kDefaultMaxRequestHeadBytes = 16 * 1024;
+
+struct ParsedHeader
+{
+  std::string name;
+  std::string value;
+};
+
+struct ParsedRequestLine
+{
+  std::string method;
+  std::string target;
+  std::string version;
+};
+
+struct ParsedRequest
+{
+  ParsedRequestLine request_line;
+  std::vector<ParsedHeader> headers;
+};
+
+ParsedRequest parse_request_head(const std::string &request_head);
 
 class Server
 {
 public:
-  explicit Server(int port);
+  explicit Server(int port, std::size_t max_request_head_bytes = kDefaultMaxRequestHeadBytes);
   ~Server();
 
   void start();
@@ -19,6 +45,7 @@ public:
 
 private:
   int port_;
+  std::size_t max_request_head_bytes_;
   std::atomic<int> server_fd_;
   std::atomic<bool> running_;
   std::atomic<bool> stop_requested_;

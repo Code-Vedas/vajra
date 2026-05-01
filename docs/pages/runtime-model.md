@@ -31,7 +31,7 @@ For each accepted connection, the runtime:
 
 1. accepts the client socket
 2. reads request bytes until the header boundary is reached
-3. emits the request bytes to process output for local visibility
+3. parses the request line and headers into explicit native request state
 4. writes a fixed `200 OK` response
 5. closes the client socket
 

@@ -50,11 +50,20 @@ check without coverage. `bin/clint` runs the native C++ lint lane, and
 
 ## Runtime Configuration
 
-Vajra reads `VAJRA_PORT` at boot to choose the listener port.
+Vajra accepts runtime config from both `Vajra.start(...)` and environment variables.
+Environment variables take precedence when both are present.
 
-- unset defaults to `3000`
-- any integer in the `0..65535` range is accepted
-- `0` asks the OS for an ephemeral port, which Vajra prints in the startup banner
+- `port`
+  - Ruby: `Vajra.start(port: 9292)`
+  - env: `VAJRA_PORT`
+  - default: `3000`
+  - accepted range: `0..65535`
+  - `0` asks the OS for an ephemeral port, which Vajra prints in the startup banner
+- `max_request_head_bytes`
+  - Ruby: `Vajra.start(max_request_head_bytes: 32768)`
+  - env: `VAJRA_MAX_REQUEST_HEAD_BYTES`
+  - default: `16384` (`16 KiB`)
+  - accepted range: `1..2147483647`
 
 ## Native Extension
 

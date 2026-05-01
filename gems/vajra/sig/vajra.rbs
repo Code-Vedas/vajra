@@ -7,6 +7,6 @@ module Vajra
   VERSION: String
 
   def self.header: () -> String
-  def self.start: () -> nil
+  def self.start: (?port: Integer, ?max_request_head_bytes: Integer) -> nil
   def self.stop: () -> nil
 end

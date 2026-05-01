@@ -52,7 +52,7 @@ RSpec.describe Vajra, :e2e, :integration do
   end
 
   def request_response(port: disposable_listener_port)
-    Open3.popen2e(vajra_env(port), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    Open3.popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       selected_port = wait_for_banner(output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
@@ -69,7 +69,7 @@ RSpec.describe Vajra, :e2e, :integration do
   end
 
   def idle_shutdown(port: disposable_listener_port)
-    Open3.popen2e(vajra_env(port), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    Open3.popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       selected_port = wait_for_banner(output)
 
       status = stop_process(wait_thread)
@@ -81,7 +81,7 @@ RSpec.describe Vajra, :e2e, :integration do
   end
 
   def startup_failure(port:)
-    Open3.popen2e(vajra_env(port), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    Open3.popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       status = Timeout.timeout(15) { wait_thread.value }
       { exitstatus: status.exitstatus, output: output.read }
     ensure
@@ -91,7 +91,7 @@ RSpec.describe Vajra, :e2e, :integration do
 
   def startup_failure_with_env(port_value)
     Open3.popen2e(
-      { 'VAJRA_PORT' => port_value },
+      vajra_env.merge('VAJRA_PORT' => port_value),
       *vajra_command,
       chdir: VajraE2EHelpers::PACKAGE_ROOT
     ) do |_stdin, output, wait_thread|
@@ -100,6 +100,45 @@ RSpec.describe Vajra, :e2e, :integration do
     ensure
       cleanup_process(wait_thread, output)
     end
+  end
+
+  def startup_failure_with_config_env(env)
+    Open3.popen2e(vajra_env.merge(env), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      status = Timeout.timeout(15) { wait_thread.value }
+      { exitstatus: status.exitstatus, output: output.read }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
+  def startup_failure_with_inline_start(env)
+    Open3.popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      status = Timeout.timeout(15) { wait_thread.value }
+      { exitstatus: status.exitstatus, output: output.read }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
+  def startup_failure_with_inline_script(script, env: {})
+    Open3.popen2e(vajra_env.merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      status = Timeout.timeout(15) { wait_thread.value }
+      { exitstatus: status.exitstatus, output: output.read }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
+  def inline_start_command
+    inline_ruby_command(<<~RUBY)
+      require "vajra"
+      options = {}
+      options[:port] = Integer(ENV["RUBY_PORT"]) if ENV.key?("RUBY_PORT")
+      if ENV.key?("RUBY_MAX_REQUEST_HEAD_BYTES")
+        options[:max_request_head_bytes] = Integer(ENV.fetch("RUBY_MAX_REQUEST_HEAD_BYTES"))
+      end
+      Vajra.start(**options)
+    RUBY
   end
 
   def programmatic_shutdown(max_attempts: 3)
@@ -140,7 +179,7 @@ RSpec.describe Vajra, :e2e, :integration do
     max_attempts.times do |attempt|
       selected_port = candidate_listener_port
       result = Open3.popen2e(
-        vajra_env(selected_port), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT
+        vajra_env(port: selected_port), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT
       ) do |_stdin, output, wait_thread|
         status = Timeout.timeout(15) { wait_thread.value }
         { exitstatus: status.exitstatus, output: output.read }
@@ -156,6 +195,75 @@ RSpec.describe Vajra, :e2e, :integration do
 
   def bind_port(port: disposable_listener_port)
     TCPServer.new(VajraE2EHelpers::LISTENER_BIND_HOST, port)
+  end
+
+  def request_response_from_inline_start(env:, timeout: 15)
+    Open3.popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      selected_port = wait_for_banner(output)
+
+      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+      socket.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+      response = socket.read
+      socket.close
+
+      status = stop_process(wait_thread, timeout:)
+
+      { exitstatus: status.exitstatus, response: response, port: selected_port, output: output.read }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
+  def oversized_request_result(env:, payload_size:)
+    Open3.popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      selected_port = wait_for_banner(output)
+
+      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+      socket.write(
+        "GET / HTTP/1.1\r\n" \
+        "Host: localhost\r\n" \
+        "X-Oversized: #{'a' * payload_size}\r\n" \
+        "Connection: close\r\n\r\n"
+      )
+      response = socket.read
+      socket.close
+
+      status = stop_process(wait_thread)
+
+      { exitstatus: status.exitstatus, response:, output: output.read, port: selected_port }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
+  def request_with_body_result(env:, body:)
+    Open3.popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      selected_port = wait_for_banner(output)
+
+      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+      socket.write(
+        "POST / HTTP/1.1\r\n" \
+        "Host: localhost\r\n" \
+        "Content-Length: #{body.bytesize}\r\n" \
+        "Connection: close\r\n\r\n" \
+        "#{body}"
+      )
+      response = +''
+      begin
+        loop do
+          response << socket.readpartial(4096)
+        end
+      rescue EOFError, Errno::ECONNRESET
+        nil
+      end
+      socket.close
+
+      status = stop_process(wait_thread)
+
+      { exitstatus: status.exitstatus, response:, output: output.read, port: selected_port }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
   end
 
   def thrash_cycles
@@ -222,6 +330,105 @@ RSpec.describe Vajra, :e2e, :integration do
     )
     expect(failure[:output]).to include('Expected an integer between 0 and 65535')
     expect(failure[:output]).to include('Use 0 to request an ephemeral port')
+  end
+
+  it 'fails startup with actionable VAJRA_MAX_REQUEST_HEAD_BYTES validation errors' do
+    failure = startup_failure_with_config_env('VAJRA_MAX_REQUEST_HEAD_BYTES' => '0')
+
+    expect(failure).to match(
+      exitstatus: be_positive,
+      output: a_string_including(
+        'Unable to start Vajra: invalid VAJRA_MAX_REQUEST_HEAD_BYTES: 0'
+      )
+    )
+    expect(failure[:output]).to include('Expected an integer between 1 and 2147483647')
+  end
+
+  it 'fails startup with actionable Ruby option validation errors' do
+    failure = startup_failure_with_inline_start('RUBY_PORT' => '-1')
+
+    expect(failure).to match(
+      exitstatus: be_positive,
+      output: a_string_including('Unable to start Vajra: invalid port option: -1')
+    )
+    expect(failure[:output]).to include('Expected an integer between 0 and 65535')
+  end
+
+  it 'fails startup with actionable unknown Ruby option errors' do
+    failure = startup_failure_with_inline_script(<<~RUBY)
+      require "vajra"
+      Vajra.start(potr: 3000)
+    RUBY
+
+    expect(failure).to match(
+      exitstatus: be_positive,
+      output: a_string_including('Unable to start Vajra: unknown start option: potr')
+    )
+  end
+
+  it 'lets Ruby configure the listener port when VAJRA_PORT is unset' do
+    selected_port = candidate_listener_port
+    request = request_response_from_inline_start(env: { 'RUBY_PORT' => selected_port.to_s })
+
+    expect(request[:exitstatus]).to eq(0)
+    expect(request[:port]).to eq(selected_port)
+    expect(request[:response]).to include('HTTP/1.1 200 OK')
+  end
+
+  it 'prefers VAJRA_PORT over the Ruby port option' do
+    ruby_port = candidate_listener_port
+    env_port = candidate_listener_port
+
+    request = request_response_from_inline_start(
+      env: { 'RUBY_PORT' => ruby_port.to_s, 'VAJRA_PORT' => env_port.to_s }
+    )
+
+    expect(request[:exitstatus]).to eq(0)
+    expect(request[:port]).to eq(env_port)
+    expect(request[:port]).not_to eq(ruby_port)
+  end
+
+  it 'lets Ruby configure max_request_head_bytes when the env variable is unset' do
+    result = oversized_request_result(
+      env: {
+        'VAJRA_PORT' => disposable_listener_port.to_s,
+        'RUBY_MAX_REQUEST_HEAD_BYTES' => (32 * 1024).to_s
+      },
+      payload_size: 20 * 1024
+    )
+
+    expect(result[:exitstatus]).to eq(0)
+    expect(result[:response]).to include('HTTP/1.1 200 OK')
+  end
+
+  it 'prefers VAJRA_MAX_REQUEST_HEAD_BYTES over the Ruby max_request_head_bytes option' do
+    result = oversized_request_result(
+      env: {
+        'VAJRA_PORT' => disposable_listener_port.to_s,
+        'VAJRA_MAX_REQUEST_HEAD_BYTES' => '128',
+        'RUBY_MAX_REQUEST_HEAD_BYTES' => (64 * 1024).to_s
+      },
+      payload_size: 512
+    )
+
+    expect(result[:exitstatus]).to eq(0)
+    expect(result[:response]).to eq('')
+    expect(result[:output]).to include('request parsing failed: request head exceeds maximum size')
+  end
+
+  it 'accepts a request when only bytes after the header boundary exceed the configured limit' do
+    body = 'b' * 4096
+    result = request_with_body_result(
+      env: {
+        'VAJRA_PORT' => disposable_listener_port.to_s,
+        'VAJRA_MAX_REQUEST_HEAD_BYTES' => '128'
+      },
+      body:
+    )
+
+    expect(result[:exitstatus]).to eq(0)
+    expect(result[:response]).to include('HTTP/1.1 200 OK')
+    expect(result[:output]).not_to include('request head exceeds maximum size')
   end
 
   it 'survives repeated process start stop thrashing and releases the listener every time' do

@@ -184,7 +184,7 @@ namespace
     for (int attempt = 0; attempt < 10; ++attempt)
     {
       const int port = available_port();
-      Server server(port);
+      Server server(port, kDefaultMaxRequestHeadBytes);
       std::exception_ptr server_error;
 
       std::thread server_thread([&]() {
@@ -235,10 +235,98 @@ namespace
   void test_stop_before_start_exits_cleanly()
   {
     const int port = available_port();
-    Server server(port);
+    Server server(port, kDefaultMaxRequestHeadBytes);
     server.stop();
     server.start();
     assert_can_rebind(port);
+  }
+
+  void test_parse_request_head_parses_request_line_and_headers()
+  {
+    const ParsedRequest request = parse_request_head(
+        "GET /projects?filter=active HTTP/1.1\r\n"
+        "Host: example.test\r\n"
+        "User-Agent: vajra-test\r\n"
+        "X-Trace-Id: abc123\r\n"
+        "\r\n");
+
+    if (request.request_line.method != "GET")
+    {
+      fail("request method was not parsed correctly");
+    }
+
+    if (request.request_line.target != "/projects?filter=active")
+    {
+      fail("request target was not parsed correctly");
+    }
+
+    if (request.request_line.version != "HTTP/1.1")
+    {
+      fail("request version was not parsed correctly");
+    }
+
+    if (request.headers.size() != 3)
+    {
+      fail("request headers were not parsed correctly");
+    }
+
+    if (request.headers[0].name != "Host" || request.headers[0].value != "example.test")
+    {
+      fail("first request header was not parsed correctly");
+    }
+
+    if (request.headers[2].name != "X-Trace-Id" || request.headers[2].value != "abc123")
+    {
+      fail("later request headers were not parsed correctly");
+    }
+  }
+
+  void expect_parse_error_contains(const std::string &request_head, const std::string &expected_message)
+  {
+    try
+    {
+      (void)parse_request_head(request_head);
+    }
+    catch (const std::runtime_error &error)
+    {
+      if (std::string(error.what()).find(expected_message) != std::string::npos)
+      {
+        return;
+      }
+
+      fail(
+          "unexpected parse error. expected message containing \"" + expected_message + "\", got: " +
+          error.what());
+    }
+
+    fail("request head was not rejected");
+  }
+
+  void test_parse_request_head_rejects_malformed_request_line()
+  {
+    expect_parse_error_contains(
+        "GET /only-two-parts\r\n"
+        "Host: example.test\r\n"
+        "\r\n",
+        "invalid request line");
+  }
+
+  void test_parse_request_head_rejects_invalid_header_line()
+  {
+    expect_parse_error_contains(
+        "GET / HTTP/1.1\r\n"
+        "Host example.test\r\n"
+        "\r\n",
+        "invalid header line");
+  }
+
+  void test_parse_request_head_rejects_invalid_http_version()
+  {
+    expect_parse_error_contains(
+        "GET / HTTP/2.0\r\n"
+        "Host: example.test\r\n"
+        "\r\n",
+        "invalid HTTP version");
   }
 }
 
@@ -248,6 +336,10 @@ int main()
   {
     test_start_and_stop_release_listener();
     test_stop_before_start_exits_cleanly();
+    test_parse_request_head_parses_request_line_and_headers();
+    test_parse_request_head_rejects_malformed_request_line();
+    test_parse_request_head_rejects_invalid_header_line();
+    test_parse_request_head_rejects_invalid_http_version();
   }
   catch (const std::exception &error)
   {

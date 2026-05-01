@@ -97,6 +97,11 @@ void Vajra::Server::start()
         break;
       }
 
+      if (errno == EINTR)
+      {
+        continue;
+      }
+
       std::cerr << "accept failed: " << std::strerror(errno) << std::endl;
       continue;
     }

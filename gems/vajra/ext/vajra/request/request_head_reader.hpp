@@ -28,6 +28,8 @@ namespace Vajra
       HeadReadResult read(int client_fd) const;
 
     private:
+      void configure_read_timeout(int client_fd) const;
+
       RequestHeadSizeValidator request_head_size_validator_;
     };
   }

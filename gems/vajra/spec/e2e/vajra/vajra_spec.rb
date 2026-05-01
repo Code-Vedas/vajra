@@ -103,7 +103,7 @@ RSpec.describe Vajra, :e2e, :integration do
   end
 
   def startup_failure_with_config_env(env)
-    Open3.popen2e(env, *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    Open3.popen2e(vajra_env.merge(env), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       status = Timeout.timeout(15) { wait_thread.value }
       { exitstatus: status.exitstatus, output: output.read }
     ensure
@@ -112,7 +112,7 @@ RSpec.describe Vajra, :e2e, :integration do
   end
 
   def startup_failure_with_inline_start(env)
-    Open3.popen2e(env, *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    Open3.popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       status = Timeout.timeout(15) { wait_thread.value }
       { exitstatus: status.exitstatus, output: output.read }
     ensure
@@ -189,7 +189,7 @@ RSpec.describe Vajra, :e2e, :integration do
   end
 
   def request_response_from_inline_start(env:, timeout: 15)
-    Open3.popen2e(env, *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    Open3.popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       selected_port = wait_for_banner(output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
@@ -206,7 +206,7 @@ RSpec.describe Vajra, :e2e, :integration do
   end
 
   def oversized_request_result(env:, payload_size:)
-    Open3.popen2e(env, *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    Open3.popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       selected_port = wait_for_banner(output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)

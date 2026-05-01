@@ -33,6 +33,18 @@ namespace
     std::size_t max_request_head_bytes;
   };
 
+  struct ProtectedIntegerConversion
+  {
+    VALUE value;
+    VALUE result;
+  };
+
+  struct ProtectedStringConversion
+  {
+    VALUE value;
+    VALUE result;
+  };
+
   void handle_signal(int sig)
   {
     if (sig == SIGINT || sig == SIGTERM)
@@ -112,6 +124,73 @@ namespace
     rb_raise(rb_eRuntimeError, "%s: %s", prefix, error.what());
   }
 
+  VALUE protected_rb_integer(VALUE data)
+  {
+    auto *conversion = reinterpret_cast<ProtectedIntegerConversion *>(data);
+    conversion->result = rb_Integer(conversion->value);
+    return conversion->result;
+  }
+
+  VALUE protected_rb_obj_as_string(VALUE data)
+  {
+    auto *conversion = reinterpret_cast<ProtectedStringConversion *>(data);
+    conversion->result = rb_obj_as_string(conversion->value);
+    return conversion->result;
+  }
+
+  VALUE protected_rb_num2long(VALUE data)
+  {
+    auto *value = reinterpret_cast<VALUE *>(data);
+    return LONG2NUM(NUM2LONG(*value));
+  }
+
+  VALUE protected_format_ruby_exception_message(VALUE)
+  {
+    VALUE exception = rb_errinfo();
+    if (NIL_P(exception))
+    {
+      return rb_str_new_cstr("Ruby exception");
+    }
+
+    return rb_obj_as_string(exception);
+  }
+
+  VALUE protected_rb_hash_lookup(VALUE data)
+  {
+    auto *lookup = reinterpret_cast<VALUE *>(data);
+    const VALUE hash = lookup[0];
+    const VALUE key = lookup[1];
+    return rb_hash_lookup(hash, key);
+  }
+
+  VALUE protected_ruby_call_value(VALUE (*func)(VALUE), VALUE data, const char *failure_context)
+  {
+    int state = 0;
+    const VALUE result = rb_protect(func, data, &state);
+    if (state == 0)
+    {
+      return result;
+    }
+
+    VALUE message = Qnil;
+    int message_state = 0;
+    message = rb_protect(protected_format_ruby_exception_message, Qnil, &message_state);
+    rb_set_errinfo(Qnil);
+
+    if (message_state != 0 || NIL_P(message))
+    {
+      throw std::runtime_error(std::string(failure_context) + ": Ruby exception");
+    }
+
+    throw std::runtime_error(
+        std::string(failure_context) + ": " + StringValueCStr(message));
+  }
+
+  long protected_ruby_call_long(VALUE (*func)(VALUE), VALUE data, const char *failure_context)
+  {
+    return NUM2LONG(protected_ruby_call_value(func, data, failure_context));
+  }
+
   long parse_integer_value(const char *name, const std::string &value, long minimum, long maximum)
   {
     errno = 0;
@@ -168,17 +247,34 @@ namespace
       return default_value;
     }
 
-    const VALUE option_value = rb_hash_lookup(options, ID2SYM(key));
+    const std::string invalid_option_prefix = std::string("invalid ") + name;
+    VALUE lookup_args[2] = {options, ID2SYM(key)};
+    const VALUE option_value = protected_ruby_call_value(
+        protected_rb_hash_lookup,
+        reinterpret_cast<VALUE>(lookup_args),
+        "failed to read Ruby start options");
     if (NIL_P(option_value))
     {
       return default_value;
     }
 
-    const VALUE integer_value = rb_Integer(option_value);
-    const long parsed_value = NUM2LONG(integer_value);
+    ProtectedIntegerConversion integer_conversion{option_value, Qnil};
+    const VALUE integer_value = protected_ruby_call_value(
+        protected_rb_integer,
+        reinterpret_cast<VALUE>(&integer_conversion),
+        invalid_option_prefix.c_str());
+    VALUE integer_value_copy = integer_value;
+    const long parsed_value = protected_ruby_call_long(
+        protected_rb_num2long,
+        reinterpret_cast<VALUE>(&integer_value_copy),
+        invalid_option_prefix.c_str());
     if (parsed_value < minimum || parsed_value > maximum)
     {
-      VALUE option_string = rb_obj_as_string(option_value);
+      ProtectedStringConversion string_conversion{option_value, Qnil};
+      VALUE option_string = protected_ruby_call_value(
+          protected_rb_obj_as_string,
+          reinterpret_cast<VALUE>(&string_conversion),
+          invalid_option_prefix.c_str());
       throw std::runtime_error(
           "invalid " + std::string(name) + ": " + StringValueCStr(option_string) +
           ". Expected an integer between " + std::to_string(minimum) + " and " + std::to_string(maximum) + ".");

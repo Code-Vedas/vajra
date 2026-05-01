@@ -13,16 +13,15 @@ append_cflags('-fvisibility=hidden')
 source_files = Dir.chdir(__dir__) { Dir.glob('**/*.cpp') }
 source_directories = source_files.map { |path| File.dirname(path) }.uniq.sort
 
-TOPLEVEL_BINDING.eval('$VPATH').concat(
+# mkmf exposes these globals as the extension-source configuration surface.
+# rubocop:disable Style/GlobalVars
+$VPATH.concat(
   source_directories
     .reject { |directory| directory == '.' }
     .map { |directory| "$(srcdir)/#{directory}" }
 )
 
-srcs = source_files.map { |path| File.expand_path(path, __dir__) }
-# mkmf expects the $srcs global; bridge the local array into that API surface.
-# rubocop:disable Style/DocumentDynamicEvalDefinition
-TOPLEVEL_BINDING.eval("$srcs = ObjectSpace._id2ref(#{srcs.object_id})", __FILE__, __LINE__)
-# rubocop:enable Style/DocumentDynamicEvalDefinition
+$srcs = source_files.map { |path| File.expand_path(path, __dir__) }
+# rubocop:enable Style/GlobalVars
 
 create_makefile('vajra/vajra')

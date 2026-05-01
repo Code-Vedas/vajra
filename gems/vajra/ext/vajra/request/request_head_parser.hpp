@@ -26,7 +26,7 @@ namespace Vajra
         }
 
         const std::string request_line = request_head.substr(0, request_line_end);
-        const RequestLineTokens tokens{request_line.find(' '), request_line.find(' ', request_line.find(' ') + 1)};
+        const RequestLineTokens tokens = tokenize_request_line(request_line);
         request_line_validators_.validate(request_line, tokens);
 
         ParsedRequest parsed_request{build_request_line(request_line, tokens), {}};
@@ -35,6 +35,15 @@ namespace Vajra
       }
 
     private:
+      RequestLineTokens tokenize_request_line(const std::string &request_line) const
+      {
+        const std::size_t first_space = request_line.find(' ');
+        const std::size_t second_space =
+            first_space == std::string::npos ? std::string::npos : request_line.find(' ', first_space + 1);
+
+        return RequestLineTokens{first_space, second_space};
+      }
+
       ParsedRequestLine build_request_line(const std::string &request_line, const RequestLineTokens &tokens) const
       {
         return ParsedRequestLine{

@@ -12,6 +12,10 @@ append_cflags('-fvisibility=hidden')
 
 source_files = Dir.chdir(__dir__) { Dir.glob('**/*.cpp') }
 source_directories = source_files.map { |path| File.dirname(path) }.uniq.sort
+source_basenames = source_files.map { |path| File.basename(path) }
+duplicate_basenames = source_basenames.tally.select { |_, count| count > 1 }.keys
+
+raise "duplicate native source basenames are not supported: #{duplicate_basenames.join(', ')}" unless duplicate_basenames.empty?
 
 # mkmf exposes these globals as the extension-source configuration surface.
 # rubocop:disable Style/GlobalVars
@@ -21,7 +25,7 @@ $VPATH.concat(
     .map { |directory| "$(srcdir)/#{directory}" }
 )
 
-$srcs = source_files
+$srcs = source_basenames
 # rubocop:enable Style/GlobalVars
 
 create_makefile('vajra/vajra')

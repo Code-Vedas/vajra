@@ -5,8 +5,6 @@
 
 #include "response_serializer.hpp"
 
-#include <cctype>
-
 namespace
 {
   bool ascii_alpha_numeric(unsigned char character)

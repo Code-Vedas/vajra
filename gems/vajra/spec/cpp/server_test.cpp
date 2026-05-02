@@ -723,7 +723,7 @@ namespace
     }
   }
 
-  void test_response_serializer_serializes_empty_body_with_zero_content_length()
+  void test_response_serializer_omits_content_length_for_no_body_status()
   {
     Vajra::response::ResponseSerializer serializer;
     const Vajra::response::Response response{
@@ -1199,7 +1199,7 @@ int main()
     test_validate_request_head_size_rejects_oversized_request_head();
     test_response_serializer_serializes_status_headers_and_body();
     test_response_serializer_allows_empty_reason_phrase();
-    test_response_serializer_serializes_empty_body_with_zero_content_length();
+    test_response_serializer_omits_content_length_for_no_body_status();
     test_response_serializer_preserves_header_order();
     test_response_serializer_rejects_invalid_header_name();
     test_response_serializer_rejects_invalid_header_value();

@@ -6,7 +6,6 @@
 #include "response_serializer.hpp"
 
 #include <cctype>
-#include <string_view>
 
 namespace
 {
@@ -47,6 +46,41 @@ namespace
   {
     return (status_code >= 100 && status_code < 200) || status_code == 204 || status_code == 304;
   }
+
+  bool valid_header_name_character(unsigned char character)
+  {
+    if (character >= 0x80)
+    {
+      return false;
+    }
+
+    if (std::isalnum(character) != 0)
+    {
+      return true;
+    }
+
+    switch (character)
+    {
+    case '!':
+    case '#':
+    case '$':
+    case '%':
+    case '&':
+    case '\'':
+    case '*':
+    case '+':
+    case '-':
+    case '.':
+    case '^':
+    case '_':
+    case '`':
+    case '|':
+    case '~':
+      return true;
+    default:
+      return false;
+    }
+  }
 }
 
 std::string Vajra::response::ResponseSerializer::serialize(const Response &response) const
@@ -62,10 +96,17 @@ std::string Vajra::response::ResponseSerializer::serialize(const Response &respo
     serialized += header.name + ": " + header.value + "\r\n";
   }
 
-  serialized += "Content-Length: " + std::to_string(response.body.size()) + "\r\n";
+  if (!forbids_message_body(response.status.code))
+  {
+    serialized += "Content-Length: " + std::to_string(response.body.size()) + "\r\n";
+  }
   serialized += "Connection: close\r\n";
   serialized += "\r\n";
-  serialized += response.body;
+
+  if (!forbids_message_body(response.status.code))
+  {
+    serialized += response.body;
+  }
 
   return serialized;
 }
@@ -112,7 +153,7 @@ void Vajra::response::ResponseSerializer::validate_header(const Header &header) 
 
   for (const unsigned char character : header.name)
   {
-    if (character == ':' || std::iscntrl(character) != 0 || std::isspace(character) != 0)
+    if (!valid_header_name_character(character))
     {
       throw SerializationError("response header name contains an unsafe character");
     }

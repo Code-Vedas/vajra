@@ -717,9 +717,14 @@ namespace
         ""};
 
     const std::string serialized = serializer.serialize(response);
-    if (serialized.find("Content-Length: 0\r\n") == std::string::npos)
+    if (serialized.find("Content-Length:") != std::string::npos)
     {
-      fail("response serializer did not write a zero content length for an empty body");
+      fail("no-body statuses must not emit content length framing");
+    }
+
+    if (serialized.find("Connection: close\r\n\r\n") == std::string::npos)
+    {
+      fail("no-body statuses did not terminate headers correctly");
     }
   }
 
@@ -779,6 +784,20 @@ namespace
         Vajra::response::Response{
             Vajra::response::Status{200, "OK"},
             {Vajra::response::Header{"Bad Header", "value"}},
+            "OK"},
+        "response header name contains an unsafe character");
+
+    expect_serialization_error(
+        Vajra::response::Response{
+            Vajra::response::Status{200, "OK"},
+            {Vajra::response::Header{"X(Header)", "value"}},
+            "OK"},
+        "response header name contains an unsafe character");
+
+    expect_serialization_error(
+        Vajra::response::Response{
+            Vajra::response::Status{200, "OK"},
+            {Vajra::response::Header{std::string("X-\xFF", 3), "value"}},
             "OK"},
         "response header name contains an unsafe character");
   }
@@ -860,14 +879,19 @@ namespace
             {Vajra::response::Header{"Content-Type", "text/plain"}},
             ""});
 
-    if (serialized.find("Content-Length: 0\r\n") == std::string::npos)
+    if (serialized.find("Content-Length:") != std::string::npos)
     {
-      fail("no-body statuses must emit a zero content length");
+      fail("no-body statuses must not emit content length framing");
     }
 
     if (serialized.find("\r\n\r\n") == std::string::npos)
     {
       fail("no-body status response did not terminate headers correctly");
+    }
+
+    if (serialized.find("\r\n\r\nNot Modified") != std::string::npos)
+    {
+      fail("no-body statuses must not serialize a payload");
     }
   }
 

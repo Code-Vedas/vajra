@@ -10,6 +10,8 @@
 #include "request_head_reader.hpp"
 #include "response/static_response_writer.hpp"
 
+#include <cstddef>
+
 namespace Vajra
 {
   namespace request

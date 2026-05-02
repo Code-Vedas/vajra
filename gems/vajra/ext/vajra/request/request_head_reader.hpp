@@ -8,6 +8,7 @@
 
 #include "request_head_size_validator.hpp"
 
+#include <cstddef>
 #include <string>
 
 namespace Vajra

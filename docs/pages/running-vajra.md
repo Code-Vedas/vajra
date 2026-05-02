@@ -13,7 +13,7 @@ cd gems/vajra
 bundle exec exe/vajra
 ```
 
-Vajra binds to port `3000` and serves a basic serialized HTTP/1.1 response.
+Vajra binds to port `3000` and serves a basic serialized HTTP/1.1 response path.
 
 ## Runtime Expectations
 
@@ -43,7 +43,9 @@ With the server running:
 curl -i http://127.0.0.1:3000/
 ```
 
-The local response is `HTTP/1.1 200 OK` with a plain-text `OK` body.
+The local response is `HTTP/1.1 200 OK` with a plain-text `OK` body, and the
+runtime keeps the connection reusable for the next sequential HTTP/1.1 request
+unless the client or the response path forces close.
 
 ## Shutdown Behavior
 

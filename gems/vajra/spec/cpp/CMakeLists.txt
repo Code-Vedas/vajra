@@ -8,6 +8,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Threads REQUIRED)
 
 add_executable(vajra_server_test
+  test_support.cpp
+  server_lifecycle_test.cpp
+  request_head_test.cpp
+  response_test.cpp
   server_test.cpp
   ../../ext/vajra/listener/listener_socket.cpp
   ../../ext/vajra/request/request_head_reader.cpp

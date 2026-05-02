@@ -95,6 +95,7 @@ std::string Vajra::response::ResponseSerializer::serialize(const Response &respo
   validate_response(response);
 
   const bool no_message_body = forbids_message_body(response.status.code);
+  const bool close_connection = response.connection_behavior == ConnectionBehavior::close;
   std::string serialized;
   std::size_t estimated_size = response.status.reason_phrase.size() + response.body.size() + 32;
 
@@ -124,7 +125,10 @@ std::string Vajra::response::ResponseSerializer::serialize(const Response &respo
   {
     serialized += "Content-Length: " + std::to_string(response.body.size()) + "\r\n";
   }
-  serialized += "Connection: close\r\n";
+  if (close_connection)
+  {
+    serialized += "Connection: close\r\n";
+  }
   serialized += "\r\n";
 
   if (!no_message_body)

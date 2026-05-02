@@ -34,7 +34,8 @@ For each accepted connection, the runtime:
 3. parses the request line and headers into explicit native request state
 4. rejects malformed request heads with a bounded `400 Bad Request` or `431 Request Header Fields Too Large` response
 5. serializes an explicit HTTP/1.1 response for valid request heads
-6. closes the client socket
+6. reuses the connection for the next sequential request when the current exchange is safely message-bounded
+7. closes the client socket when the client asks to close, the exchange is not reusable, or an error path forces termination
 
 That response path keeps the boot contract, smoke tests, and shutdown behavior
 clear and enforceable.

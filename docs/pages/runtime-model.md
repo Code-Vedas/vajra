@@ -33,7 +33,7 @@ For each accepted connection, the runtime:
 2. reads request bytes until the header boundary is reached
 3. parses the request line and headers into explicit native request state
 4. rejects malformed request heads with a bounded `400 Bad Request` or `431 Request Header Fields Too Large` response
-5. writes a fixed `200 OK` response for valid request heads
+5. serializes an explicit HTTP/1.1 response for valid request heads
 6. closes the client socket
 
 That response path keeps the boot contract, smoke tests, and shutdown behavior

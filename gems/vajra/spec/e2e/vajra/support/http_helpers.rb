@@ -12,21 +12,23 @@ module VajraE2EHttpHelpers
     status_line = header_lines.shift
     parsed_headers = header_lines.to_h do |line|
       name, value = line.split(':', 2)
+      raise ArgumentError, "invalid HTTP response header line: #{line.inspect} in #{response.inspect}" if value.nil?
+
       [name, value.strip]
     end
 
     { raw: response, status_line:, headers: parsed_headers, body: body || '' }
   end
 
-  def read_http_response(socket, buffered_bytes: +'')
-    Timeout.timeout(2) do
+  def read_http_response(socket, buffered_bytes: +'', timeout: VajraE2EHelpers::HTTP_RESPONSE_READ_TIMEOUT_SECONDS)
+    Timeout.timeout(timeout) do
       response = String.new(buffered_bytes)
 
       response << socket.readpartial(4096) until response.include?("\r\n\r\n")
 
       headers, body = response.split("\r\n\r\n", 2)
-      content_length_header = headers.lines.find { |line| line.start_with?('Content-Length: ') }
-      content_length = content_length_header ? Integer(content_length_header.delete_prefix('Content-Length: ').strip) : 0
+      content_length_header = headers.lines.find { |line| line.match?(/\Acontent-length:/i) }
+      content_length = content_length_header ? Integer(content_length_header.split(':', 2).last.strip) : 0
 
       body << socket.readpartial(4096) while body.bytesize < content_length
 

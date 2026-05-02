@@ -24,6 +24,7 @@ namespace Vajra
       void handle(int client_fd) const;
 
     private:
+      Vajra::response::ConnectionBehavior connection_behavior_for(const ParsedRequest &request) const;
       void reject_request_head(int client_fd, const HeadError &error) const;
 
       HeadReader request_head_reader_;

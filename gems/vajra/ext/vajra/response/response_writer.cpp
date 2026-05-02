@@ -33,12 +33,14 @@ bool Vajra::response::ResponseWriter::send(int client_fd, const Response &respon
   }
 }
 
-Vajra::response::Response Vajra::response::ResponseWriter::success_response() const
+Vajra::response::Response Vajra::response::ResponseWriter::success_response(
+    ConnectionBehavior connection_behavior) const
 {
   return Response{
       Status{200, "OK"},
       {Header{"Content-Type", "text/plain"}},
-      "OK"};
+      "OK",
+      connection_behavior};
 }
 
 Vajra::response::Response Vajra::response::ResponseWriter::request_head_failure_response(
@@ -50,18 +52,21 @@ Vajra::response::Response Vajra::response::ResponseWriter::request_head_failure_
     return Response{
         Status{400, "Bad Request"},
         {Header{"Content-Type", "text/plain"}},
-        "Bad Request"};
+        "Bad Request",
+        ConnectionBehavior::close};
   case Vajra::request::HeadFailureKind::header_too_large:
     return Response{
         Status{431, "Request Header Fields Too Large"},
         {Header{"Content-Type", "text/plain"}},
-        "Request Header Fields Too Large"};
+        "Request Header Fields Too Large",
+        ConnectionBehavior::close};
   }
 
   return Response{
       Status{400, "Bad Request"},
       {Header{"Content-Type", "text/plain"}},
-      "Bad Request"};
+      "Bad Request",
+      ConnectionBehavior::close};
 }
 
 void Vajra::response::ResponseWriter::log_request_head_error(const Vajra::request::HeadError &error) const

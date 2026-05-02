@@ -10,6 +10,7 @@
 #include <iostream>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <utility>
 
 namespace
 {
@@ -23,19 +24,36 @@ Vajra::request::HeadReader::HeadReader(std::size_t max_request_head_bytes)
 {
 }
 
-Vajra::request::HeadReadResult Vajra::request::HeadReader::read(int client_fd) const
+Vajra::request::HeadReadResult Vajra::request::HeadReader::read(int client_fd, std::string buffered_bytes) const
 {
   if (!configure_read_timeout(client_fd))
   {
-    return HeadReadResult{false, ""};
+    return HeadReadResult{false, "", ""};
   }
 
   char buffer[4096];
-  std::string request_head;
+  std::string request_head = std::move(buffered_bytes);
   std::size_t next_header_boundary_search_start = 0;
 
   while (true)
   {
+    const std::size_t header_boundary = request_head.find(kHeaderBoundary, next_header_boundary_search_start);
+    if (header_boundary != std::string::npos)
+    {
+      const std::size_t request_head_bytes = header_boundary + kHeaderBoundaryLength;
+      request_head_size_validator_.validate(request_head_bytes);
+
+      const std::string trailing_bytes = request_head.substr(request_head_bytes);
+      request_head.resize(request_head_bytes);
+      return HeadReadResult{true, request_head, trailing_bytes};
+    }
+
+    request_head_size_validator_.validate(request_head.size());
+    if (request_head.size() >= kHeaderBoundaryLength - 1)
+    {
+      next_header_boundary_search_start = request_head.size() - (kHeaderBoundaryLength - 1);
+    }
+
     const ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer), 0);
     if (bytes_read < 0)
     {
@@ -46,34 +64,18 @@ Vajra::request::HeadReadResult Vajra::request::HeadReader::read(int client_fd) c
 
       if (errno == EAGAIN || errno == EWOULDBLOCK)
       {
-        return HeadReadResult{false, request_head};
+        return HeadReadResult{false, request_head, ""};
       }
 
       std::cerr << "recv failed: " << std::strerror(errno) << std::endl;
-      return HeadReadResult{false, request_head};
+      return HeadReadResult{false, request_head, ""};
     }
 
     if (bytes_read == 0)
     {
-      return HeadReadResult{false, request_head};
+      return HeadReadResult{false, request_head, ""};
     }
-
-    const std::size_t search_start = next_header_boundary_search_start;
     request_head.append(buffer, bytes_read);
-    const std::size_t header_boundary = request_head.find(kHeaderBoundary, search_start);
-    if (header_boundary != std::string::npos)
-    {
-      const std::size_t request_head_bytes = header_boundary + kHeaderBoundaryLength;
-      request_head_size_validator_.validate(request_head_bytes);
-      request_head.resize(request_head_bytes);
-      return HeadReadResult{true, request_head};
-    }
-
-    request_head_size_validator_.validate(request_head.size());
-    if (request_head.size() >= kHeaderBoundaryLength - 1)
-    {
-      next_header_boundary_search_start = request_head.size() - (kHeaderBoundaryLength - 1);
-    }
   }
 }
 

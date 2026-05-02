@@ -13,6 +13,12 @@ namespace Vajra
 {
   namespace response
   {
+    enum class ConnectionBehavior
+    {
+      keep_alive,
+      close,
+    };
+
     struct Header
     {
       std::string name;
@@ -30,6 +36,7 @@ namespace Vajra
       Status status;
       std::vector<Header> headers;
       std::string body;
+      ConnectionBehavior connection_behavior = ConnectionBehavior::close;
     };
   }
 }

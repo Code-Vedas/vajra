@@ -197,6 +197,43 @@ RSpec.describe Vajra, :e2e, :integration do
     TCPServer.new(VajraE2EHelpers::LISTENER_BIND_HOST, port)
   end
 
+  def read_http_response(socket)
+    Timeout.timeout(2) do
+      response = +''
+
+      response << socket.readpartial(4096) until response.include?("\r\n\r\n")
+
+      headers, body = response.split("\r\n\r\n", 2)
+      content_length_header = headers.lines.find { |line| line.start_with?('Content-Length: ') }
+      content_length = content_length_header ? Integer(content_length_header.delete_prefix('Content-Length: ').strip) : 0
+
+      body << socket.readpartial(4096) while body.bytesize < content_length
+
+      "#{headers}\r\n\r\n#{body.byteslice(0, content_length)}"
+    end
+  end
+
+  def sequential_request_result(port: disposable_listener_port)
+    Open3.popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      selected_port = wait_for_banner(output)
+
+      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+      socket.write("GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n")
+      first_response = read_http_response(socket)
+
+      socket.write("GET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+      second_response = read_http_response(socket)
+      connection_closed = Timeout.timeout(2) { socket.read == '' }
+      socket.close
+
+      status = stop_process(wait_thread)
+
+      { exitstatus: status.exitstatus, first_response:, second_response:, connection_closed:, port: selected_port }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
   def request_response_from_inline_start(env:, timeout: 15)
     Open3.popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       selected_port = wait_for_banner(output)
@@ -324,6 +361,17 @@ RSpec.describe Vajra, :e2e, :integration do
     )
   end
 
+  it 'reuses an HTTP/1.1 connection for a sequential request and closes when requested' do
+    result = sequential_request_result
+
+    expect(result[:exitstatus]).to eq(0)
+    expect(result[:first_response]).to include('HTTP/1.1 200 OK')
+    expect(result[:first_response]).not_to include("Connection: close\r\n")
+    expect(result[:second_response]).to include('HTTP/1.1 200 OK')
+    expect(result[:second_response]).to include("Connection: close\r\n")
+    expect(result[:connection_closed]).to be(true)
+  end
+
   it 'rejects a malformed request line with 400 Bad Request' do
     result = raw_request_result(
       request: "GET /only-two-parts\r\nHost: localhost\r\nConnection: close\r\n\r\n"
@@ -332,6 +380,7 @@ RSpec.describe Vajra, :e2e, :integration do
     expect(result[:exitstatus]).to eq(0)
     expect(result[:response]).to include('HTTP/1.1 400 Bad Request')
     expect(result[:response]).to include('Bad Request')
+    expect(result[:response]).to include("Connection: close\r\n")
     expect(result[:output]).to include('request rejected (400 bad request)')
     expect(result[:output]).not_to include('HTTP/1.1 200 OK')
   end
@@ -511,6 +560,17 @@ RSpec.describe Vajra, :e2e, :integration do
     expect(result[:exitstatus]).to eq(0)
     expect(result[:response]).to include('HTTP/1.1 200 OK')
     expect(result[:output]).not_to include('request head exceeds maximum size')
+  end
+
+  it 'closes after responding to a request with unread body framing' do
+    result = request_with_body_result(
+      env: { 'VAJRA_PORT' => disposable_listener_port.to_s },
+      body: 'body'
+    )
+
+    expect(result[:exitstatus]).to eq(0)
+    expect(result[:response]).to include('HTTP/1.1 200 OK')
+    expect(result[:response]).to include("Connection: close\r\n")
   end
 
   it 'accepts a fragmented request when the header boundary arrives across multiple writes' do

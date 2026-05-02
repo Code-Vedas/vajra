@@ -11,6 +11,7 @@
 #include "vajra.hpp"
 
 #include <arpa/inet.h>
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -158,6 +159,19 @@ namespace
     return fd;
   }
 
+  void suppress_sigpipe(int fd)
+  {
+#ifdef SO_NOSIGPIPE
+    int opt = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt)) < 0)
+    {
+      fail("setsockopt(SO_NOSIGPIPE) failed while configuring test socket");
+    }
+#else
+    (void)fd;
+#endif
+  }
+
   bool send_all(int fd, const std::string &payload)
   {
     std::size_t total_sent = 0;
@@ -270,6 +284,7 @@ namespace
 
     FileDescriptorGuard reader_socket(sockets[0]);
     FileDescriptorGuard writer_socket(sockets[1]);
+    suppress_sigpipe(writer_socket.get());
     Vajra::request::HeadReader reader(max_request_head_bytes);
     ReaderOutcome outcome{{false, ""}, nullptr};
 

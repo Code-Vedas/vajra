@@ -10,6 +10,8 @@
 #include "response.hpp"
 #include "response_serializer.hpp"
 
+#include <string>
+
 namespace Vajra
 {
   namespace response

@@ -24,7 +24,10 @@ Vajra::request::HeadReader::HeadReader(std::size_t max_request_head_bytes)
 
 Vajra::request::HeadReadResult Vajra::request::HeadReader::read(int client_fd) const
 {
-  configure_read_timeout(client_fd);
+  if (!configure_read_timeout(client_fd))
+  {
+    return HeadReadResult{false, ""};
+  }
 
   char buffer[4096];
   std::string request_head;
@@ -67,7 +70,7 @@ Vajra::request::HeadReadResult Vajra::request::HeadReader::read(int client_fd) c
   }
 }
 
-void Vajra::request::HeadReader::configure_read_timeout(int client_fd) const
+bool Vajra::request::HeadReader::configure_read_timeout(int client_fd) const
 {
   timeval timeout{};
   timeout.tv_sec = kRequestHeadReadTimeoutSeconds;
@@ -75,5 +78,8 @@ void Vajra::request::HeadReader::configure_read_timeout(int client_fd) const
   if (setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0)
   {
     std::cerr << "setsockopt(SO_RCVTIMEO) failed: " << std::strerror(errno) << std::endl;
+    return false;
   }
+
+  return true;
 }

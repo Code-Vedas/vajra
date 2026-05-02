@@ -708,6 +708,21 @@ namespace
     }
   }
 
+  void test_response_serializer_allows_empty_reason_phrase()
+  {
+    Vajra::response::ResponseSerializer serializer;
+    const std::string serialized = serializer.serialize(
+        Vajra::response::Response{
+            Vajra::response::Status{200, ""},
+            {Vajra::response::Header{"Content-Type", "text/plain"}},
+            "OK"});
+
+    if (serialized.find("HTTP/1.1 200 \r\n") != 0)
+    {
+      fail("response serializer did not preserve an empty reason phrase");
+    }
+  }
+
   void test_response_serializer_serializes_empty_body_with_zero_content_length()
   {
     Vajra::response::ResponseSerializer serializer;
@@ -1183,6 +1198,7 @@ int main()
     test_parse_request_head_rejects_invalid_http_version_variants();
     test_validate_request_head_size_rejects_oversized_request_head();
     test_response_serializer_serializes_status_headers_and_body();
+    test_response_serializer_allows_empty_reason_phrase();
     test_response_serializer_serializes_empty_body_with_zero_content_length();
     test_response_serializer_preserves_header_order();
     test_response_serializer_rejects_invalid_header_name();

@@ -92,7 +92,6 @@ std::string Vajra::response::ResponseSerializer::serialize(const Response &respo
 
   for (const Header &header : response.headers)
   {
-    validate_header(header);
     serialized += header.name + ": " + header.value + "\r\n";
   }
 
@@ -131,11 +130,6 @@ void Vajra::response::ResponseSerializer::validate_status(const Status &status) 
   if (status.code < 100 || status.code > 599)
   {
     throw SerializationError("response status code must be within the HTTP/1.1 range 100-599");
-  }
-
-  if (status.reason_phrase.empty())
-  {
-    throw SerializationError("response reason phrase must not be empty");
   }
 
   if (contains_invalid_http_text_bytes(status.reason_phrase))

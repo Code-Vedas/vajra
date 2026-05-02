@@ -266,7 +266,7 @@ RSpec.describe Vajra, :e2e, :integration do
     end
   end
 
-  def raw_request_result(request:, port: disposable_listener_port, env: {}, timeout: 15)
+  def request_chunks_result(chunks:, port: disposable_listener_port, env: {}, timeout: 15, pause: nil)
     script = <<~RUBY
       require "timeout"
       require "vajra"
@@ -286,7 +286,10 @@ RSpec.describe Vajra, :e2e, :integration do
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
       begin
-        socket.write(request)
+        chunks.each do |chunk|
+          socket.write(chunk)
+          sleep pause if pause
+        end
         socket.close_write
         response = Timeout.timeout(timeout) { socket.read }
       ensure
@@ -300,6 +303,14 @@ RSpec.describe Vajra, :e2e, :integration do
     ensure
       cleanup_process(wait_thread, output)
     end
+  end
+
+  def raw_request_result(request:, port: disposable_listener_port, env: {}, timeout: 15)
+    request_chunks_result(chunks: [request], port:, env:, timeout:)
+  end
+
+  def fragmented_request_result(chunks:, port: disposable_listener_port, env: {}, timeout: 15, pause: 0.01)
+    request_chunks_result(chunks:, port:, env:, timeout:, pause:)
   end
 
   def thrash_cycles
@@ -500,6 +511,20 @@ RSpec.describe Vajra, :e2e, :integration do
     expect(result[:exitstatus]).to eq(0)
     expect(result[:response]).to include('HTTP/1.1 200 OK')
     expect(result[:output]).not_to include('request head exceeds maximum size')
+  end
+
+  it 'accepts a fragmented request when the header boundary arrives across multiple writes' do
+    result = fragmented_request_result(
+      chunks: [
+        "GET /fragmented HTTP/1.1\r\nHost: localhost\r\nConnection: close\r",
+        "\n",
+        "\r",
+        "\n"
+      ]
+    )
+
+    expect(result[:exitstatus]).to eq(0)
+    expect(result[:response]).to include('HTTP/1.1 200 OK')
   end
 
   it 'closes an incomplete request without producing a success response' do

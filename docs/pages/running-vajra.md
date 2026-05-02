@@ -45,7 +45,9 @@ curl -i http://127.0.0.1:3000/
 
 The local response is `HTTP/1.1 200 OK` with a plain-text `OK` body, and the
 runtime keeps the connection reusable for the next sequential HTTP/1.1 request
-unless the client or the response path forces close.
+unless the client or the response path forces close. If the client leaves that
+reusable connection idle, Vajra applies the request-head read timeout to the
+next request and closes the connection when that timeout expires.
 
 ## Shutdown Behavior
 

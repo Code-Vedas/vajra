@@ -19,6 +19,7 @@ namespace Vajra
     {
       bool complete;
       std::string request_head;
+      std::string trailing_bytes;
     };
 
     class HeadReader
@@ -26,7 +27,7 @@ namespace Vajra
     public:
       explicit HeadReader(std::size_t max_request_head_bytes);
 
-      HeadReadResult read(int client_fd) const;
+      HeadReadResult read(int client_fd, std::string buffered_bytes = "") const;
 
     private:
       bool configure_read_timeout(int client_fd) const;

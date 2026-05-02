@@ -424,7 +424,7 @@ VajraSpecCpp::ReaderOutcome VajraSpecCpp::read_request_head_from_chunks(
   FileDescriptorGuard writer_socket(sockets[1]);
   suppress_sigpipe(writer_socket.get());
   Vajra::request::HeadReader reader(max_request_head_bytes);
-  ReaderOutcome outcome{{false, ""}, nullptr};
+  ReaderOutcome outcome{{false, "", ""}, nullptr};
 
   std::thread reader_thread([&]() {
     try

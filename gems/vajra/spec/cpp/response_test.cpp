@@ -497,6 +497,79 @@ namespace VajraSpecCpp
       }
     }
 
+    void test_request_processor_handles_pipelined_read_ahead_without_losing_the_next_request()
+    {
+      int sockets[2];
+      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
+      {
+        fail("socketpair failed while setting up pipelined request processor test");
+      }
+
+      FileDescriptorGuard client_socket(sockets[0]);
+      FileDescriptorGuard server_socket(sockets[1]);
+      suppress_sigpipe(client_socket.get());
+
+      const Vajra::request::RequestProcessor processor(Vajra::request::kDefaultMaxRequestHeadBytes);
+      std::thread processor_thread = start_request_processor_thread(processor, server_socket);
+
+      try
+      {
+        if (!send_all(
+                client_socket.get(),
+                "GET /first HTTP/1.1\r\n"
+                "Host: example.test\r\n"
+                "\r\n"
+                "GET /second HTTP/1.1\r\n"
+                "Host: example.test\r\n"
+                "Connection: close\r\n"
+                "\r\n"))
+        {
+          fail("failed to send pipelined request bytes");
+        }
+
+        const std::string all_responses = read_all(client_socket.get());
+        const std::size_t first_response_end = all_responses.find("\r\n\r\nOK");
+        if (first_response_end == std::string::npos)
+        {
+          fail("pipelined responses did not contain the first complete payload");
+        }
+
+        const std::string first_response = all_responses.substr(0, first_response_end + 6);
+        if (first_response.find("HTTP/1.1 200 OK\r\n") != 0)
+        {
+          fail("first pipelined response did not succeed");
+        }
+
+        if (first_response.find("Connection: close\r\n") != std::string::npos)
+        {
+          fail("first pipelined response unexpectedly forced connection close");
+        }
+
+        const std::string second_response = all_responses.substr(first_response_end + 6);
+        if (second_response.find("HTTP/1.1 200 OK\r\n") != 0)
+        {
+          fail("second pipelined response did not succeed");
+        }
+
+        if (second_response.find("Connection: close\r\n") == std::string::npos)
+        {
+          fail("second pipelined response did not advertise connection close");
+        }
+
+        client_socket.close_if_open();
+        processor_thread.join();
+      }
+      catch (...)
+      {
+        client_socket.close_if_open();
+        if (processor_thread.joinable())
+        {
+          processor_thread.join();
+        }
+        throw;
+      }
+    }
+
     void test_request_processor_closes_after_parse_error_response()
     {
       int sockets[2];
@@ -629,6 +702,7 @@ namespace VajraSpecCpp
     test_response_writer_sends_structured_error_response();
     test_response_writer_send_returns_false_on_serialization_failure();
     test_request_processor_keeps_connection_open_for_sequential_requests();
+    test_request_processor_handles_pipelined_read_ahead_without_losing_the_next_request();
     test_request_processor_closes_after_parse_error_response();
     test_request_processor_closes_after_request_body_framing();
   }

@@ -230,6 +230,37 @@ namespace VajraSpecCpp
       }
     }
 
+    void test_head_reader_preserves_trailing_bytes_after_header_boundary()
+    {
+      const std::string request_head =
+          "GET /pipelined HTTP/1.1\r\nHost: example.test\r\n\r\n";
+      const std::string trailing_bytes =
+          "GET /next HTTP/1.1\r\nHost: example.test\r\n\r\n";
+      const ReaderOutcome outcome = read_request_head_from_chunks(
+          {request_head + trailing_bytes},
+          Vajra::request::kDefaultMaxRequestHeadBytes);
+
+      if (outcome.error)
+      {
+        std::rethrow_exception(outcome.error);
+      }
+
+      if (!outcome.result.complete)
+      {
+        fail("reader did not complete a request head with trailing bytes present");
+      }
+
+      if (outcome.result.request_head != request_head)
+      {
+        fail("reader did not isolate the request head before trailing bytes");
+      }
+
+      if (outcome.result.trailing_bytes != trailing_bytes)
+      {
+        fail("reader did not preserve trailing bytes after the header boundary");
+      }
+    }
+
     void test_head_reader_rejects_limit_plus_one_request_head()
     {
       const std::string request_head =
@@ -364,6 +395,7 @@ namespace VajraSpecCpp
     test_head_reader_accepts_fragmented_request_head();
     test_head_reader_returns_incomplete_on_peer_close_before_boundary();
     test_head_reader_accepts_exact_limit_request_head();
+    test_head_reader_preserves_trailing_bytes_after_header_boundary();
     test_head_reader_rejects_limit_plus_one_request_head();
     test_property_generated_valid_request_heads_parse();
     test_property_generated_invalid_request_lines_reject();

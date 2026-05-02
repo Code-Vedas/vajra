@@ -139,13 +139,14 @@ Vajra::request::RequestProcessor::RequestProcessor(std::size_t max_request_head_
 void Vajra::request::RequestProcessor::handle(int client_fd) const
 {
   ClientSocketGuard client_socket_guard(client_fd);
+  std::string buffered_bytes;
 
   while (true)
   {
     HeadReadResult read_result;
     try
     {
-      read_result = request_head_reader_.read(client_fd);
+      read_result = request_head_reader_.read(client_fd, std::move(buffered_bytes));
     }
     catch (const HeadError &error)
     {
@@ -157,6 +158,8 @@ void Vajra::request::RequestProcessor::handle(int client_fd) const
     {
       return;
     }
+
+    buffered_bytes = std::move(read_result.trailing_bytes);
 
     ParsedRequest request;
     try

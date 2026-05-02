@@ -302,6 +302,45 @@ RSpec.describe Vajra, :e2e, :integration do
     end
   end
 
+  def fragmented_request_result(chunks:, port: disposable_listener_port, env: {}, timeout: 15, pause: 0.01)
+    script = <<~RUBY
+      require "timeout"
+      require "vajra"
+      Thread.report_on_exception = false
+
+      server_thread = Thread.new { Vajra.start }
+      begin
+        STDIN.read
+      ensure
+        Vajra.stop
+        Timeout.timeout(5) { server_thread.join }
+      end
+    RUBY
+
+    Open3.popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |stdin, output, wait_thread|
+      selected_port = wait_for_banner(output)
+
+      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+      begin
+        chunks.each do |chunk|
+          socket.write(chunk)
+          sleep pause
+        end
+        socket.close_write
+        response = Timeout.timeout(timeout) { socket.read }
+      ensure
+        socket.close unless socket.closed?
+      end
+
+      stdin.close
+      status = Timeout.timeout(timeout) { wait_thread.value }
+
+      { exitstatus: status.exitstatus, response:, output: output.read, port: selected_port }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
   def thrash_cycles
     5
   end
@@ -500,6 +539,20 @@ RSpec.describe Vajra, :e2e, :integration do
     expect(result[:exitstatus]).to eq(0)
     expect(result[:response]).to include('HTTP/1.1 200 OK')
     expect(result[:output]).not_to include('request head exceeds maximum size')
+  end
+
+  it 'accepts a fragmented request when the header boundary arrives across multiple writes' do
+    result = fragmented_request_result(
+      chunks: [
+        "GET /fragmented HTTP/1.1\r\nHost: localhost\r\nConnection: close\r",
+        "\n",
+        "\r",
+        "\n"
+      ]
+    )
+
+    expect(result[:exitstatus]).to eq(0)
+    expect(result[:response]).to include('HTTP/1.1 200 OK')
   end
 
   it 'closes an incomplete request without producing a success response' do

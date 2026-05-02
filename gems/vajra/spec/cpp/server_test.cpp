@@ -78,25 +78,6 @@ namespace
     int fd_;
   };
 
-  class ThreadJoinGuard
-  {
-  public:
-    explicit ThreadJoinGuard(std::thread &thread) : thread_(thread) {}
-    ThreadJoinGuard(const ThreadJoinGuard &) = delete;
-    ThreadJoinGuard &operator=(const ThreadJoinGuard &) = delete;
-
-    ~ThreadJoinGuard()
-    {
-      if (thread_.joinable())
-      {
-        thread_.join();
-      }
-    }
-
-  private:
-    std::thread &thread_;
-  };
-
   struct ReaderOutcome
   {
     Vajra::request::HeadReadResult result;
@@ -259,8 +240,7 @@ namespace
 
   ReaderOutcome read_request_head_from_chunks(
       const std::vector<std::string> &chunks,
-      std::size_t max_request_head_bytes,
-      bool close_writer = true)
+      std::size_t max_request_head_bytes)
   {
     int sockets[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
@@ -285,22 +265,26 @@ namespace
 
       reader_socket.close_if_open();
     });
-    ThreadJoinGuard reader_thread_guard(reader_thread);
 
-    for (const std::string &chunk : chunks)
+    try
     {
-      send_all(writer_socket.get(), chunk);
-      std::this_thread::sleep_for(5ms);
-    }
+      for (const std::string &chunk : chunks)
+      {
+        send_all(writer_socket.get(), chunk);
+        std::this_thread::sleep_for(5ms);
+      }
 
-    if (close_writer)
+      writer_socket.close_if_open();
+      reader_thread.join();
+    }
+    catch (...)
     {
       writer_socket.close_if_open();
-    }
-
-    if (!close_writer)
-    {
-      writer_socket.close_if_open();
+      if (reader_thread.joinable())
+      {
+        reader_thread.join();
+      }
+      throw;
     }
 
     return outcome;

@@ -9,11 +9,17 @@
 
 namespace
 {
+  bool ascii_alpha_numeric(unsigned char character)
+  {
+    return (character >= '0' && character <= '9') || (character >= 'A' && character <= 'Z') ||
+           (character >= 'a' && character <= 'z');
+  }
+
   bool contains_invalid_http_text_bytes(const std::string &value)
   {
     for (const unsigned char character : value)
     {
-      if (std::iscntrl(character) != 0 && character != '\t')
+      if ((character <= 0x1F && character != '\t') || character == 0x7F)
       {
         return true;
       }
@@ -29,7 +35,14 @@ namespace
 
     for (const unsigned char character : name)
     {
-      normalized.push_back(static_cast<char>(std::tolower(character)));
+      if (character >= 'A' && character <= 'Z')
+      {
+        normalized.push_back(static_cast<char>(character - 'A' + 'a'));
+      }
+      else
+      {
+        normalized.push_back(static_cast<char>(character));
+      }
     }
 
     return normalized;
@@ -49,12 +62,7 @@ namespace
 
   bool valid_header_name_character(unsigned char character)
   {
-    if (character >= 0x80)
-    {
-      return false;
-    }
-
-    if (std::isalnum(character) != 0)
+    if (ascii_alpha_numeric(character))
     {
       return true;
     }
@@ -87,22 +95,40 @@ std::string Vajra::response::ResponseSerializer::serialize(const Response &respo
 {
   validate_response(response);
 
-  std::string serialized =
-      "HTTP/1.1 " + std::to_string(response.status.code) + " " + response.status.reason_phrase + "\r\n";
+  const bool no_message_body = forbids_message_body(response.status.code);
+  std::string serialized;
+  std::size_t estimated_size = response.status.reason_phrase.size() + response.body.size() + 32;
+
+  for (const Header &header : response.headers)
+  {
+    estimated_size += header.name.size() + header.value.size() + 4;
+  }
+
+  if (!no_message_body)
+  {
+    estimated_size += 20;
+  }
+
+  serialized.reserve(estimated_size);
+  serialized += "HTTP/1.1 ";
+  serialized += std::to_string(response.status.code);
+  serialized += " ";
+  serialized += response.status.reason_phrase;
+  serialized += "\r\n";
 
   for (const Header &header : response.headers)
   {
     serialized += header.name + ": " + header.value + "\r\n";
   }
 
-  if (!forbids_message_body(response.status.code))
+  if (!no_message_body)
   {
     serialized += "Content-Length: " + std::to_string(response.body.size()) + "\r\n";
   }
   serialized += "Connection: close\r\n";
   serialized += "\r\n";
 
-  if (!forbids_message_body(response.status.code))
+  if (!no_message_body)
   {
     serialized += response.body;
   }

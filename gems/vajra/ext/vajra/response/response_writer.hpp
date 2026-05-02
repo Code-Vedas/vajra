@@ -21,12 +21,12 @@ namespace Vajra
       Response success_response() const;
       Response request_head_failure_response(Vajra::request::HeadFailureKind kind) const;
       void log_request_head_error(const Vajra::request::HeadError &error) const;
-      void log_serialization_error(const SerializationError &error) const;
 
     private:
       void suppress_sigpipe(int client_fd) const;
       bool send_response_message(int client_fd, const std::string &response_message) const;
       const char *request_head_failure_label(Vajra::request::HeadFailureKind kind) const;
+      void log_serialization_error(const SerializationError &error) const;
 
       ResponseSerializer serializer_;
     };

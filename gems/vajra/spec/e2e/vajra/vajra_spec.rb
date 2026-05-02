@@ -198,17 +198,19 @@ RSpec.describe Vajra, :e2e, :integration do
   end
 
   def read_http_response(socket)
-    response = +''
+    Timeout.timeout(2) do
+      response = +''
 
-    response << socket.readpartial(4096) until response.include?("\r\n\r\n")
+      response << socket.readpartial(4096) until response.include?("\r\n\r\n")
 
-    headers, body = response.split("\r\n\r\n", 2)
-    content_length_header = headers.lines.find { |line| line.start_with?('Content-Length: ') }
-    content_length = content_length_header ? Integer(content_length_header.delete_prefix('Content-Length: ').strip) : 0
+      headers, body = response.split("\r\n\r\n", 2)
+      content_length_header = headers.lines.find { |line| line.start_with?('Content-Length: ') }
+      content_length = content_length_header ? Integer(content_length_header.delete_prefix('Content-Length: ').strip) : 0
 
-    body << socket.readpartial(4096) while body.bytesize < content_length
+      body << socket.readpartial(4096) while body.bytesize < content_length
 
-    "#{headers}\r\n\r\n#{body.byteslice(0, content_length)}"
+      "#{headers}\r\n\r\n#{body.byteslice(0, content_length)}"
+    end
   end
 
   def sequential_request_result(port: disposable_listener_port)

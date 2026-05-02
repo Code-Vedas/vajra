@@ -887,6 +887,13 @@ namespace
             "not allowed"},
         "response status must not include a message body");
 
+    expect_serialization_error(
+        Vajra::response::Response{
+            Vajra::response::Status{205, "Reset Content"},
+            {Vajra::response::Header{"Content-Type", "text/plain"}},
+            "not allowed"},
+        "response status must not include a message body");
+
     Vajra::response::ResponseSerializer serializer;
     const std::string serialized = serializer.serialize(
         Vajra::response::Response{
@@ -907,6 +914,17 @@ namespace
     if (serialized.find("\r\n\r\nNot Modified") != std::string::npos)
     {
       fail("no-body statuses must not serialize a payload");
+    }
+
+    const std::string reset_content_serialized = serializer.serialize(
+        Vajra::response::Response{
+            Vajra::response::Status{205, "Reset Content"},
+            {Vajra::response::Header{"Content-Type", "text/plain"}},
+            ""});
+
+    if (reset_content_serialized.find("Content-Length:") != std::string::npos)
+    {
+      fail("205 responses must not emit content length framing");
     }
   }
 

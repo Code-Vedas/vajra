@@ -55,7 +55,8 @@ namespace
 
   bool forbids_message_body(int status_code)
   {
-    return (status_code >= 100 && status_code < 200) || status_code == 204 || status_code == 304;
+    return (status_code >= 100 && status_code < 200) || status_code == 204 || status_code == 205 ||
+           status_code == 304;
   }
 
   bool valid_header_name_character(unsigned char character)

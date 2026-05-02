@@ -266,43 +266,7 @@ RSpec.describe Vajra, :e2e, :integration do
     end
   end
 
-  def raw_request_result(request:, port: disposable_listener_port, env: {}, timeout: 15)
-    script = <<~RUBY
-      require "timeout"
-      require "vajra"
-      Thread.report_on_exception = false
-
-      server_thread = Thread.new { Vajra.start }
-      begin
-        STDIN.read
-      ensure
-        Vajra.stop
-        Timeout.timeout(5) { server_thread.join }
-      end
-    RUBY
-
-    Open3.popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |stdin, output, wait_thread|
-      selected_port = wait_for_banner(output)
-
-      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
-      begin
-        socket.write(request)
-        socket.close_write
-        response = Timeout.timeout(timeout) { socket.read }
-      ensure
-        socket.close unless socket.closed?
-      end
-
-      stdin.close
-      status = Timeout.timeout(timeout) { wait_thread.value }
-
-      { exitstatus: status.exitstatus, response:, output: output.read, port: selected_port }
-    ensure
-      cleanup_process(wait_thread, output)
-    end
-  end
-
-  def fragmented_request_result(chunks:, port: disposable_listener_port, env: {}, timeout: 15, pause: 0.01)
+  def request_chunks_result(chunks:, port: disposable_listener_port, env: {}, timeout: 15, pause: nil)
     script = <<~RUBY
       require "timeout"
       require "vajra"
@@ -324,7 +288,7 @@ RSpec.describe Vajra, :e2e, :integration do
       begin
         chunks.each do |chunk|
           socket.write(chunk)
-          sleep pause
+          sleep pause if pause
         end
         socket.close_write
         response = Timeout.timeout(timeout) { socket.read }
@@ -339,6 +303,14 @@ RSpec.describe Vajra, :e2e, :integration do
     ensure
       cleanup_process(wait_thread, output)
     end
+  end
+
+  def raw_request_result(request:, port: disposable_listener_port, env: {}, timeout: 15)
+    request_chunks_result(chunks: [request], port:, env:, timeout:)
+  end
+
+  def fragmented_request_result(chunks:, port: disposable_listener_port, env: {}, timeout: 15, pause: 0.01)
+    request_chunks_result(chunks:, port:, env:, timeout:, pause:)
   end
 
   def thrash_cycles

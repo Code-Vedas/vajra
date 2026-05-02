@@ -158,19 +158,36 @@ namespace
     return fd;
   }
 
-  void send_all(int fd, const std::string &payload)
+  bool send_all(int fd, const std::string &payload)
   {
     std::size_t total_sent = 0;
     while (total_sent < payload.size())
     {
       const ssize_t bytes_sent = send(fd, payload.data() + total_sent, payload.size() - total_sent, kSendFlags);
-      if (bytes_sent <= 0)
+      if (bytes_sent < 0)
       {
+        if (errno == EINTR)
+        {
+          continue;
+        }
+
+        if (errno == EPIPE || errno == ECONNRESET)
+        {
+          return false;
+        }
+
         fail("send failed while writing test payload");
+      }
+
+      if (bytes_sent == 0)
+      {
+        return false;
       }
 
       total_sent += static_cast<std::size_t>(bytes_sent);
     }
+
+    return true;
   }
 
   bool complete_probe_request(int fd)
@@ -181,7 +198,10 @@ namespace
         "Connection: close\r\n"
         "\r\n";
 
-    send_all(fd, request);
+    if (!send_all(fd, request))
+    {
+      return false;
+    }
 
     char buffer[4096];
     const ssize_t bytes_read = recv(fd, buffer, sizeof(buffer), 0);
@@ -270,7 +290,10 @@ namespace
     {
       for (const std::string &chunk : chunks)
       {
-        send_all(writer_socket.get(), chunk);
+        if (!send_all(writer_socket.get(), chunk))
+        {
+          break;
+        }
         std::this_thread::sleep_for(5ms);
       }
 

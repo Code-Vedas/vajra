@@ -13,6 +13,10 @@ namespace
   {
   public:
     explicit ClientSocketGuard(int fd) : fd_(fd) {}
+    ClientSocketGuard(const ClientSocketGuard &) = delete;
+    ClientSocketGuard &operator=(const ClientSocketGuard &) = delete;
+    ClientSocketGuard(ClientSocketGuard &&) = delete;
+    ClientSocketGuard &operator=(ClientSocketGuard &&) = delete;
 
     ~ClientSocketGuard()
     {

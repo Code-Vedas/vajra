@@ -268,6 +268,7 @@ RSpec.describe Vajra, :e2e, :integration do
 
   def raw_request_result(request:, port: disposable_listener_port, env: {}, timeout: 15)
     script = <<~RUBY
+      require "timeout"
       require "vajra"
       Thread.report_on_exception = false
 
@@ -276,7 +277,7 @@ RSpec.describe Vajra, :e2e, :integration do
         STDIN.read
       ensure
         Vajra.stop
-        server_thread.join
+        Timeout.timeout(5) { server_thread.join }
       end
     RUBY
 

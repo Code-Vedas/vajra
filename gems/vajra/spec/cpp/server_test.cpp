@@ -37,10 +37,65 @@ namespace
 {
   using namespace std::chrono_literals;
 
+#ifdef MSG_NOSIGNAL
+  constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+  constexpr int kSendFlags = 0;
+#endif
+
   [[noreturn]] void fail(const std::string &message)
   {
     throw std::runtime_error(message);
   }
+
+  class FileDescriptorGuard
+  {
+  public:
+    explicit FileDescriptorGuard(int fd) : fd_(fd) {}
+    FileDescriptorGuard(const FileDescriptorGuard &) = delete;
+    FileDescriptorGuard &operator=(const FileDescriptorGuard &) = delete;
+
+    ~FileDescriptorGuard()
+    {
+      close_if_open();
+    }
+
+    int get() const
+    {
+      return fd_;
+    }
+
+    void close_if_open()
+    {
+      if (fd_ >= 0)
+      {
+        close(fd_);
+        fd_ = -1;
+      }
+    }
+
+  private:
+    int fd_;
+  };
+
+  class ThreadJoinGuard
+  {
+  public:
+    explicit ThreadJoinGuard(std::thread &thread) : thread_(thread) {}
+    ThreadJoinGuard(const ThreadJoinGuard &) = delete;
+    ThreadJoinGuard &operator=(const ThreadJoinGuard &) = delete;
+
+    ~ThreadJoinGuard()
+    {
+      if (thread_.joinable())
+      {
+        thread_.join();
+      }
+    }
+
+  private:
+    std::thread &thread_;
+  };
 
   struct ReaderOutcome
   {
@@ -127,7 +182,7 @@ namespace
     std::size_t total_sent = 0;
     while (total_sent < payload.size())
     {
-      const ssize_t bytes_sent = send(fd, payload.data() + total_sent, payload.size() - total_sent, 0);
+      const ssize_t bytes_sent = send(fd, payload.data() + total_sent, payload.size() - total_sent, kSendFlags);
       if (bytes_sent <= 0)
       {
         fail("send failed while writing test payload");
@@ -213,38 +268,39 @@ namespace
       fail("socketpair failed while setting up reader test");
     }
 
+    FileDescriptorGuard reader_socket(sockets[0]);
+    FileDescriptorGuard writer_socket(sockets[1]);
     Vajra::request::HeadReader reader(max_request_head_bytes);
     ReaderOutcome outcome{{false, ""}, nullptr};
 
     std::thread reader_thread([&]() {
       try
       {
-        outcome.result = reader.read(sockets[0]);
+        outcome.result = reader.read(reader_socket.get());
       }
       catch (...)
       {
         outcome.error = std::current_exception();
       }
 
-      close(sockets[0]);
+      reader_socket.close_if_open();
     });
+    ThreadJoinGuard reader_thread_guard(reader_thread);
 
     for (const std::string &chunk : chunks)
     {
-      send_all(sockets[1], chunk);
+      send_all(writer_socket.get(), chunk);
       std::this_thread::sleep_for(5ms);
     }
 
     if (close_writer)
     {
-      close(sockets[1]);
+      writer_socket.close_if_open();
     }
-
-    reader_thread.join();
 
     if (!close_writer)
     {
-      close(sockets[1]);
+      writer_socket.close_if_open();
     }
 
     return outcome;

@@ -17,5 +17,5 @@ module VajraE2ESupport
 end
 
 RSpec.configure do |config|
-  config.include VajraE2ESupport
+  config.include VajraE2ESupport, :e2e
 end

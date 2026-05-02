@@ -5,8 +5,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-RSpec.describe Vajra, '.version' do
+RSpec.describe 'Vajra::VERSION' do
   it 'has a version number' do
-    expect(described_class::VERSION).not_to be_nil
+    expect(Vajra::VERSION).not_to be_nil
   end
 end

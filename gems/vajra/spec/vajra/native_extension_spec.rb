@@ -28,9 +28,7 @@ RSpec.describe Vajra::NativeExtension do
       raise e, e.message, ['/tmp/native_extension.rb:12']
     end
 
-    begin
-      described_class.load!(loader: backtrace_loader)
-    rescue LoadError => e
+    expect { described_class.load!(loader: backtrace_loader) }.to raise_error(LoadError) do |e|
       expect(e.backtrace.first).to eq('/tmp/native_extension.rb:12')
     end
   end

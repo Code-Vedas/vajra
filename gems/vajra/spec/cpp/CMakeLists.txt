@@ -9,6 +9,10 @@ find_package(Threads REQUIRED)
 
 add_executable(vajra_server_test
   server_test.cpp
+  ../../ext/vajra/listener/listener_socket.cpp
+  ../../ext/vajra/request/request_head_reader.cpp
+  ../../ext/vajra/request/request_processor.cpp
+  ../../ext/vajra/response/static_response_writer.cpp
   ../../ext/vajra/server.cpp
 )
 

@@ -23,7 +23,7 @@ namespace
 {
   volatile std::sig_atomic_t shutting_down = 0;
   std::mutex server_mutex;
-  std::unique_ptr<Server> server_instance;
+  std::unique_ptr<Vajra::Server> server_instance;
   ID id_port;
   ID id_max_request_head_bytes;
 
@@ -105,7 +105,7 @@ namespace
 
   struct ServerStartContext
   {
-    Server *server;
+    Vajra::Server *server;
     std::exception_ptr error;
   };
 
@@ -334,7 +334,7 @@ namespace
         options,
         id_max_request_head_bytes,
         "max_request_head_bytes option",
-        static_cast<long>(kDefaultMaxRequestHeadBytes),
+        static_cast<long>(Vajra::request::kDefaultMaxRequestHeadBytes),
         1,
         std::numeric_limits<int>::max());
 
@@ -400,7 +400,7 @@ namespace VajraNative
 
     try
     {
-      Server *server = nullptr;
+      Vajra::Server *server = nullptr;
       {
         std::lock_guard<std::mutex> lock(server_mutex);
         if (server_instance)
@@ -410,7 +410,7 @@ namespace VajraNative
         }
 
         shutting_down = 0;
-        server_instance = std::make_unique<Server>(port, max_request_head_bytes);
+        server_instance = std::make_unique<Vajra::Server>(port, max_request_head_bytes);
         server = server_instance.get();
       }
 

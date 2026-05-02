@@ -285,10 +285,13 @@ RSpec.describe Vajra, :e2e, :integration do
       selected_port = wait_for_banner(output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
-      socket.write(request)
-      socket.close_write
-      response = socket.read
-      socket.close
+      begin
+        socket.write(request)
+        socket.close_write
+        response = Timeout.timeout(timeout) { socket.read }
+      ensure
+        socket.close unless socket.closed?
+      end
 
       stdin.close
       status = Timeout.timeout(timeout) { wait_thread.value }

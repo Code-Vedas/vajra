@@ -14,6 +14,7 @@
 namespace
 {
   constexpr const char *kHeaderBoundary = "\r\n\r\n";
+  constexpr std::size_t kHeaderBoundaryLength = 4;
   constexpr int kRequestHeadReadTimeoutSeconds = 5;
 }
 
@@ -31,6 +32,7 @@ Vajra::request::HeadReadResult Vajra::request::HeadReader::read(int client_fd) c
 
   char buffer[4096];
   std::string request_head;
+  std::size_t next_header_boundary_search_start = 0;
 
   while (true)
   {
@@ -56,17 +58,22 @@ Vajra::request::HeadReadResult Vajra::request::HeadReader::read(int client_fd) c
       return HeadReadResult{false, request_head};
     }
 
+    const std::size_t search_start = next_header_boundary_search_start;
     request_head.append(buffer, bytes_read);
-    const std::size_t header_boundary = request_head.find(kHeaderBoundary);
+    const std::size_t header_boundary = request_head.find(kHeaderBoundary, search_start);
     if (header_boundary != std::string::npos)
     {
-      const std::size_t request_head_bytes = header_boundary + std::strlen(kHeaderBoundary);
+      const std::size_t request_head_bytes = header_boundary + kHeaderBoundaryLength;
       request_head_size_validator_.validate(request_head_bytes);
       request_head.resize(request_head_bytes);
       return HeadReadResult{true, request_head};
     }
 
     request_head_size_validator_.validate(request_head.size());
+    if (request_head.size() >= kHeaderBoundaryLength - 1)
+    {
+      next_header_boundary_search_start = request_head.size() - (kHeaderBoundaryLength - 1);
+    }
   }
 }
 

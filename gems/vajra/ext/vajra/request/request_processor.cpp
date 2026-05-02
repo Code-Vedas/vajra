@@ -97,9 +97,14 @@ namespace
       {
         return false;
       }
+
+      if (character != '0')
+      {
+        return false;
+      }
     }
 
-    return normalized == "0";
+    return true;
   }
 
   class ClientSocketGuard

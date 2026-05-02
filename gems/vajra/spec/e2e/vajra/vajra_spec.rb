@@ -221,7 +221,7 @@ RSpec.describe Vajra, :e2e, :integration do
 
       socket.write("GET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
       second_response = read_http_response(socket)
-      connection_closed = socket.read == ''
+      connection_closed = Timeout.timeout(2) { socket.read == '' }
       socket.close
 
       status = stop_process(wait_thread)

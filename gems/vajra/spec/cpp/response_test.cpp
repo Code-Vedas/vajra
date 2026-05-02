@@ -13,11 +13,26 @@
 #include <string>
 #include <sys/socket.h>
 #include <thread>
+#include <unistd.h>
 
 namespace VajraSpecCpp
 {
   namespace
   {
+    std::thread start_request_processor_thread(
+        const Vajra::request::RequestProcessor &processor,
+        FileDescriptorGuard &server_socket)
+    {
+      const int owned_fd = dup(server_socket.get());
+      if (owned_fd < 0)
+      {
+        fail("dup failed while transferring request processor socket ownership");
+      }
+
+      server_socket.close_if_open();
+      return std::thread([&processor, owned_fd]() { processor.handle(owned_fd); });
+    }
+
     void expect_serialization_error(
         const Vajra::response::Response &response,
         const std::string &expected_message)
@@ -397,10 +412,7 @@ namespace VajraSpecCpp
       suppress_sigpipe(client_socket.get());
 
       const Vajra::request::RequestProcessor processor(Vajra::request::kDefaultMaxRequestHeadBytes);
-      std::thread processor_thread([&]() {
-        processor.handle(server_socket.get());
-        server_socket.close_if_open();
-      });
+      std::thread processor_thread = start_request_processor_thread(processor, server_socket);
 
       try
       {
@@ -422,6 +434,27 @@ namespace VajraSpecCpp
         if (first_response.find("Connection: close\r\n") != std::string::npos)
         {
           fail("first keep-alive response unexpectedly forced connection close");
+        }
+
+        if (!send_all(
+                client_socket.get(),
+                "POST /zero HTTP/1.1\r\n"
+                "Host: example.test\r\n"
+                "Content-Length: 000\r\n"
+                "\r\n"))
+        {
+          fail("failed to send zero-valued content length request");
+        }
+
+        const std::string zero_length_response = read_http_response(client_socket.get());
+        if (zero_length_response.find("HTTP/1.1 200 OK\r\n") != 0)
+        {
+          fail("zero-valued content length request did not receive a success response");
+        }
+
+        if (zero_length_response.find("Connection: close\r\n") != std::string::npos)
+        {
+          fail("zero-valued content length request unexpectedly forced connection close");
         }
 
         if (!send_all(
@@ -477,10 +510,7 @@ namespace VajraSpecCpp
       suppress_sigpipe(client_socket.get());
 
       const Vajra::request::RequestProcessor processor(Vajra::request::kDefaultMaxRequestHeadBytes);
-      std::thread processor_thread([&]() {
-        processor.handle(server_socket.get());
-        server_socket.close_if_open();
-      });
+      std::thread processor_thread = start_request_processor_thread(processor, server_socket);
 
       try
       {
@@ -536,10 +566,7 @@ namespace VajraSpecCpp
       suppress_sigpipe(client_socket.get());
 
       const Vajra::request::RequestProcessor processor(Vajra::request::kDefaultMaxRequestHeadBytes);
-      std::thread processor_thread([&]() {
-        processor.handle(server_socket.get());
-        server_socket.close_if_open();
-      });
+      std::thread processor_thread = start_request_processor_thread(processor, server_socket);
 
       try
       {

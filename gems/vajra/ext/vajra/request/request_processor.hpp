@@ -8,7 +8,7 @@
 
 #include "request_head_parser.hpp"
 #include "request_head_reader.hpp"
-#include "response/static_response_writer.hpp"
+#include "response/response_writer.hpp"
 
 #include <cstddef>
 
@@ -28,7 +28,7 @@ namespace Vajra
 
       HeadReader request_head_reader_;
       RequestHeadParser request_head_parser_;
-      Vajra::response::StaticResponseWriter response_writer_;
+      Vajra::response::ResponseWriter response_writer_;
     };
   }
 }

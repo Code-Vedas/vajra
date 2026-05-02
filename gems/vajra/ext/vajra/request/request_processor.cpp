@@ -68,11 +68,25 @@ void Vajra::request::RequestProcessor::handle(int client_fd) const
     return;
   }
 
-  (void)response_writer_.send_success_response(client_fd);
+  try
+  {
+    (void)response_writer_.send(client_fd, response_writer_.success_response());
+  }
+  catch (const Vajra::response::SerializationError &error)
+  {
+    response_writer_.log_serialization_error(error);
+  }
 }
 
 void Vajra::request::RequestProcessor::reject_request_head(int client_fd, const HeadError &error) const
 {
   response_writer_.log_request_head_error(error);
-  response_writer_.send_request_head_failure_response(client_fd, error.kind());
+  try
+  {
+    (void)response_writer_.send(client_fd, response_writer_.request_head_failure_response(error.kind()));
+  }
+  catch (const Vajra::response::SerializationError &serialization_error)
+  {
+    response_writer_.log_serialization_error(serialization_error);
+  }
 }

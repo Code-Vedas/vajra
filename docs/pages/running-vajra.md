@@ -13,7 +13,7 @@ cd gems/vajra
 bundle exec exe/vajra
 ```
 
-Vajra binds to port `3000` and serves a basic `200 OK` response.
+Vajra binds to port `3000` and serves a basic serialized HTTP/1.1 response.
 
 ## Runtime Expectations
 

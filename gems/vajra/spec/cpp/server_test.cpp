@@ -7,6 +7,8 @@
 #include "request/request_head_parser.hpp"
 #include "request/request_head_reader.hpp"
 #include "request/request_head_size_validator.hpp"
+#include "response/response_serializer.hpp"
+#include "response/response_writer.hpp"
 #include "server.hpp"
 #include "vajra.hpp"
 
@@ -222,6 +224,35 @@ namespace
     return bytes_read > 0;
   }
 
+  std::string read_all(int fd)
+  {
+    std::string response;
+    char buffer[256];
+
+    for (;;)
+    {
+      const ssize_t bytes_read = recv(fd, buffer, sizeof(buffer), 0);
+      if (bytes_read < 0)
+      {
+        if (errno == EINTR)
+        {
+          continue;
+        }
+
+        fail("recv failed while reading response bytes");
+      }
+
+      if (bytes_read == 0)
+      {
+        break;
+      }
+
+      response.append(buffer, static_cast<std::size_t>(bytes_read));
+    }
+
+    return response;
+  }
+
   void wait_until_listening(int port)
   {
     for (int attempt = 0; attempt < 200; ++attempt)
@@ -421,6 +452,29 @@ namespace
     }
 
     fail("reader raised the wrong exception type");
+  }
+
+  std::string send_response_through_socket(const Vajra::response::Response &response)
+  {
+    int sockets[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
+    {
+      fail("socketpair failed while setting up response writer test");
+    }
+
+    FileDescriptorGuard reader_socket(sockets[0]);
+    FileDescriptorGuard writer_socket(sockets[1]);
+
+    {
+      Vajra::response::ResponseWriter writer;
+      if (!writer.send(writer_socket.get(), response))
+      {
+        fail("response writer failed to send a valid response");
+      }
+    }
+
+    writer_socket.close_if_open();
+    return read_all(reader_socket.get());
   }
 
   void test_start_and_stop_release_listener()
@@ -625,6 +679,176 @@ namespace
     }
 
     fail("oversized request head was not rejected");
+  }
+
+  void test_response_serializer_serializes_status_headers_and_body()
+  {
+    Vajra::response::ResponseSerializer serializer;
+    const Vajra::response::Response response{
+        Vajra::response::Status{201, "Created"},
+        {
+            Vajra::response::Header{"Content-Type", "text/plain"},
+            Vajra::response::Header{"X-Trace-Id", "trace-123"},
+        },
+        "done"};
+
+    const std::string serialized = serializer.serialize(response);
+    const std::string expected =
+        "HTTP/1.1 201 Created\r\n"
+        "Content-Type: text/plain\r\n"
+        "X-Trace-Id: trace-123\r\n"
+        "Content-Length: 4\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "done";
+
+    if (serialized != expected)
+    {
+      fail("response serializer did not produce the expected wire format");
+    }
+  }
+
+  void test_response_serializer_serializes_empty_body_with_zero_content_length()
+  {
+    Vajra::response::ResponseSerializer serializer;
+    const Vajra::response::Response response{
+        Vajra::response::Status{204, "No Content"},
+        {Vajra::response::Header{"Content-Type", "text/plain"}},
+        ""};
+
+    const std::string serialized = serializer.serialize(response);
+    if (serialized.find("Content-Length: 0\r\n") == std::string::npos)
+    {
+      fail("response serializer did not write a zero content length for an empty body");
+    }
+  }
+
+  void test_response_serializer_preserves_header_order()
+  {
+    Vajra::response::ResponseSerializer serializer;
+    const Vajra::response::Response response{
+        Vajra::response::Status{200, "OK"},
+        {
+            Vajra::response::Header{"X-First", "1"},
+            Vajra::response::Header{"X-Second", "2"},
+            Vajra::response::Header{"X-Third", "3"},
+        },
+        "OK"};
+
+    const std::string serialized = serializer.serialize(response);
+    const std::size_t first = serialized.find("X-First: 1\r\n");
+    const std::size_t second = serialized.find("X-Second: 2\r\n");
+    const std::size_t third = serialized.find("X-Third: 3\r\n");
+
+    if (first == std::string::npos || second == std::string::npos || third == std::string::npos)
+    {
+      fail("response serializer omitted headers");
+    }
+
+    if (!(first < second && second < third))
+    {
+      fail("response serializer did not preserve header order");
+    }
+  }
+
+  void expect_serialization_error(
+      const Vajra::response::Response &response,
+      const std::string &expected_message)
+  {
+    try
+    {
+      Vajra::response::ResponseSerializer serializer;
+      (void)serializer.serialize(response);
+    }
+    catch (const Vajra::response::SerializationError &error)
+    {
+      if (std::string(error.what()).find(expected_message) == std::string::npos)
+      {
+        fail("response serializer raised the wrong validation error");
+      }
+
+      return;
+    }
+
+    fail("response serializer accepted an invalid response");
+  }
+
+  void test_response_serializer_rejects_invalid_header_name()
+  {
+    expect_serialization_error(
+        Vajra::response::Response{
+            Vajra::response::Status{200, "OK"},
+            {Vajra::response::Header{"Bad Header", "value"}},
+            "OK"},
+        "response header name contains an unsafe character");
+  }
+
+  void test_response_serializer_rejects_invalid_header_value()
+  {
+    expect_serialization_error(
+        Vajra::response::Response{
+            Vajra::response::Status{200, "OK"},
+            {Vajra::response::Header{"X-Test", "bad\r\nvalue"}},
+            "OK"},
+        "response header value contains an unsafe control character");
+  }
+
+  void test_response_serializer_rejects_invalid_status()
+  {
+    expect_serialization_error(
+        Vajra::response::Response{
+            Vajra::response::Status{99, "OK"},
+            {Vajra::response::Header{"Content-Type", "text/plain"}},
+            "OK"},
+        "response status code must be a three-digit HTTP status");
+  }
+
+  void test_response_writer_sends_structured_success_response()
+  {
+    Vajra::response::ResponseWriter writer;
+    const std::string response = send_response_through_socket(writer.success_response());
+
+    if (response.find("HTTP/1.1 200 OK\r\n") != 0)
+    {
+      fail("success response did not start with a 200 OK status line");
+    }
+
+    if (response.find("Content-Type: text/plain\r\n") == std::string::npos)
+    {
+      fail("success response omitted content type");
+    }
+
+    if (response.find("Content-Length: 2\r\n") == std::string::npos)
+    {
+      fail("success response used the wrong content length");
+    }
+
+    if (response.find("\r\n\r\nOK") == std::string::npos)
+    {
+      fail("success response body did not match the serialized payload");
+    }
+  }
+
+  void test_response_writer_sends_structured_error_response()
+  {
+    Vajra::response::ResponseWriter writer;
+    const std::string response =
+        send_response_through_socket(writer.request_head_failure_response(Vajra::request::HeadFailureKind::header_too_large));
+
+    if (response.find("HTTP/1.1 431 Request Header Fields Too Large\r\n") != 0)
+    {
+      fail("error response did not start with the expected status line");
+    }
+
+    if (response.find("Content-Length: 31\r\n") == std::string::npos)
+    {
+      fail("error response used the wrong content length");
+    }
+
+    if (response.find("\r\n\r\nRequest Header Fields Too Large") == std::string::npos)
+    {
+      fail("error response body did not match the serialized payload");
+    }
   }
 
   void test_head_reader_accepts_fragmented_request_head()
@@ -834,6 +1058,14 @@ int main()
     test_parse_request_head_rejects_invalid_header_variants();
     test_parse_request_head_rejects_invalid_http_version_variants();
     test_validate_request_head_size_rejects_oversized_request_head();
+    test_response_serializer_serializes_status_headers_and_body();
+    test_response_serializer_serializes_empty_body_with_zero_content_length();
+    test_response_serializer_preserves_header_order();
+    test_response_serializer_rejects_invalid_header_name();
+    test_response_serializer_rejects_invalid_header_value();
+    test_response_serializer_rejects_invalid_status();
+    test_response_writer_sends_structured_success_response();
+    test_response_writer_sends_structured_error_response();
     test_head_reader_accepts_fragmented_request_head();
     test_head_reader_returns_incomplete_on_peer_close_before_boundary();
     test_head_reader_accepts_exact_limit_request_head();

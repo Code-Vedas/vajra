@@ -61,7 +61,7 @@ module VajraE2EProcessHelpers
       response, = read_http_response(
         socket.tap { |open_socket| open_socket.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n") }
       )
-      connection_closed = Timeout.timeout(7) { socket.read == '' }
+      connection_closed = Timeout.timeout(VajraE2EHelpers::IDLE_KEEP_ALIVE_CLOSE_TIMEOUT_SECONDS) { socket.read == '' }
       socket.close
 
       status = stop_process(wait_thread)

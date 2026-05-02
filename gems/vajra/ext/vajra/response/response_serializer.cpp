@@ -6,14 +6,15 @@
 #include "response_serializer.hpp"
 
 #include <cctype>
+#include <string_view>
 
 namespace
 {
-  bool contains_http_control_bytes(const std::string &value)
+  bool contains_invalid_http_text_bytes(const std::string &value)
   {
     for (const unsigned char character : value)
     {
-      if (character == '\r' || character == '\n')
+      if (std::iscntrl(character) != 0 && character != '\t')
       {
         return true;
       }
@@ -21,11 +22,36 @@ namespace
 
     return false;
   }
+
+  std::string lowercase_header_name(const std::string &name)
+  {
+    std::string normalized;
+    normalized.reserve(name.size());
+
+    for (const unsigned char character : name)
+    {
+      normalized.push_back(static_cast<char>(std::tolower(character)));
+    }
+
+    return normalized;
+  }
+
+  bool forbidden_framing_header(const std::string &name)
+  {
+    const std::string normalized_name = lowercase_header_name(name);
+    return normalized_name == "content-length" || normalized_name == "connection" ||
+           normalized_name == "transfer-encoding";
+  }
+
+  bool forbids_message_body(int status_code)
+  {
+    return (status_code >= 100 && status_code < 200) || status_code == 204 || status_code == 304;
+  }
 }
 
 std::string Vajra::response::ResponseSerializer::serialize(const Response &response) const
 {
-  validate_status(response.status);
+  validate_response(response);
 
   std::string serialized =
       "HTTP/1.1 " + std::to_string(response.status.code) + " " + response.status.reason_phrase + "\r\n";
@@ -44,11 +70,26 @@ std::string Vajra::response::ResponseSerializer::serialize(const Response &respo
   return serialized;
 }
 
+void Vajra::response::ResponseSerializer::validate_response(const Response &response) const
+{
+  validate_status(response.status);
+
+  for (const Header &header : response.headers)
+  {
+    validate_header(header);
+  }
+
+  if (forbids_message_body(response.status.code) && !response.body.empty())
+  {
+    throw SerializationError("response status must not include a message body");
+  }
+}
+
 void Vajra::response::ResponseSerializer::validate_status(const Status &status) const
 {
-  if (status.code < 100 || status.code > 999)
+  if (status.code < 100 || status.code > 599)
   {
-    throw SerializationError("response status code must be a three-digit HTTP status");
+    throw SerializationError("response status code must be within the HTTP/1.1 range 100-599");
   }
 
   if (status.reason_phrase.empty())
@@ -56,7 +97,7 @@ void Vajra::response::ResponseSerializer::validate_status(const Status &status) 
     throw SerializationError("response reason phrase must not be empty");
   }
 
-  if (contains_http_control_bytes(status.reason_phrase))
+  if (contains_invalid_http_text_bytes(status.reason_phrase))
   {
     throw SerializationError("response reason phrase contains an unsafe control character");
   }
@@ -77,7 +118,12 @@ void Vajra::response::ResponseSerializer::validate_header(const Header &header) 
     }
   }
 
-  if (contains_http_control_bytes(header.value))
+  if (forbidden_framing_header(header.name))
+  {
+    throw SerializationError("response headers must not override HTTP framing headers");
+  }
+
+  if (contains_invalid_http_text_bytes(header.value))
   {
     throw SerializationError("response header value contains an unsafe control character");
   }

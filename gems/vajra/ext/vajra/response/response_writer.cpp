@@ -21,8 +21,16 @@ namespace
 
 bool Vajra::response::ResponseWriter::send(int client_fd, const Response &response) const
 {
-  const std::string response_message = serializer_.serialize(response);
-  return send_response_message(client_fd, response_message);
+  try
+  {
+    const std::string response_message = serializer_.serialize(response);
+    return send_response_message(client_fd, response_message);
+  }
+  catch (const SerializationError &error)
+  {
+    log_serialization_error(error);
+    return false;
+  }
 }
 
 Vajra::response::Response Vajra::response::ResponseWriter::success_response() const

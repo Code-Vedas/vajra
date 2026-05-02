@@ -27,6 +27,7 @@ namespace Vajra
       std::string serialize(const Response &response) const;
 
     private:
+      void validate_response(const Response &response) const;
       void validate_status(const Status &status) const;
       void validate_header(const Header &header) const;
     };

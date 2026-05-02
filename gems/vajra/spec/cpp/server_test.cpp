@@ -793,6 +793,40 @@ namespace
         "response header value contains an unsafe control character");
   }
 
+  void test_response_serializer_rejects_forbidden_framing_headers()
+  {
+    expect_serialization_error(
+        Vajra::response::Response{
+            Vajra::response::Status{200, "OK"},
+            {Vajra::response::Header{"Content-Length", "999"}},
+            "OK"},
+        "response headers must not override HTTP framing headers");
+
+    expect_serialization_error(
+        Vajra::response::Response{
+            Vajra::response::Status{200, "OK"},
+            {Vajra::response::Header{"Transfer-Encoding", "chunked"}},
+            "OK"},
+        "response headers must not override HTTP framing headers");
+  }
+
+  void test_response_serializer_rejects_other_control_characters()
+  {
+    expect_serialization_error(
+        Vajra::response::Response{
+            Vajra::response::Status{200, std::string("O\0K", 3)},
+            {Vajra::response::Header{"Content-Type", "text/plain"}},
+            "OK"},
+        "response reason phrase contains an unsafe control character");
+
+    expect_serialization_error(
+        Vajra::response::Response{
+            Vajra::response::Status{200, "OK"},
+            {Vajra::response::Header{"X-Test", std::string("bad\0value", 9)}},
+            "OK"},
+        "response header value contains an unsafe control character");
+  }
+
   void test_response_serializer_rejects_invalid_status()
   {
     expect_serialization_error(
@@ -800,7 +834,73 @@ namespace
             Vajra::response::Status{99, "OK"},
             {Vajra::response::Header{"Content-Type", "text/plain"}},
             "OK"},
-        "response status code must be a three-digit HTTP status");
+        "response status code must be within the HTTP/1.1 range 100-599");
+
+    expect_serialization_error(
+        Vajra::response::Response{
+            Vajra::response::Status{600, "Custom"},
+            {Vajra::response::Header{"Content-Type", "text/plain"}},
+            "OK"},
+        "response status code must be within the HTTP/1.1 range 100-599");
+  }
+
+  void test_response_serializer_rejects_bodies_for_no_body_statuses()
+  {
+    expect_serialization_error(
+        Vajra::response::Response{
+            Vajra::response::Status{204, "No Content"},
+            {Vajra::response::Header{"Content-Type", "text/plain"}},
+            "not allowed"},
+        "response status must not include a message body");
+
+    Vajra::response::ResponseSerializer serializer;
+    const std::string serialized = serializer.serialize(
+        Vajra::response::Response{
+            Vajra::response::Status{304, "Not Modified"},
+            {Vajra::response::Header{"Content-Type", "text/plain"}},
+            ""});
+
+    if (serialized.find("Content-Length: 0\r\n") == std::string::npos)
+    {
+      fail("no-body statuses must emit a zero content length");
+    }
+
+    if (serialized.find("\r\n\r\n") == std::string::npos)
+    {
+      fail("no-body status response did not terminate headers correctly");
+    }
+  }
+
+  void test_response_writer_send_returns_false_on_serialization_failure()
+  {
+    int sockets[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
+    {
+      fail("socketpair failed while setting up invalid response writer test");
+    }
+
+    FileDescriptorGuard reader_socket(sockets[0]);
+    FileDescriptorGuard writer_socket(sockets[1]);
+
+    Vajra::response::ResponseWriter writer;
+    const bool sent = writer.send(
+        writer_socket.get(),
+        Vajra::response::Response{
+            Vajra::response::Status{200, "OK"},
+            {Vajra::response::Header{"Connection", "keep-alive"}},
+            "OK"});
+
+    if (sent)
+    {
+      fail("response writer reported success for an invalid response");
+    }
+
+    writer_socket.close_if_open();
+    const std::string response = read_all(reader_socket.get());
+    if (!response.empty())
+    {
+      fail("response writer emitted bytes for an invalid response");
+    }
   }
 
   void test_response_writer_sends_structured_success_response()
@@ -1063,9 +1163,13 @@ int main()
     test_response_serializer_preserves_header_order();
     test_response_serializer_rejects_invalid_header_name();
     test_response_serializer_rejects_invalid_header_value();
+    test_response_serializer_rejects_forbidden_framing_headers();
+    test_response_serializer_rejects_other_control_characters();
     test_response_serializer_rejects_invalid_status();
+    test_response_serializer_rejects_bodies_for_no_body_statuses();
     test_response_writer_sends_structured_success_response();
     test_response_writer_sends_structured_error_response();
+    test_response_writer_send_returns_false_on_serialization_failure();
     test_head_reader_accepts_fragmented_request_head();
     test_head_reader_returns_incomplete_on_peer_close_before_boundary();
     test_head_reader_accepts_exact_limit_request_head();

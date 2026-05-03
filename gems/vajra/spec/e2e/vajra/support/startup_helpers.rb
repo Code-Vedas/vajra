@@ -135,7 +135,7 @@ module VajraE2EStartupHelpers
         "X-Oversized: #{'a' * payload_size}\r\n" \
         "Connection: close\r\n\r\n"
       )
-      response = socket.read
+      response = read_raw_http_response(socket)
       socket.close
 
       status = stop_process(wait_thread)
@@ -158,14 +158,7 @@ module VajraE2EStartupHelpers
         "Connection: close\r\n\r\n" \
         "#{body}"
       )
-      response = +''
-      begin
-        loop do
-          response << socket.readpartial(4096)
-        end
-      rescue EOFError, Errno::ECONNRESET
-        nil
-      end
+      response = read_raw_http_response(socket)
       socket.close
 
       status = stop_process(wait_thread)

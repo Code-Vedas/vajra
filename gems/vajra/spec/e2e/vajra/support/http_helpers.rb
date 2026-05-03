@@ -39,13 +39,18 @@ module VajraE2EHttpHelpers
     end
   end
 
+  def read_raw_http_response(socket, timeout: VajraE2EHelpers::HTTP_RESPONSE_READ_TIMEOUT_SECONDS)
+    response, = read_http_response(socket, timeout:)
+    response[:raw]
+  end
+
   def request_response(port: disposable_listener_port)
     Open3.popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       selected_port = wait_for_banner(output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
       socket.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-      response = socket.read
+      response = read_raw_http_response(socket)
       socket.close
 
       status = stop_process(wait_thread)
@@ -62,7 +67,7 @@ module VajraE2EHttpHelpers
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
       socket.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-      response = socket.read
+      response = read_raw_http_response(socket)
       socket.close
 
       status = stop_process(wait_thread, timeout:)

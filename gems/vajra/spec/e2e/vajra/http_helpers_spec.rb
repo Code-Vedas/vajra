@@ -24,7 +24,7 @@ RSpec.describe 'Vajra e2e HTTP helpers', :e2e, :integration do # rubocop:disable
   end
 
   it 'parses Content-Length case-insensitively when reading a response' do
-    socket = instance_double('socket')
+    socket = instance_double(TCPSocket)
 
     allow(socket).to receive(:readpartial).and_return(
       "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nOK"

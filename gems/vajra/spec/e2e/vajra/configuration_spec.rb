@@ -84,6 +84,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
   end
 
   it 'prefers VAJRA_PORT over the Ruby port option even when the Ruby port would conflict' do
+    blocking_server = nil
     blocking_server = bind_port
     ruby_port = blocking_server.addr[1]
 
@@ -96,7 +97,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     expect(request[:port]).not_to eq(ruby_port)
     expect(request[:response]).to include('HTTP/1.1 200 OK')
   ensure
-    blocking_server.close
+    blocking_server&.close
   end
 
   it 'lets Ruby configure max_request_head_bytes when the env variable is unset' do

@@ -26,6 +26,19 @@ namespace Vajra
       }
     }
 
+    bool known_frame_family(FrameFamily family)
+    {
+      for (const FrameFamily known_family : kFrameFamilies)
+      {
+        if (known_family == family)
+        {
+          return true;
+        }
+      }
+
+      return false;
+    }
+
     ChannelKind owning_channel(FrameFamily family)
     {
       return request_channel_family(family) ? ChannelKind::request : ChannelKind::control;
@@ -33,6 +46,11 @@ namespace Vajra
 
     bool valid_on_channel(FrameFamily family, ChannelKind channel)
     {
+      if (!known_frame_family(family))
+      {
+        return false;
+      }
+
       return owning_channel(family) == channel;
     }
 

@@ -26,6 +26,11 @@ namespace Vajra
 
     bool frame_family_available(FrameFamily family, ProtocolVersion version)
     {
+      if (!known_frame_family(family))
+      {
+        return false;
+      }
+
       if (check_compatibility(kProtocolVersion1_0, version) != CompatibilityResult::compatible)
       {
         return false;

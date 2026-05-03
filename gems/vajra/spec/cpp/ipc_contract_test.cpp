@@ -38,6 +38,21 @@ namespace VajraSpecCpp
       }
     }
 
+    void test_unknown_enum_values_are_not_treated_as_valid_control_families()
+    {
+      const Vajra::ipc::FrameFamily unknown_family = static_cast<Vajra::ipc::FrameFamily>(0x9999);
+
+      if (Vajra::ipc::known_frame_family(unknown_family))
+      {
+        fail("unknown ipc frame family was treated as known");
+      }
+
+      if (Vajra::ipc::valid_on_channel(unknown_family, Vajra::ipc::ChannelKind::control))
+      {
+        fail("unknown ipc frame family was treated as valid on the control channel");
+      }
+    }
+
     void test_frame_headers_round_trip_through_binary_encoding()
     {
       const Vajra::ipc::FrameHeader expected_header = {
@@ -65,6 +80,28 @@ namespace VajraSpecCpp
       }
     }
 
+    void test_reserved_header_bits_are_rejected_during_header_decode()
+    {
+      std::array<std::uint8_t, Vajra::ipc::kFrameHeaderSize> encoded_header =
+          Vajra::ipc::encode_frame_header({
+              Vajra::ipc::ChannelKind::control,
+              Vajra::ipc::FrameFamily::protocol_version_negotiation,
+              Vajra::ipc::kProtocolVersion1_0,
+          });
+      encoded_header[1] = 0x01;
+
+      Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::unknown_channel_kind;
+      if (Vajra::ipc::decode_frame_header(encoded_header, error).has_value())
+      {
+        fail("reserved ipc header bits decoded successfully");
+      }
+
+      if (error != Vajra::ipc::HeaderDecodeError::reserved_bits_set)
+      {
+        fail("reserved ipc header bits did not report the right decode failure");
+      }
+    }
+
     void test_unknown_channel_kind_is_rejected_during_header_decode()
     {
       std::array<std::uint8_t, Vajra::ipc::kFrameHeaderSize> encoded_header =
@@ -84,6 +121,48 @@ namespace VajraSpecCpp
       if (error != Vajra::ipc::HeaderDecodeError::unknown_channel_kind)
       {
         fail("invalid ipc channel kind did not report the right decode failure");
+      }
+    }
+
+    void test_unsupported_protocol_versions_are_rejected_during_header_decode()
+    {
+      std::array<std::uint8_t, Vajra::ipc::kFrameHeaderSize> encoded_header =
+          Vajra::ipc::encode_frame_header({
+              Vajra::ipc::ChannelKind::control,
+              Vajra::ipc::FrameFamily::protocol_version_negotiation,
+              Vajra::ipc::ProtocolVersion{1, 1},
+          });
+
+      Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::unknown_channel_kind;
+      if (Vajra::ipc::decode_frame_header(encoded_header, error).has_value())
+      {
+        fail("unsupported ipc protocol version decoded successfully");
+      }
+
+      if (error != Vajra::ipc::HeaderDecodeError::unsupported_protocol_version)
+      {
+        fail("unsupported ipc protocol version did not report the right decode failure");
+      }
+    }
+
+    void test_reserved_frame_families_are_rejected_during_header_decode()
+    {
+      std::array<std::uint8_t, Vajra::ipc::kFrameHeaderSize> encoded_header =
+          Vajra::ipc::encode_frame_header({
+              Vajra::ipc::ChannelKind::control,
+              Vajra::ipc::FrameFamily::telemetry_status_reserved,
+              Vajra::ipc::kProtocolVersion1_0,
+          });
+
+      Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::unknown_channel_kind;
+      if (Vajra::ipc::decode_frame_header(encoded_header, error).has_value())
+      {
+        fail("reserved ipc frame family decoded successfully");
+      }
+
+      if (error != Vajra::ipc::HeaderDecodeError::unavailable_frame_family)
+      {
+        fail("reserved ipc frame family did not report the right decode failure");
       }
     }
 
@@ -236,6 +315,13 @@ namespace VajraSpecCpp
       {
         fail("unsupported protocol versions must not expose active frame families");
       }
+
+      if (Vajra::ipc::frame_family_available(
+              static_cast<Vajra::ipc::FrameFamily>(0x9999),
+              Vajra::ipc::kProtocolVersion1_0))
+      {
+        fail("unknown frame families must not become available in the baseline protocol");
+      }
     }
   }
 
@@ -243,10 +329,14 @@ namespace VajraSpecCpp
   {
     test_frame_families_round_trip_through_wire_ids();
     test_unknown_wire_id_is_rejected();
+    test_unknown_enum_values_are_not_treated_as_valid_control_families();
     test_frame_headers_round_trip_through_binary_encoding();
+    test_reserved_header_bits_are_rejected_during_header_decode();
     test_unknown_channel_kind_is_rejected_during_header_decode();
     test_unknown_frame_family_is_rejected_during_header_decode();
     test_channel_family_mismatch_is_rejected_during_header_decode();
+    test_unsupported_protocol_versions_are_rejected_during_header_decode();
+    test_reserved_frame_families_are_rejected_during_header_decode();
     test_frame_families_are_assigned_to_exactly_one_channel();
     test_request_and_control_families_stay_separated();
     test_reserved_frame_family_is_not_implicitly_available();

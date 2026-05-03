@@ -28,9 +28,12 @@ namespace Vajra
 
     enum class HeaderDecodeError
     {
+      reserved_bits_set,
       unknown_channel_kind,
       unknown_frame_family,
       channel_family_mismatch,
+      unsupported_protocol_version,
+      unavailable_frame_family,
     };
 
     constexpr std::size_t kFrameHeaderSize = 8;

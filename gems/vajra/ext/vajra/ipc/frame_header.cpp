@@ -5,6 +5,8 @@
 
 #include "frame_header.hpp"
 
+#include "protocol_compatibility.hpp"
+
 namespace Vajra
 {
   namespace ipc
@@ -43,6 +45,12 @@ namespace Vajra
         const std::array<std::uint8_t, kFrameHeaderSize> &encoded_header,
         HeaderDecodeError &error)
     {
+      if (encoded_header[1] != 0)
+      {
+        error = HeaderDecodeError::reserved_bits_set;
+        return std::nullopt;
+      }
+
       const std::uint8_t encoded_channel = encoded_header[0];
       const std::optional<FrameFamily> family = decode_frame_family(read_big_endian_u16(encoded_header, 2));
       const ProtocolVersion version = {
@@ -71,9 +79,21 @@ namespace Vajra
         return std::nullopt;
       }
 
+      if (check_compatibility(kProtocolVersion1_0, version) != CompatibilityResult::compatible)
+      {
+        error = HeaderDecodeError::unsupported_protocol_version;
+        return std::nullopt;
+      }
+
       if (!valid_on_channel(family.value(), channel))
       {
         error = HeaderDecodeError::channel_family_mismatch;
+        return std::nullopt;
+      }
+
+      if (!frame_family_available(family.value(), version))
+      {
+        error = HeaderDecodeError::unavailable_frame_family;
         return std::nullopt;
       }
 

@@ -31,6 +31,7 @@ namespace Vajra
         FrameFamily::telemetry_status_reserved,
     };
 
+    bool known_frame_family(FrameFamily family);
     ChannelKind owning_channel(FrameFamily family);
     bool valid_on_channel(FrameFamily family, ChannelKind channel);
     bool reserved_family(FrameFamily family);

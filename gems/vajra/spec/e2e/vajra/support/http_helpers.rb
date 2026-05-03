@@ -14,7 +14,7 @@ module VajraE2EHttpHelpers
       name, value = line.split(':', 2)
       raise ArgumentError, "invalid HTTP response header line: #{line.inspect} in #{response.inspect}" if value.nil?
 
-      [name, value.strip]
+      [name.downcase, value.strip]
     end
 
     { raw: response, status_line:, headers: parsed_headers, body: body || '' }

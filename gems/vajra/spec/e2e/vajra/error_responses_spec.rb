@@ -20,9 +20,9 @@ RSpec.describe 'Vajra error responses', :e2e, :integration do # rubocop:disable 
       body: 'Bad Request'
     )
     expect(response[:headers]).to include(
-      'Content-Type' => 'text/plain',
-      'Content-Length' => '11',
-      'Connection' => 'close'
+      'content-type' => 'text/plain',
+      'content-length' => '11',
+      'connection' => 'close'
     )
     expect(result[:output]).to include('request rejected (400 bad request)')
     expect(result[:output]).not_to include('HTTP/1.1 200 OK')
@@ -40,9 +40,9 @@ RSpec.describe 'Vajra error responses', :e2e, :integration do # rubocop:disable 
       body: 'Bad Request'
     )
     expect(response[:headers]).to include(
-      'Content-Type' => 'text/plain',
-      'Content-Length' => '11',
-      'Connection' => 'close'
+      'content-type' => 'text/plain',
+      'content-length' => '11',
+      'connection' => 'close'
     )
   end
 
@@ -60,9 +60,9 @@ RSpec.describe 'Vajra error responses', :e2e, :integration do # rubocop:disable 
       body: 'Request Header Fields Too Large'
     )
     expect(response[:headers]).to include(
-      'Content-Type' => 'text/plain',
-      'Content-Length' => '31',
-      'Connection' => 'close'
+      'content-type' => 'text/plain',
+      'content-length' => '31',
+      'connection' => 'close'
     )
     expect(result[:output]).to include('request rejected (431 request header fields too large)')
   end

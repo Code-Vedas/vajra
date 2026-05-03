@@ -51,7 +51,7 @@ module VajraE2EProcessHelpers
       selected_port = wait_for_banner(output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
-      response, = read_http_response(
+      response, trailing_bytes = read_http_response(
         socket.tap { |open_socket| open_socket.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n") }
       )
       connection_closed = Timeout.timeout(VajraE2EHelpers::IDLE_KEEP_ALIVE_CLOSE_TIMEOUT_SECONDS) { socket.read == '' }
@@ -59,7 +59,7 @@ module VajraE2EProcessHelpers
 
       status = stop_process(wait_thread)
 
-      { exitstatus: status.exitstatus, response:, connection_closed:, port: selected_port }
+      { exitstatus: status.exitstatus, response:, connection_closed:, trailing_bytes:, port: selected_port }
     ensure
       cleanup_process(wait_thread, output)
     end

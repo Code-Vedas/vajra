@@ -79,9 +79,9 @@ RSpec.describe 'Vajra lifecycle', :e2e, :integration do # rubocop:disable RSpec/
       body: 'OK'
     )
     expect(response[:headers]).to include(
-      'Content-Type' => 'text/plain',
-      'Content-Length' => '2',
-      'Connection' => 'close'
+      'content-type' => 'text/plain',
+      'content-length' => '2',
+      'connection' => 'close'
     )
   end
 end

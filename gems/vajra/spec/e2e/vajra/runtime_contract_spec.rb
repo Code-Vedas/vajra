@@ -15,9 +15,9 @@ RSpec.describe 'Vajra runtime contract', :e2e, :integration do # rubocop:disable
     expect(result[:exitstatus]).to eq(0)
     expect(response[:status_line]).to eq('HTTP/1.1 200 OK')
     expect(response[:headers]).to include(
-      'Content-Type' => 'text/plain',
-      'Content-Length' => '2',
-      'Connection' => 'close'
+      'content-type' => 'text/plain',
+      'content-length' => '2',
+      'connection' => 'close'
     )
     expect(response[:body]).to eq('OK')
   end
@@ -31,18 +31,18 @@ RSpec.describe 'Vajra runtime contract', :e2e, :integration do # rubocop:disable
       body: 'OK'
     )
     expect(result[:first_response][:headers]).to include(
-      'Content-Type' => 'text/plain',
-      'Content-Length' => '2'
+      'content-type' => 'text/plain',
+      'content-length' => '2'
     )
-    expect(result[:first_response][:headers]).not_to include('Connection')
+    expect(result[:first_response][:headers]).not_to include('connection')
     expect(result[:second_response]).to include(
       status_line: 'HTTP/1.1 200 OK',
       body: 'OK'
     )
     expect(result[:second_response][:headers]).to include(
-      'Content-Type' => 'text/plain',
-      'Content-Length' => '2',
-      'Connection' => 'close'
+      'content-type' => 'text/plain',
+      'content-length' => '2',
+      'connection' => 'close'
     )
     expect(result[:connection_closed]).to be(true)
     expect(result[:trailing_bytes]).to eq('')
@@ -56,12 +56,12 @@ RSpec.describe 'Vajra runtime contract', :e2e, :integration do # rubocop:disable
       status_line: 'HTTP/1.1 200 OK',
       body: 'OK'
     )
-    expect(result[:first_response][:headers]).not_to include('Connection')
+    expect(result[:first_response][:headers]).not_to include('connection')
     expect(result[:second_response]).to include(
       status_line: 'HTTP/1.1 200 OK',
       body: 'OK'
     )
-    expect(result[:second_response][:headers]).to include('Connection' => 'close')
+    expect(result[:second_response][:headers]).to include('connection' => 'close')
     expect(result[:connection_closed]).to be(true)
     expect(result[:trailing_bytes]).to eq('')
   end
@@ -75,11 +75,12 @@ RSpec.describe 'Vajra runtime contract', :e2e, :integration do # rubocop:disable
       body: 'OK'
     )
     expect(result[:response][:headers]).to include(
-      'Content-Type' => 'text/plain',
-      'Content-Length' => '2'
+      'content-type' => 'text/plain',
+      'content-length' => '2'
     )
-    expect(result[:response][:headers]).not_to include('Connection')
+    expect(result[:response][:headers]).not_to include('connection')
     expect(result[:connection_closed]).to be(true)
+    expect(result[:trailing_bytes]).to eq('')
   end
 
   it 'closes an incomplete request without producing a success response' do
@@ -110,8 +111,8 @@ RSpec.describe 'Vajra runtime contract', :e2e, :integration do # rubocop:disable
       body: 'OK'
     )
     expect(response[:headers]).to include(
-      'Content-Type' => 'text/plain',
-      'Content-Length' => '2'
+      'content-type' => 'text/plain',
+      'content-length' => '2'
     )
   end
 end

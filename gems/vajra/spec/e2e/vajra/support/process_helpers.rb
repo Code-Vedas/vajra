@@ -42,13 +42,6 @@ module VajraE2EProcessHelpers
     0
   end
 
-  def candidate_listener_port
-    server = TCPServer.new(VajraE2EHelpers::LISTENER_BIND_HOST, 0)
-    server.addr[1]
-  ensure
-    server&.close
-  end
-
   def bind_port(port: disposable_listener_port)
     TCPServer.new(VajraE2EHelpers::LISTENER_BIND_HOST, port)
   end

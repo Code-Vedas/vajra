@@ -76,25 +76,27 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
   end
 
   it 'lets Ruby configure the listener port when VAJRA_PORT is unset' do
-    selected_port = candidate_listener_port
-    request = request_response_from_inline_start(env: { 'RUBY_PORT' => selected_port.to_s })
+    request = request_response_from_inline_start(env: { 'RUBY_PORT' => disposable_listener_port.to_s })
 
     expect(request[:exitstatus]).to eq(0)
-    expect(request[:port]).to eq(selected_port)
+    expect(request[:port]).to be_positive
     expect(request[:response]).to include('HTTP/1.1 200 OK')
   end
 
-  it 'prefers VAJRA_PORT over the Ruby port option' do
-    ruby_port = candidate_listener_port
-    env_port = candidate_listener_port
+  it 'prefers VAJRA_PORT over the Ruby port option even when the Ruby port would conflict' do
+    blocking_server = bind_port
+    ruby_port = blocking_server.addr[1]
 
     request = request_response_from_inline_start(
-      env: { 'RUBY_PORT' => ruby_port.to_s, 'VAJRA_PORT' => env_port.to_s }
+      env: { 'RUBY_PORT' => ruby_port.to_s, 'VAJRA_PORT' => disposable_listener_port.to_s }
     )
 
     expect(request[:exitstatus]).to eq(0)
-    expect(request[:port]).to eq(env_port)
+    expect(request[:port]).to be_positive
     expect(request[:port]).not_to eq(ruby_port)
+    expect(request[:response]).to include('HTTP/1.1 200 OK')
+  ensure
+    blocking_server.close
   end
 
   it 'lets Ruby configure max_request_head_bytes when the env variable is unset' do

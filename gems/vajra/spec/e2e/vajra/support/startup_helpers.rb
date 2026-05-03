@@ -103,17 +103,22 @@ module VajraE2EStartupHelpers
     RUBY
 
     max_attempts.times do |attempt|
-      selected_port = candidate_listener_port
+      selected_port = begin
+        server = TCPServer.new(VajraE2EHelpers::LISTENER_BIND_HOST, 0)
+        server.addr[1]
+      ensure
+        server&.close
+      end
       result = Open3.popen2e(
         vajra_env(port: selected_port), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT
       ) do |_stdin, output, wait_thread|
         status = Timeout.timeout(15) { wait_thread.value }
-        { exitstatus: status.exitstatus, output: output.read }
+        { exitstatus: status.exitstatus, output: output.read, port: selected_port }
       ensure
         cleanup_process(wait_thread, output)
       end
 
-      next if bind_conflict_output?(result[:output], selected_port) && attempt < max_attempts - 1
+      next if bind_conflict_output?(result[:output], result[:port]) && attempt < max_attempts - 1
 
       return result
     end

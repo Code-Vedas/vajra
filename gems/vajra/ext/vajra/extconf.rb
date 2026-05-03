@@ -7,7 +7,6 @@
 
 require 'mkmf'
 
-append_cppflags('-std=c++17')
 append_cflags('-fvisibility=hidden')
 
 source_files = Dir.chdir(__dir__) { Dir.glob('**/*.cpp') }
@@ -19,6 +18,7 @@ raise "duplicate native source basenames are not supported: #{duplicate_basename
 
 # mkmf exposes these globals as the extension-source configuration surface.
 # rubocop:disable Style/GlobalVars
+$CXXFLAGS = "#{$CXXFLAGS} -std=c++17".strip
 $VPATH.concat(
   source_directories
     .reject { |directory| directory == '.' }

@@ -15,6 +15,11 @@ module VajraE2EHelpers
   PACKAGE_ROOT = File.expand_path('../..', __dir__)
   LISTENER_HOST = '127.0.0.1'
   LISTENER_BIND_HOST = '0.0.0.0'
+  HTTP_RESPONSE_READ_TIMEOUT_SECONDS = 2
+  # Keep this synchronized with kRequestHeadReadTimeoutSeconds in
+  # ext/vajra/request/request_head_reader.cpp.
+  REQUEST_HEAD_READ_TIMEOUT_SECONDS = 5
+  IDLE_KEEP_ALIVE_CLOSE_TIMEOUT_SECONDS = REQUEST_HEAD_READ_TIMEOUT_SECONDS + 1
 
   def vajra_command(*args)
     ['bundle', 'exec', RbConfig.ruby, '-Ilib', 'exe/vajra', *args]

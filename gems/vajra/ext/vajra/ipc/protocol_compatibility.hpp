@@ -21,6 +21,7 @@ namespace Vajra
     };
 
     CompatibilityResult check_compatibility(ProtocolVersion local, ProtocolVersion remote);
+    bool supported_protocol_version(ProtocolVersion version);
     bool frame_family_available(FrameFamily family, ProtocolVersion version);
   }
 }

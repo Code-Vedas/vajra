@@ -7,6 +7,8 @@
 
 #include "protocol_compatibility.hpp"
 
+#include <stdexcept>
+
 namespace Vajra
 {
   namespace ipc
@@ -32,6 +34,21 @@ namespace Vajra
 
     std::array<std::uint8_t, kFrameHeaderSize> encode_frame_header(const FrameHeader &header)
     {
+      if (!known_frame_family(header.family))
+      {
+        throw std::invalid_argument("cannot encode unknown ipc frame family");
+      }
+
+      if (!valid_on_channel(header.family, header.channel))
+      {
+        throw std::invalid_argument("cannot encode ipc frame family on the wrong channel");
+      }
+
+      if (!frame_family_available(header.family, header.version))
+      {
+        throw std::invalid_argument("cannot encode unavailable ipc frame family for the requested protocol version");
+      }
+
       std::array<std::uint8_t, kFrameHeaderSize> encoded_header{};
       encoded_header[0] = static_cast<std::uint8_t>(header.channel);
       encoded_header[1] = 0;
@@ -79,15 +96,24 @@ namespace Vajra
         return std::nullopt;
       }
 
-      if (check_compatibility(kProtocolVersion1_0, version) != CompatibilityResult::compatible)
-      {
-        error = HeaderDecodeError::unsupported_protocol_version;
-        return std::nullopt;
-      }
-
       if (!valid_on_channel(family.value(), channel))
       {
         error = HeaderDecodeError::channel_family_mismatch;
+        return std::nullopt;
+      }
+
+      if (family.value() == FrameFamily::protocol_version_negotiation)
+      {
+        return FrameHeader{
+            channel,
+            family.value(),
+            version,
+        };
+      }
+
+      if (!supported_protocol_version(version))
+      {
+        error = HeaderDecodeError::unsupported_protocol_version;
         return std::nullopt;
       }
 

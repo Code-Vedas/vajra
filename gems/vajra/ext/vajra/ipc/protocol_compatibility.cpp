@@ -9,6 +9,11 @@ namespace Vajra
 {
   namespace ipc
   {
+    bool supported_protocol_version(ProtocolVersion version)
+    {
+      return version == kProtocolVersion1_0;
+    }
+
     CompatibilityResult check_compatibility(ProtocolVersion local, ProtocolVersion remote)
     {
       if (local.major != remote.major)
@@ -31,12 +36,29 @@ namespace Vajra
         return false;
       }
 
-      if (check_compatibility(kProtocolVersion1_0, version) != CompatibilityResult::compatible)
+      if (!supported_protocol_version(version))
       {
         return false;
       }
 
-      return !reserved_family(family);
+      switch (family)
+      {
+      case FrameFamily::request_execution_input:
+      case FrameFamily::request_body_continuation:
+      case FrameFamily::response_metadata_result:
+      case FrameFamily::response_body_continuation:
+      case FrameFamily::protocol_version_negotiation:
+      case FrameFamily::process_registration_identity:
+      case FrameFamily::readiness_boot_result:
+      case FrameFamily::lifecycle_command:
+      case FrameFamily::lifecycle_state_notification:
+      case FrameFamily::diagnostics_error_reporting:
+        return true;
+      case FrameFamily::telemetry_status_reserved:
+        return false;
+      }
+
+      return false;
     }
   }
 }

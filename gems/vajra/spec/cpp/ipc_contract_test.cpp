@@ -12,6 +12,7 @@
 
 #include <array>
 #include <optional>
+#include <stdexcept>
 
 namespace VajraSpecCpp
 {
@@ -51,6 +52,15 @@ namespace VajraSpecCpp
       {
         fail("unknown ipc frame family was treated as valid on the control channel");
       }
+
+      try
+      {
+        static_cast<void>(Vajra::ipc::owning_channel(unknown_family));
+        fail("unknown ipc frame family produced an owning channel");
+      }
+      catch (const std::invalid_argument &)
+      {
+      }
     }
 
     void test_frame_headers_round_trip_through_binary_encoding()
@@ -77,6 +87,48 @@ namespace VajraSpecCpp
           decoded_header->version != expected_header.version)
       {
         fail("ipc frame header did not round trip through binary encoding");
+      }
+    }
+
+    void test_frame_header_encoding_rejects_invalid_contract_tuples()
+    {
+      try
+      {
+        static_cast<void>(Vajra::ipc::encode_frame_header({
+            Vajra::ipc::ChannelKind::request,
+            Vajra::ipc::FrameFamily::lifecycle_command,
+            Vajra::ipc::kProtocolVersion1_0,
+        }));
+        fail("ipc frame header encoding accepted a channel/family mismatch");
+      }
+      catch (const std::invalid_argument &)
+      {
+      }
+
+      try
+      {
+        static_cast<void>(Vajra::ipc::encode_frame_header({
+            Vajra::ipc::ChannelKind::control,
+            Vajra::ipc::FrameFamily::telemetry_status_reserved,
+            Vajra::ipc::kProtocolVersion1_0,
+        }));
+        fail("ipc frame header encoding accepted a reserved frame family");
+      }
+      catch (const std::invalid_argument &)
+      {
+      }
+
+      try
+      {
+        static_cast<void>(Vajra::ipc::encode_frame_header({
+            Vajra::ipc::ChannelKind::control,
+            Vajra::ipc::FrameFamily::protocol_version_negotiation,
+            Vajra::ipc::ProtocolVersion{1, 1},
+        }));
+        fail("ipc frame header encoding accepted an unsupported protocol version");
+      }
+      catch (const std::invalid_argument &)
+      {
       }
     }
 
@@ -126,12 +178,16 @@ namespace VajraSpecCpp
 
     void test_unsupported_protocol_versions_are_rejected_during_header_decode()
     {
-      std::array<std::uint8_t, Vajra::ipc::kFrameHeaderSize> encoded_header =
-          Vajra::ipc::encode_frame_header({
-              Vajra::ipc::ChannelKind::control,
-              Vajra::ipc::FrameFamily::protocol_version_negotiation,
-              Vajra::ipc::ProtocolVersion{1, 1},
-          });
+      const std::array<std::uint8_t, Vajra::ipc::kFrameHeaderSize> encoded_header = {
+          static_cast<std::uint8_t>(Vajra::ipc::ChannelKind::control),
+          0x00,
+          0x20,
+          0x02,
+          0x00,
+          0x01,
+          0x00,
+          0x01,
+      };
 
       Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::unknown_channel_kind;
       if (Vajra::ipc::decode_frame_header(encoded_header, error).has_value())
@@ -145,14 +201,47 @@ namespace VajraSpecCpp
       }
     }
 
+    void test_protocol_version_negotiation_headers_decode_even_for_unsupported_versions()
+    {
+      const std::array<std::uint8_t, Vajra::ipc::kFrameHeaderSize> encoded_header = {
+          static_cast<std::uint8_t>(Vajra::ipc::ChannelKind::control),
+          0x00,
+          0x20,
+          0x01,
+          0x00,
+          0x01,
+          0x00,
+          0x01,
+      };
+
+      Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::unsupported_protocol_version;
+      const std::optional<Vajra::ipc::FrameHeader> decoded_header =
+          Vajra::ipc::decode_frame_header(encoded_header, error);
+
+      if (!decoded_header.has_value())
+      {
+        fail("protocol negotiation header for an unsupported version did not decode structurally");
+      }
+
+      if (decoded_header->family != Vajra::ipc::FrameFamily::protocol_version_negotiation ||
+          decoded_header->version != Vajra::ipc::ProtocolVersion{1, 1})
+      {
+        fail("protocol negotiation header did not preserve the advertised remote version");
+      }
+    }
+
     void test_reserved_frame_families_are_rejected_during_header_decode()
     {
-      std::array<std::uint8_t, Vajra::ipc::kFrameHeaderSize> encoded_header =
-          Vajra::ipc::encode_frame_header({
-              Vajra::ipc::ChannelKind::control,
-              Vajra::ipc::FrameFamily::telemetry_status_reserved,
-              Vajra::ipc::kProtocolVersion1_0,
-          });
+      const std::array<std::uint8_t, Vajra::ipc::kFrameHeaderSize> encoded_header = {
+          static_cast<std::uint8_t>(Vajra::ipc::ChannelKind::control),
+          0x00,
+          0x20,
+          0x07,
+          0x00,
+          0x01,
+          0x00,
+          0x00,
+      };
 
       Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::unknown_channel_kind;
       if (Vajra::ipc::decode_frame_header(encoded_header, error).has_value())
@@ -322,6 +411,13 @@ namespace VajraSpecCpp
       {
         fail("unknown frame families must not become available in the baseline protocol");
       }
+
+      if (Vajra::ipc::frame_family_available(
+              Vajra::ipc::FrameFamily::telemetry_status_reserved,
+              Vajra::ipc::ProtocolVersion{1, 1}))
+      {
+        fail("reserved frame families must not become available without an explicit version table entry");
+      }
     }
   }
 
@@ -331,11 +427,13 @@ namespace VajraSpecCpp
     test_unknown_wire_id_is_rejected();
     test_unknown_enum_values_are_not_treated_as_valid_control_families();
     test_frame_headers_round_trip_through_binary_encoding();
+    test_frame_header_encoding_rejects_invalid_contract_tuples();
     test_reserved_header_bits_are_rejected_during_header_decode();
     test_unknown_channel_kind_is_rejected_during_header_decode();
     test_unknown_frame_family_is_rejected_during_header_decode();
     test_channel_family_mismatch_is_rejected_during_header_decode();
     test_unsupported_protocol_versions_are_rejected_during_header_decode();
+    test_protocol_version_negotiation_headers_decode_even_for_unsupported_versions();
     test_reserved_frame_families_are_rejected_during_header_decode();
     test_frame_families_are_assigned_to_exactly_one_channel();
     test_request_and_control_families_stay_separated();

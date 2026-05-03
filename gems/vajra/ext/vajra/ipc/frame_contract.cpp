@@ -5,27 +5,12 @@
 
 #include "frame_contract.hpp"
 
+#include <stdexcept>
+
 namespace Vajra
 {
   namespace ipc
   {
-    namespace
-    {
-      bool request_channel_family(FrameFamily family)
-      {
-        switch (family)
-        {
-        case FrameFamily::request_execution_input:
-        case FrameFamily::request_body_continuation:
-        case FrameFamily::response_metadata_result:
-        case FrameFamily::response_body_continuation:
-          return true;
-        default:
-          return false;
-        }
-      }
-    }
-
     bool known_frame_family(FrameFamily family)
     {
       for (const FrameFamily known_family : kFrameFamilies)
@@ -41,7 +26,24 @@ namespace Vajra
 
     ChannelKind owning_channel(FrameFamily family)
     {
-      return request_channel_family(family) ? ChannelKind::request : ChannelKind::control;
+      switch (family)
+      {
+      case FrameFamily::request_execution_input:
+      case FrameFamily::request_body_continuation:
+      case FrameFamily::response_metadata_result:
+      case FrameFamily::response_body_continuation:
+        return ChannelKind::request;
+      case FrameFamily::protocol_version_negotiation:
+      case FrameFamily::process_registration_identity:
+      case FrameFamily::readiness_boot_result:
+      case FrameFamily::lifecycle_command:
+      case FrameFamily::lifecycle_state_notification:
+      case FrameFamily::diagnostics_error_reporting:
+      case FrameFamily::telemetry_status_reserved:
+        return ChannelKind::control;
+      }
+
+      throw std::invalid_argument("unknown ipc frame family");
     }
 
     bool valid_on_channel(FrameFamily family, ChannelKind channel)

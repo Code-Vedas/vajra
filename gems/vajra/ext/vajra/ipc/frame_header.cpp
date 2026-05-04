@@ -128,15 +128,15 @@ namespace Vajra
         };
       }
 
-      if (!supported_protocol_version(version))
-      {
-        error = HeaderDecodeError::unsupported_protocol_version;
-        return std::nullopt;
-      }
-
       if (reserved_family(family.value()))
       {
         error = HeaderDecodeError::reserved_frame_family;
+        return std::nullopt;
+      }
+
+      if (!supported_protocol_version(version))
+      {
+        error = HeaderDecodeError::unsupported_protocol_version;
         return std::nullopt;
       }
 

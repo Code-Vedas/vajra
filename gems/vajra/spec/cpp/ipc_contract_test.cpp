@@ -276,6 +276,28 @@ namespace VajraSpecCpp
       {
         fail("reserved ipc frame family did not report the right decode failure");
       }
+
+      const std::array<std::uint8_t, Vajra::ipc::kFrameHeaderSize> unsupported_version_header = {
+          static_cast<std::uint8_t>(Vajra::ipc::ChannelKind::control),
+          0x00,
+          0x20,
+          0x07,
+          0x00,
+          0x01,
+          0x00,
+          0x01,
+      };
+
+      error = Vajra::ipc::HeaderDecodeError::unknown_channel_kind;
+      if (Vajra::ipc::decode_frame_header(unsupported_version_header, error).has_value())
+      {
+        fail("reserved ipc frame family with an unsupported version decoded successfully");
+      }
+
+      if (error != Vajra::ipc::HeaderDecodeError::reserved_frame_family)
+      {
+        fail("reserved ipc frame family lost its specific decode failure on an unsupported version");
+      }
     }
 
     void test_unknown_frame_family_is_rejected_during_header_decode()

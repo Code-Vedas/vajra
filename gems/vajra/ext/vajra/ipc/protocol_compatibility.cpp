@@ -26,11 +26,6 @@ namespace Vajra
         return CompatibilityResult::incompatible_major;
       }
 
-      if (remote.minor < local.minor)
-      {
-        return CompatibilityResult::remote_older_minor;
-      }
-
       if (remote.minor > local.minor)
       {
         return CompatibilityResult::remote_newer_minor;
@@ -44,7 +39,7 @@ namespace Vajra
       return CompatibilityResult::compatible;
     }
 
-    bool frame_family_available(FrameFamily family, ProtocolVersion version)
+    bool frame_family_active_for_protocol_version(FrameFamily family, ProtocolVersion version)
     {
       if (!known_frame_family(family))
       {

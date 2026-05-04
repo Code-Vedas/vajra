@@ -374,7 +374,7 @@ namespace VajraSpecCpp
         fail("reserved telemetry frame family is not marked reserved");
       }
 
-      if (Vajra::ipc::frame_family_available(
+      if (Vajra::ipc::frame_family_active_for_protocol_version(
               Vajra::ipc::FrameFamily::telemetry_status_reserved,
               Vajra::ipc::kProtocolVersion1_0))
       {
@@ -415,13 +415,6 @@ namespace VajraSpecCpp
     void test_unsupported_minor_version_is_rejected()
     {
       if (Vajra::ipc::check_compatibility(
-              Vajra::ipc::ProtocolVersion{1, 1},
-              Vajra::ipc::kProtocolVersion1_0) != Vajra::ipc::CompatibilityResult::unsupported_local_version)
-      {
-        fail("ipc compatibility check accepted an unsupported local minor version");
-      }
-
-      if (Vajra::ipc::check_compatibility(
               Vajra::ipc::kProtocolVersion1_0,
               Vajra::ipc::ProtocolVersion{1, 1}) != Vajra::ipc::CompatibilityResult::remote_newer_minor)
       {
@@ -432,34 +425,34 @@ namespace VajraSpecCpp
               Vajra::ipc::ProtocolVersion{1, 1},
               Vajra::ipc::ProtocolVersion{1, 0}) != Vajra::ipc::CompatibilityResult::unsupported_local_version)
       {
-        fail("ipc compatibility check accepted a locally unsupported older-minor comparison");
+        fail("ipc compatibility check accepted a locally unsupported minor version");
       }
     }
 
     void test_supported_frame_families_follow_protocol_compatibility()
     {
-      if (!Vajra::ipc::frame_family_available(
+      if (!Vajra::ipc::frame_family_active_for_protocol_version(
               Vajra::ipc::FrameFamily::protocol_version_negotiation,
               Vajra::ipc::kProtocolVersion1_0))
       {
         fail("protocol negotiation frame family is unavailable in the baseline protocol");
       }
 
-      if (Vajra::ipc::frame_family_available(
+      if (Vajra::ipc::frame_family_active_for_protocol_version(
               Vajra::ipc::FrameFamily::protocol_version_negotiation,
               Vajra::ipc::ProtocolVersion{1, 1}))
       {
-        fail("unsupported protocol versions must not expose active frame families");
+        fail("unsupported protocol versions must not expose post-negotiation active frame families");
       }
 
-      if (Vajra::ipc::frame_family_available(
+      if (Vajra::ipc::frame_family_active_for_protocol_version(
               static_cast<Vajra::ipc::FrameFamily>(0x9999),
               Vajra::ipc::kProtocolVersion1_0))
       {
         fail("unknown frame families must not become available in the baseline protocol");
       }
 
-      if (Vajra::ipc::frame_family_available(
+      if (Vajra::ipc::frame_family_active_for_protocol_version(
               Vajra::ipc::FrameFamily::telemetry_status_reserved,
               Vajra::ipc::ProtocolVersion{1, 1}))
       {

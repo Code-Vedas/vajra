@@ -19,13 +19,14 @@ namespace Vajra
       unsupported_local_version,
       unsupported_remote_version,
       incompatible_major,
-      remote_older_minor,
       remote_newer_minor,
     };
 
     CompatibilityResult check_compatibility(ProtocolVersion local, ProtocolVersion remote);
     bool supported_protocol_version(ProtocolVersion version);
-    bool frame_family_available(FrameFamily family, ProtocolVersion version);
+    // This models post-negotiation activation. Negotiation frames themselves
+    // are allowed to carry unsupported advertised versions structurally.
+    bool frame_family_active_for_protocol_version(FrameFamily family, ProtocolVersion version);
   }
 }
 

@@ -88,6 +88,11 @@ namespace VajraSpecCpp
       {
         fail("ipc frame header did not round trip through binary encoding");
       }
+
+      if (error != Vajra::ipc::HeaderDecodeError::none)
+      {
+        fail("successful ipc frame header decode did not clear the decode error");
+      }
     }
 
     void test_frame_header_encoding_rejects_invalid_contract_tuples()
@@ -369,6 +374,16 @@ namespace VajraSpecCpp
       }
     }
 
+    void test_unsupported_local_protocol_version_is_rejected()
+    {
+      if (Vajra::ipc::check_compatibility(
+              Vajra::ipc::ProtocolVersion{2, 0},
+              Vajra::ipc::ProtocolVersion{2, 0}) != Vajra::ipc::CompatibilityResult::unsupported_local_version)
+      {
+        fail("ipc compatibility check accepted an unsupported local protocol version");
+      }
+    }
+
     void test_incompatible_major_version_is_rejected()
     {
       if (Vajra::ipc::check_compatibility(
@@ -382,10 +397,24 @@ namespace VajraSpecCpp
     void test_unsupported_minor_version_is_rejected()
     {
       if (Vajra::ipc::check_compatibility(
-              Vajra::ipc::kProtocolVersion1_0,
-              Vajra::ipc::ProtocolVersion{1, 1}) != Vajra::ipc::CompatibilityResult::unsupported_minor)
+              Vajra::ipc::ProtocolVersion{1, 1},
+              Vajra::ipc::kProtocolVersion1_0) != Vajra::ipc::CompatibilityResult::unsupported_local_version)
       {
-        fail("ipc compatibility check accepted an unsupported minor version");
+        fail("ipc compatibility check accepted an unsupported local minor version");
+      }
+
+      if (Vajra::ipc::check_compatibility(
+              Vajra::ipc::kProtocolVersion1_0,
+              Vajra::ipc::ProtocolVersion{1, 1}) != Vajra::ipc::CompatibilityResult::remote_newer_minor)
+      {
+        fail("ipc compatibility check did not report a newer remote minor version");
+      }
+
+      if (Vajra::ipc::check_compatibility(
+              Vajra::ipc::ProtocolVersion{1, 1},
+              Vajra::ipc::ProtocolVersion{1, 0}) != Vajra::ipc::CompatibilityResult::unsupported_local_version)
+      {
+        fail("ipc compatibility check accepted a locally unsupported older-minor comparison");
       }
     }
 
@@ -439,6 +468,7 @@ namespace VajraSpecCpp
     test_request_and_control_families_stay_separated();
     test_reserved_frame_family_is_not_implicitly_available();
     test_protocol_version_is_compatible_with_itself();
+    test_unsupported_local_protocol_version_is_rejected();
     test_incompatible_major_version_is_rejected();
     test_unsupported_minor_version_is_rejected();
     test_supported_frame_families_follow_protocol_compatibility();

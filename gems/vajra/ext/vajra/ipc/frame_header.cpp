@@ -62,6 +62,8 @@ namespace Vajra
         const std::array<std::uint8_t, kFrameHeaderSize> &encoded_header,
         HeaderDecodeError &error)
     {
+      error = HeaderDecodeError::none;
+
       if (encoded_header[1] != 0)
       {
         error = HeaderDecodeError::reserved_bits_set;

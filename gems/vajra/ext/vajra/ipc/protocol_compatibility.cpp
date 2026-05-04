@@ -16,14 +16,39 @@ namespace Vajra
 
     CompatibilityResult check_compatibility(ProtocolVersion local, ProtocolVersion remote)
     {
+      if (!supported_protocol_version(local))
+      {
+        return CompatibilityResult::unsupported_local_version;
+      }
+
+      if (!supported_protocol_version(remote))
+      {
+        if (local.major != remote.major)
+        {
+          return CompatibilityResult::incompatible_major;
+        }
+
+        if (remote.minor < local.minor)
+        {
+          return CompatibilityResult::remote_older_minor;
+        }
+
+        return CompatibilityResult::remote_newer_minor;
+      }
+
       if (local.major != remote.major)
       {
         return CompatibilityResult::incompatible_major;
       }
 
-      if (local.minor != remote.minor)
+      if (remote.minor < local.minor)
       {
-        return CompatibilityResult::unsupported_minor;
+        return CompatibilityResult::remote_older_minor;
+      }
+
+      if (remote.minor > local.minor)
+      {
+        return CompatibilityResult::remote_newer_minor;
       }
 
       return CompatibilityResult::compatible;
@@ -43,19 +68,11 @@ namespace Vajra
 
       switch (family)
       {
-      case FrameFamily::request_execution_input:
-      case FrameFamily::request_body_continuation:
-      case FrameFamily::response_metadata_result:
-      case FrameFamily::response_body_continuation:
-      case FrameFamily::protocol_version_negotiation:
-      case FrameFamily::process_registration_identity:
-      case FrameFamily::readiness_boot_result:
-      case FrameFamily::lifecycle_command:
-      case FrameFamily::lifecycle_state_notification:
-      case FrameFamily::diagnostics_error_reporting:
-        return true;
-      case FrameFamily::telemetry_status_reserved:
-        return false;
+#define VAJRA_IPC_FRAME_AVAILABILITY_CASE(name, wire_id, channel, available_in_v1_0) \
+      case FrameFamily::name:                                                          \
+        return available_in_v1_0;
+        VAJRA_IPC_FRAME_FAMILY_REGISTRY(VAJRA_IPC_FRAME_AVAILABILITY_CASE)
+#undef VAJRA_IPC_FRAME_AVAILABILITY_CASE
       }
 
       return false;

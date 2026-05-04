@@ -28,6 +28,7 @@ namespace Vajra
 
     enum class HeaderDecodeError
     {
+      none,
       reserved_bits_set,
       unknown_channel_kind,
       unknown_frame_family,

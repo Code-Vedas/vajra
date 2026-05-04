@@ -28,19 +28,11 @@ namespace Vajra
     {
       switch (family)
       {
-      case FrameFamily::request_execution_input:
-      case FrameFamily::request_body_continuation:
-      case FrameFamily::response_metadata_result:
-      case FrameFamily::response_body_continuation:
-        return ChannelKind::request;
-      case FrameFamily::protocol_version_negotiation:
-      case FrameFamily::process_registration_identity:
-      case FrameFamily::readiness_boot_result:
-      case FrameFamily::lifecycle_command:
-      case FrameFamily::lifecycle_state_notification:
-      case FrameFamily::diagnostics_error_reporting:
-      case FrameFamily::telemetry_status_reserved:
-        return ChannelKind::control;
+#define VAJRA_IPC_FRAME_CHANNEL_CASE(name, wire_id, channel, available_in_v1_0) \
+      case FrameFamily::name:                                                     \
+        return channel;
+        VAJRA_IPC_FRAME_FAMILY_REGISTRY(VAJRA_IPC_FRAME_CHANNEL_CASE)
+#undef VAJRA_IPC_FRAME_CHANNEL_CASE
       }
 
       throw std::invalid_argument("unknown ipc frame family");

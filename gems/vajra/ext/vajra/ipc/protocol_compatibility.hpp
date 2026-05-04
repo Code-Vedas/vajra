@@ -16,8 +16,11 @@ namespace Vajra
     enum class CompatibilityResult
     {
       compatible,
+      unsupported_local_version,
+      unsupported_remote_version,
       incompatible_major,
-      unsupported_minor,
+      remote_older_minor,
+      remote_newer_minor,
     };
 
     CompatibilityResult check_compatibility(ProtocolVersion local, ProtocolVersion remote);

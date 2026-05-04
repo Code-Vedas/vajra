@@ -17,20 +17,6 @@ namespace Vajra
 {
   namespace ipc
   {
-    constexpr std::array<FrameFamily, 11> kFrameFamilies = {
-        FrameFamily::request_execution_input,
-        FrameFamily::request_body_continuation,
-        FrameFamily::response_metadata_result,
-        FrameFamily::response_body_continuation,
-        FrameFamily::protocol_version_negotiation,
-        FrameFamily::process_registration_identity,
-        FrameFamily::readiness_boot_result,
-        FrameFamily::lifecycle_command,
-        FrameFamily::lifecycle_state_notification,
-        FrameFamily::diagnostics_error_reporting,
-        FrameFamily::telemetry_status_reserved,
-    };
-
     bool known_frame_family(FrameFamily family);
     ChannelKind owning_channel(FrameFamily family);
     bool valid_on_channel(FrameFamily family, ChannelKind channel);

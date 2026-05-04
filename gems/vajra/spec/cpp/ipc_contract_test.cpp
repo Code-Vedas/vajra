@@ -272,7 +272,7 @@ namespace VajraSpecCpp
         fail("reserved ipc frame family decoded successfully");
       }
 
-      if (error != Vajra::ipc::HeaderDecodeError::unavailable_frame_family)
+      if (error != Vajra::ipc::HeaderDecodeError::reserved_frame_family)
       {
         fail("reserved ipc frame family did not report the right decode failure");
       }
@@ -423,9 +423,9 @@ namespace VajraSpecCpp
 
       if (Vajra::ipc::check_compatibility(
               Vajra::ipc::kProtocolVersion1_0,
-              Vajra::ipc::ProtocolVersion{1, 1}) != Vajra::ipc::CompatibilityResult::unsupported_remote_version)
+              Vajra::ipc::ProtocolVersion{1, 1}) != Vajra::ipc::CompatibilityResult::remote_newer_minor)
       {
-        fail("ipc compatibility check did not report an unsupported remote version");
+        fail("ipc compatibility check did not report a newer remote minor version");
       }
 
       if (Vajra::ipc::check_compatibility(

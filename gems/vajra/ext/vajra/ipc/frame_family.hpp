@@ -46,13 +46,20 @@ namespace Vajra
       ProtocolVersion first_supported_version;
     };
 
-    constexpr std::array<FrameFamily, 11> kFrameFamilies = {
+    constexpr std::size_t kFrameFamilyCount =
+        0
+        #define VAJRA_IPC_DEFINE_FRAME_FAMILY_COUNT(name, wire_id, channel, first_supported_major, first_supported_minor) + 1
+        VAJRA_IPC_DEFINE_FRAME_FAMILIES(VAJRA_IPC_DEFINE_FRAME_FAMILY_COUNT)
+        #undef VAJRA_IPC_DEFINE_FRAME_FAMILY_COUNT
+        ;
+
+    constexpr std::array<FrameFamily, kFrameFamilyCount> kFrameFamilies = {
         #define VAJRA_IPC_DEFINE_FRAME_FAMILY_VALUE(name, wire_id, channel, first_supported_major, first_supported_minor) FrameFamily::name,
         VAJRA_IPC_DEFINE_FRAME_FAMILIES(VAJRA_IPC_DEFINE_FRAME_FAMILY_VALUE)
         #undef VAJRA_IPC_DEFINE_FRAME_FAMILY_VALUE
     };
 
-    constexpr std::array<FrameFamilyMetadata, 11> kFrameFamilyMetadata = {
+    constexpr std::array<FrameFamilyMetadata, kFrameFamilyCount> kFrameFamilyMetadata = {
         #define VAJRA_IPC_DEFINE_FRAME_FAMILY_METADATA(name, wire_id, channel, first_supported_major, first_supported_minor) FrameFamilyMetadata{FrameFamily::name, channel, ProtocolVersion{first_supported_major, first_supported_minor}},
         VAJRA_IPC_DEFINE_FRAME_FAMILIES(VAJRA_IPC_DEFINE_FRAME_FAMILY_METADATA)
         #undef VAJRA_IPC_DEFINE_FRAME_FAMILY_METADATA

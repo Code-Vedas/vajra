@@ -34,6 +34,7 @@ namespace Vajra
       unknown_frame_family,
       channel_family_mismatch,
       unsupported_protocol_version,
+      reserved_frame_family,
       unavailable_frame_family,
     };
 

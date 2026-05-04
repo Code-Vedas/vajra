@@ -26,11 +26,6 @@ namespace Vajra
         return CompatibilityResult::incompatible_major;
       }
 
-      if (!supported_protocol_version(remote))
-      {
-        return CompatibilityResult::unsupported_remote_version;
-      }
-
       if (remote.minor < local.minor)
       {
         return CompatibilityResult::remote_older_minor;
@@ -39,6 +34,11 @@ namespace Vajra
       if (remote.minor > local.minor)
       {
         return CompatibilityResult::remote_newer_minor;
+      }
+
+      if (!supported_protocol_version(remote))
+      {
+        return CompatibilityResult::unsupported_remote_version;
       }
 
       return CompatibilityResult::compatible;

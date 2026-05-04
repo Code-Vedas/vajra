@@ -134,6 +134,12 @@ namespace Vajra
         return std::nullopt;
       }
 
+      if (reserved_family(family.value()))
+      {
+        error = HeaderDecodeError::reserved_frame_family;
+        return std::nullopt;
+      }
+
       if (!frame_family_available(family.value(), version))
       {
         error = HeaderDecodeError::unavailable_frame_family;

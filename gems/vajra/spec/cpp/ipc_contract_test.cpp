@@ -122,7 +122,7 @@ namespace VajraSpecCpp
       }
       catch (const std::invalid_argument &error)
       {
-        if (std::strcmp(error.what(), "cannot encode reserved ipc frame family") != 0)
+        if (std::string(error.what()).find("reserved ipc frame family") == std::string::npos)
         {
           fail("reserved ipc frame family did not report the right encode failure");
         }
@@ -134,11 +134,15 @@ namespace VajraSpecCpp
             Vajra::ipc::ChannelKind::control,
             Vajra::ipc::FrameFamily::process_registration_identity,
             Vajra::ipc::ProtocolVersion{1, 1},
-        }));
+      }));
         fail("ipc frame header encoding accepted an unsupported protocol version");
       }
-      catch (const std::invalid_argument &)
+      catch (const std::invalid_argument &error)
       {
+        if (std::string(error.what()).find("unsupported protocol version") == std::string::npos)
+        {
+          fail("unsupported ipc protocol version did not report the right encode failure");
+        }
       }
 
       const std::array<std::uint8_t, Vajra::ipc::kFrameHeaderSize> negotiation_header =

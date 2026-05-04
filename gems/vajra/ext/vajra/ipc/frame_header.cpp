@@ -65,6 +65,11 @@ namespace Vajra
         throw std::invalid_argument("cannot encode reserved ipc frame family");
       }
 
+      if (!supported_protocol_version(header.version))
+      {
+        throw std::invalid_argument("cannot encode ipc frame header for an unsupported protocol version");
+      }
+
       if (!frame_family_active_for_protocol_version(header.family, header.version))
       {
         throw std::invalid_argument("cannot encode unavailable ipc frame family for the requested protocol version");

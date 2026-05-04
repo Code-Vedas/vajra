@@ -8,6 +8,7 @@
 
 #include "channel_kind.hpp"
 #include "frame_family.hpp"
+#include "protocol_version.hpp"
 
 #include <array>
 #include <cstdint>
@@ -18,6 +19,7 @@ namespace Vajra
   namespace ipc
   {
     bool known_frame_family(FrameFamily family);
+    ProtocolVersion first_supported_protocol_version(FrameFamily family);
     ChannelKind owning_channel(FrameFamily family);
     bool valid_on_channel(FrameFamily family, ChannelKind channel);
     bool reserved_family(FrameFamily family);

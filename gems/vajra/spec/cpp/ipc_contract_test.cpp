@@ -127,13 +127,26 @@ namespace VajraSpecCpp
       {
         static_cast<void>(Vajra::ipc::encode_frame_header({
             Vajra::ipc::ChannelKind::control,
-            Vajra::ipc::FrameFamily::protocol_version_negotiation,
+            Vajra::ipc::FrameFamily::process_registration_identity,
             Vajra::ipc::ProtocolVersion{1, 1},
         }));
         fail("ipc frame header encoding accepted an unsupported protocol version");
       }
       catch (const std::invalid_argument &)
       {
+      }
+
+      const std::array<std::uint8_t, Vajra::ipc::kFrameHeaderSize> negotiation_header =
+          Vajra::ipc::encode_frame_header({
+              Vajra::ipc::ChannelKind::control,
+              Vajra::ipc::FrameFamily::protocol_version_negotiation,
+              Vajra::ipc::ProtocolVersion{1, 1},
+          });
+
+      if (negotiation_header[4] != 0x00 || negotiation_header[5] != 0x01 ||
+          negotiation_header[6] != 0x00 || negotiation_header[7] != 0x01)
+      {
+        fail("ipc negotiation frame header did not preserve the unsupported advertised version");
       }
     }
 

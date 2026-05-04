@@ -24,12 +24,26 @@ namespace Vajra
       return false;
     }
 
+    ProtocolVersion first_supported_protocol_version(FrameFamily family)
+    {
+      switch (family)
+      {
+#define VAJRA_IPC_FRAME_PROTOCOL_CASE(name, wire_id, channel, first_supported_major, first_supported_minor) \
+      case FrameFamily::name:                                                                                \
+        return ProtocolVersion{first_supported_major, first_supported_minor};
+        VAJRA_IPC_FRAME_FAMILY_REGISTRY(VAJRA_IPC_FRAME_PROTOCOL_CASE)
+#undef VAJRA_IPC_FRAME_PROTOCOL_CASE
+      }
+
+      throw std::invalid_argument("unknown ipc frame family");
+    }
+
     ChannelKind owning_channel(FrameFamily family)
     {
       switch (family)
       {
-#define VAJRA_IPC_FRAME_CHANNEL_CASE(name, wire_id, channel, available_in_v1_0) \
-      case FrameFamily::name:                                                     \
+#define VAJRA_IPC_FRAME_CHANNEL_CASE(name, wire_id, channel, first_supported_major, first_supported_minor) \
+      case FrameFamily::name:                                                                                \
         return channel;
         VAJRA_IPC_FRAME_FAMILY_REGISTRY(VAJRA_IPC_FRAME_CHANNEL_CASE)
 #undef VAJRA_IPC_FRAME_CHANNEL_CASE
@@ -50,7 +64,14 @@ namespace Vajra
 
     bool reserved_family(FrameFamily family)
     {
-      return family == FrameFamily::telemetry_status_reserved;
+      if (!known_frame_family(family))
+      {
+        return false;
+      }
+
+      const ProtocolVersion activation_version = first_supported_protocol_version(family);
+      return activation_version.major == kNeverSupportedProtocolMajor &&
+             activation_version.minor == kNeverSupportedProtocolMinor;
     }
 
     std::uint16_t wire_id(FrameFamily family)

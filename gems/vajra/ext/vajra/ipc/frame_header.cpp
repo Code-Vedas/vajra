@@ -44,6 +44,17 @@ namespace Vajra
         throw std::invalid_argument("cannot encode ipc frame family on the wrong channel");
       }
 
+      if (header.family == FrameFamily::protocol_version_negotiation)
+      {
+        std::array<std::uint8_t, kFrameHeaderSize> encoded_header{};
+        encoded_header[0] = static_cast<std::uint8_t>(header.channel);
+        encoded_header[1] = 0;
+        write_big_endian_u16(encoded_header, 2, wire_id(header.family));
+        write_big_endian_u16(encoded_header, 4, header.version.major);
+        write_big_endian_u16(encoded_header, 6, header.version.minor);
+        return encoded_header;
+      }
+
       if (!frame_family_available(header.family, header.version))
       {
         throw std::invalid_argument("cannot encode unavailable ipc frame family for the requested protocol version");

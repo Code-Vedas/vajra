@@ -66,16 +66,19 @@ namespace Vajra
         return false;
       }
 
-      switch (family)
+      const ProtocolVersion activation_version = first_supported_protocol_version(family);
+      if (activation_version.major == kNeverSupportedProtocolMajor &&
+          activation_version.minor == kNeverSupportedProtocolMinor)
       {
-#define VAJRA_IPC_FRAME_AVAILABILITY_CASE(name, wire_id, channel, available_in_v1_0) \
-      case FrameFamily::name:                                                          \
-        return available_in_v1_0;
-        VAJRA_IPC_FRAME_FAMILY_REGISTRY(VAJRA_IPC_FRAME_AVAILABILITY_CASE)
-#undef VAJRA_IPC_FRAME_AVAILABILITY_CASE
+        return false;
       }
 
-      return false;
+      if (version.major != activation_version.major)
+      {
+        return false;
+      }
+
+      return version.minor >= activation_version.minor;
     }
   }
 }

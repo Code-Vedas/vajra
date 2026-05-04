@@ -13,9 +13,9 @@ namespace Vajra
   {
     bool known_frame_family(FrameFamily family)
     {
-      for (const FrameFamily known_family : kFrameFamilies)
+      for (const FrameFamilyMetadata &metadata : kFrameFamilyMetadata)
       {
-        if (known_family == family)
+        if (metadata.family == family)
         {
           return true;
         }
@@ -26,13 +26,12 @@ namespace Vajra
 
     ProtocolVersion first_supported_protocol_version(FrameFamily family)
     {
-      switch (family)
+      for (const FrameFamilyMetadata &metadata : kFrameFamilyMetadata)
       {
-#define VAJRA_IPC_FRAME_PROTOCOL_CASE(name, wire_id, channel, first_supported_major, first_supported_minor) \
-      case FrameFamily::name:                                                                                \
-        return ProtocolVersion{first_supported_major, first_supported_minor};
-        VAJRA_IPC_FRAME_FAMILY_REGISTRY(VAJRA_IPC_FRAME_PROTOCOL_CASE)
-#undef VAJRA_IPC_FRAME_PROTOCOL_CASE
+        if (metadata.family == family)
+        {
+          return metadata.first_supported_version;
+        }
       }
 
       throw std::invalid_argument("unknown ipc frame family");
@@ -40,13 +39,12 @@ namespace Vajra
 
     ChannelKind owning_channel(FrameFamily family)
     {
-      switch (family)
+      for (const FrameFamilyMetadata &metadata : kFrameFamilyMetadata)
       {
-#define VAJRA_IPC_FRAME_CHANNEL_CASE(name, wire_id, channel, first_supported_major, first_supported_minor) \
-      case FrameFamily::name:                                                                                \
-        return channel;
-        VAJRA_IPC_FRAME_FAMILY_REGISTRY(VAJRA_IPC_FRAME_CHANNEL_CASE)
-#undef VAJRA_IPC_FRAME_CHANNEL_CASE
+        if (metadata.family == family)
+        {
+          return metadata.channel;
+        }
       }
 
       throw std::invalid_argument("unknown ipc frame family");

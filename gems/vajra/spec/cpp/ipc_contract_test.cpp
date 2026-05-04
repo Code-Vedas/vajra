@@ -11,6 +11,7 @@
 #include "test_support.hpp"
 
 #include <array>
+#include <cstring>
 #include <optional>
 #include <stdexcept>
 
@@ -119,8 +120,12 @@ namespace VajraSpecCpp
         }));
         fail("ipc frame header encoding accepted a reserved frame family");
       }
-      catch (const std::invalid_argument &)
+      catch (const std::invalid_argument &error)
       {
+        if (std::strcmp(error.what(), "cannot encode reserved ipc frame family") != 0)
+        {
+          fail("reserved ipc frame family did not report the right encode failure");
+        }
       }
 
       try
@@ -418,9 +423,9 @@ namespace VajraSpecCpp
 
       if (Vajra::ipc::check_compatibility(
               Vajra::ipc::kProtocolVersion1_0,
-              Vajra::ipc::ProtocolVersion{1, 1}) != Vajra::ipc::CompatibilityResult::remote_newer_minor)
+              Vajra::ipc::ProtocolVersion{1, 1}) != Vajra::ipc::CompatibilityResult::unsupported_remote_version)
       {
-        fail("ipc compatibility check did not report a newer remote minor version");
+        fail("ipc compatibility check did not report an unsupported remote version");
       }
 
       if (Vajra::ipc::check_compatibility(

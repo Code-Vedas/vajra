@@ -30,6 +30,17 @@ namespace Vajra
         encoded_header[offset] = static_cast<std::uint8_t>((value >> 8) & 0xFF);
         encoded_header[offset + 1] = static_cast<std::uint8_t>(value & 0xFF);
       }
+
+      std::array<std::uint8_t, kFrameHeaderSize> build_encoded_header(const FrameHeader &header)
+      {
+        std::array<std::uint8_t, kFrameHeaderSize> encoded_header{};
+        encoded_header[0] = static_cast<std::uint8_t>(header.channel);
+        encoded_header[1] = 0;
+        write_big_endian_u16(encoded_header, 2, wire_id(header.family));
+        write_big_endian_u16(encoded_header, 4, header.version.major);
+        write_big_endian_u16(encoded_header, 6, header.version.minor);
+        return encoded_header;
+      }
     }
 
     std::array<std::uint8_t, kFrameHeaderSize> encode_frame_header(const FrameHeader &header)
@@ -46,13 +57,12 @@ namespace Vajra
 
       if (header.family == FrameFamily::protocol_version_negotiation)
       {
-        std::array<std::uint8_t, kFrameHeaderSize> encoded_header{};
-        encoded_header[0] = static_cast<std::uint8_t>(header.channel);
-        encoded_header[1] = 0;
-        write_big_endian_u16(encoded_header, 2, wire_id(header.family));
-        write_big_endian_u16(encoded_header, 4, header.version.major);
-        write_big_endian_u16(encoded_header, 6, header.version.minor);
-        return encoded_header;
+        return build_encoded_header(header);
+      }
+
+      if (reserved_family(header.family))
+      {
+        throw std::invalid_argument("cannot encode reserved ipc frame family");
       }
 
       if (!frame_family_available(header.family, header.version))
@@ -60,13 +70,7 @@ namespace Vajra
         throw std::invalid_argument("cannot encode unavailable ipc frame family for the requested protocol version");
       }
 
-      std::array<std::uint8_t, kFrameHeaderSize> encoded_header{};
-      encoded_header[0] = static_cast<std::uint8_t>(header.channel);
-      encoded_header[1] = 0;
-      write_big_endian_u16(encoded_header, 2, wire_id(header.family));
-      write_big_endian_u16(encoded_header, 4, header.version.major);
-      write_big_endian_u16(encoded_header, 6, header.version.minor);
-      return encoded_header;
+      return build_encoded_header(header);
     }
 
     std::optional<FrameHeader> decode_frame_header(

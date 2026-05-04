@@ -7,6 +7,7 @@
 #define VAJRA_IPC_FRAME_FAMILY_HPP
 
 #include "channel_kind.hpp"
+#include "protocol_version.hpp"
 
 #include <array>
 #include <cstdint>
@@ -18,7 +19,7 @@ namespace Vajra
     constexpr std::uint16_t kNeverSupportedProtocolMajor = 0xFFFF;
     constexpr std::uint16_t kNeverSupportedProtocolMinor = 0xFFFF;
 
-    #define VAJRA_IPC_FRAME_FAMILY_REGISTRY(X) \
+    #define VAJRA_IPC_DEFINE_FRAME_FAMILIES(X) \
       X(request_execution_input, 0x1001, ChannelKind::request, 1, 0) \
       X(request_body_continuation, 0x1002, ChannelKind::request, 1, 0) \
       X(response_metadata_result, 0x1003, ChannelKind::request, 1, 0) \
@@ -33,16 +34,31 @@ namespace Vajra
 
     enum class FrameFamily : std::uint16_t
     {
-#define VAJRA_IPC_DEFINE_FRAME_FAMILY(name, wire_id, channel, first_supported_major, first_supported_minor) name = wire_id,
-      VAJRA_IPC_FRAME_FAMILY_REGISTRY(VAJRA_IPC_DEFINE_FRAME_FAMILY)
-#undef VAJRA_IPC_DEFINE_FRAME_FAMILY
+#define VAJRA_IPC_DEFINE_FRAME_FAMILY_ENUM(name, wire_id, channel, first_supported_major, first_supported_minor) name = wire_id,
+      VAJRA_IPC_DEFINE_FRAME_FAMILIES(VAJRA_IPC_DEFINE_FRAME_FAMILY_ENUM)
+#undef VAJRA_IPC_DEFINE_FRAME_FAMILY_ENUM
+    };
+
+    struct FrameFamilyMetadata
+    {
+      FrameFamily family;
+      ChannelKind channel;
+      ProtocolVersion first_supported_version;
     };
 
     constexpr std::array<FrameFamily, 11> kFrameFamilies = {
-#define VAJRA_IPC_FRAME_FAMILY_VALUE(name, wire_id, channel, first_supported_major, first_supported_minor) FrameFamily::name,
-        VAJRA_IPC_FRAME_FAMILY_REGISTRY(VAJRA_IPC_FRAME_FAMILY_VALUE)
-#undef VAJRA_IPC_FRAME_FAMILY_VALUE
+        #define VAJRA_IPC_DEFINE_FRAME_FAMILY_VALUE(name, wire_id, channel, first_supported_major, first_supported_minor) FrameFamily::name,
+        VAJRA_IPC_DEFINE_FRAME_FAMILIES(VAJRA_IPC_DEFINE_FRAME_FAMILY_VALUE)
+        #undef VAJRA_IPC_DEFINE_FRAME_FAMILY_VALUE
     };
+
+    constexpr std::array<FrameFamilyMetadata, 11> kFrameFamilyMetadata = {
+        #define VAJRA_IPC_DEFINE_FRAME_FAMILY_METADATA(name, wire_id, channel, first_supported_major, first_supported_minor) FrameFamilyMetadata{FrameFamily::name, channel, ProtocolVersion{first_supported_major, first_supported_minor}},
+        VAJRA_IPC_DEFINE_FRAME_FAMILIES(VAJRA_IPC_DEFINE_FRAME_FAMILY_METADATA)
+        #undef VAJRA_IPC_DEFINE_FRAME_FAMILY_METADATA
+    };
+
+#undef VAJRA_IPC_DEFINE_FRAME_FAMILIES
   }
 }
 

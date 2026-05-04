@@ -21,24 +21,14 @@ namespace Vajra
         return CompatibilityResult::unsupported_local_version;
       }
 
-      if (!supported_protocol_version(remote))
-      {
-        if (local.major != remote.major)
-        {
-          return CompatibilityResult::incompatible_major;
-        }
-
-        if (remote.minor < local.minor)
-        {
-          return CompatibilityResult::remote_older_minor;
-        }
-
-        return CompatibilityResult::remote_newer_minor;
-      }
-
       if (local.major != remote.major)
       {
         return CompatibilityResult::incompatible_major;
+      }
+
+      if (!supported_protocol_version(remote))
+      {
+        return CompatibilityResult::unsupported_remote_version;
       }
 
       if (remote.minor < local.minor)

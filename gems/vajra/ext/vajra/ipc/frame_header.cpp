@@ -80,6 +80,8 @@ namespace Vajra
       case FrameValidationError::unavailable_frame_family:
         throw std::invalid_argument("cannot encode unavailable ipc frame family for the requested protocol version");
       }
+
+      throw std::logic_error("unhandled outbound ipc frame validation result");
     }
 
     std::optional<FrameHeader> decode_frame_header(
@@ -147,6 +149,8 @@ namespace Vajra
         error = HeaderDecodeError::unavailable_frame_family;
         return std::nullopt;
       }
+
+      throw std::logic_error("unhandled inbound ipc frame validation result");
     }
   }
 }

@@ -103,6 +103,24 @@ namespace VajraSpecCpp
         fail("lifecycle command frame family leaked onto the request channel");
       }
     }
+
+    void test_reserved_families_have_no_supported_activation_version()
+    {
+      const std::optional<Vajra::ipc::ProtocolVersion> reserved_first_supported =
+          Vajra::ipc::first_supported_protocol_version(Vajra::ipc::FrameFamily::telemetry_status_reserved);
+      if (reserved_first_supported.has_value())
+      {
+        fail("reserved ipc frame family unexpectedly reported a supported activation version");
+      }
+
+      const std::optional<Vajra::ipc::ProtocolVersion> request_first_supported =
+          Vajra::ipc::first_supported_protocol_version(Vajra::ipc::FrameFamily::request_execution_input);
+      if (!request_first_supported.has_value() ||
+          request_first_supported.value() != Vajra::ipc::kProtocolVersion1_0)
+      {
+        fail("active ipc frame family did not report its first supported version");
+      }
+    }
   }
 
   void run_ipc_frame_contract_tests()
@@ -112,5 +130,6 @@ namespace VajraSpecCpp
     test_unknown_enum_values_are_not_treated_as_valid_control_families();
     test_frame_families_are_assigned_to_exactly_one_channel();
     test_request_and_control_families_stay_separated();
+    test_reserved_families_have_no_supported_activation_version();
   }
 }

@@ -13,10 +13,6 @@ namespace Vajra
   {
     namespace
     {
-      constexpr std::array<ProtocolVersion, 1> kLocallySupportedProtocolVersions = {{
-          kProtocolVersion1_0,
-      }};
-
       struct CompatibilityEntry
       {
         ProtocolVersion local;
@@ -40,23 +36,11 @@ namespace Vajra
         return false;
       }
 
-      bool locally_supported_protocol_version(ProtocolVersion version)
-      {
-        for (const ProtocolVersion supported_version : kLocallySupportedProtocolVersions)
-        {
-          if (supported_version == version)
-          {
-            return true;
-          }
-        }
-
-        return false;
-      }
     }
 
     bool supported_protocol_version(ProtocolVersion version)
     {
-      return locally_supported_protocol_version(version);
+      return explicitly_compatible_protocol_pair(version, version);
     }
 
     CompatibilityResult check_compatibility(ProtocolVersion local, ProtocolVersion remote)

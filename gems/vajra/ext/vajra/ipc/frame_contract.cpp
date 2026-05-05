@@ -32,7 +32,7 @@ namespace Vajra
       return find_frame_family_metadata(family) != nullptr;
     }
 
-    ProtocolVersion first_supported_protocol_version(FrameFamily family)
+    std::optional<ProtocolVersion> first_supported_protocol_version(FrameFamily family)
     {
       if (!known_frame_family(family))
       {
@@ -57,6 +57,12 @@ namespace Vajra
         {
           first_supported = support.version;
         }
+      }
+
+      if (first_supported.major == kNeverSupportedProtocolMajor &&
+          first_supported.minor == kNeverSupportedProtocolMinor)
+      {
+        return std::nullopt;
       }
 
       return first_supported;

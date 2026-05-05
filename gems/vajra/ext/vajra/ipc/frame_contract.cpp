@@ -34,12 +34,32 @@ namespace Vajra
 
     ProtocolVersion first_supported_protocol_version(FrameFamily family)
     {
-      if (const FrameFamilyMetadata *metadata = find_frame_family_metadata(family))
+      if (!known_frame_family(family))
       {
-        return metadata->first_supported_version;
+        throw std::invalid_argument("unknown ipc frame family");
       }
 
-      throw std::invalid_argument("unknown ipc frame family");
+      ProtocolVersion first_supported = {
+          kNeverSupportedProtocolMajor,
+          kNeverSupportedProtocolMinor,
+      };
+
+      for (const FrameFamilyVersionSupport &support : kFrameFamilyVersionSupport)
+      {
+        if (support.family != family)
+        {
+          continue;
+        }
+
+        if (first_supported.major == kNeverSupportedProtocolMajor ||
+            support.version.major < first_supported.major ||
+            (support.version.major == first_supported.major && support.version.minor < first_supported.minor))
+        {
+          first_supported = support.version;
+        }
+      }
+
+      return first_supported;
     }
 
     ChannelKind owning_channel(FrameFamily family)
@@ -64,14 +84,12 @@ namespace Vajra
 
     bool reserved_family(FrameFamily family)
     {
-      if (!known_frame_family(family))
+      if (const FrameFamilyMetadata *metadata = find_frame_family_metadata(family))
       {
-        return false;
+        return metadata->reserved;
       }
 
-      const ProtocolVersion activation_version = first_supported_protocol_version(family);
-      return activation_version.major == kNeverSupportedProtocolMajor &&
-             activation_version.minor == kNeverSupportedProtocolMinor;
+      return false;
     }
 
     std::uint16_t wire_id(FrameFamily family)

@@ -13,6 +13,10 @@ namespace Vajra
   {
     namespace
     {
+      constexpr std::array<ProtocolVersion, 1> kLocallySupportedProtocolVersions = {{
+          kProtocolVersion1_0,
+      }};
+
       struct CompatibilityEntry
       {
         ProtocolVersion local;
@@ -36,11 +40,11 @@ namespace Vajra
         return false;
       }
 
-      bool protocol_version_present_in_contract(ProtocolVersion version)
+      bool locally_supported_protocol_version(ProtocolVersion version)
       {
-        for (const CompatibilityEntry &entry : kCompatibleProtocolPairs)
+        for (const ProtocolVersion supported_version : kLocallySupportedProtocolVersions)
         {
-          if (entry.local == version || entry.remote == version)
+          if (supported_version == version)
           {
             return true;
           }
@@ -52,7 +56,7 @@ namespace Vajra
 
     bool supported_protocol_version(ProtocolVersion version)
     {
-      return protocol_version_present_in_contract(version);
+      return locally_supported_protocol_version(version);
     }
 
     CompatibilityResult check_compatibility(ProtocolVersion local, ProtocolVersion remote)
@@ -97,19 +101,15 @@ namespace Vajra
         return false;
       }
 
-      const ProtocolVersion activation_version = first_supported_protocol_version(family);
-      if (activation_version.major == kNeverSupportedProtocolMajor &&
-          activation_version.minor == kNeverSupportedProtocolMinor)
+      for (const FrameFamilyVersionSupport &support : kFrameFamilyVersionSupport)
       {
-        return false;
+        if (support.family == family && support.version == version)
+        {
+          return true;
+        }
       }
 
-      if (version.major != activation_version.major)
-      {
-        return false;
-      }
-
-      return version.minor >= activation_version.minor;
+      return false;
     }
   }
 }

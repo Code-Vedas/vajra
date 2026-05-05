@@ -9,7 +9,6 @@
 #include <cstddef>
 #include <functional>
 #include <mutex>
-#include <optional>
 
 namespace Vajra
 {

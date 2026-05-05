@@ -16,6 +16,7 @@
 #include <sstream>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <utility>
 
 namespace
 {
@@ -199,8 +200,6 @@ void Vajra::Server::start()
 
   port_ = binding.port;
   server_fd_.store(binding.fd);
-  lifecycle_.mark_listening(binding.fd, binding.port);
-
   if (lifecycle_.snapshot().state == lifecycle::State::draining || server_fd_.load() < 0)
   {
     close_listener_fd(false);
@@ -208,6 +207,7 @@ void Vajra::Server::start()
     return;
   }
 
+  lifecycle_.mark_listening(binding.fd, binding.port);
   log_listening_banner(port_);
 
   for (;;)
@@ -259,7 +259,7 @@ void Vajra::Server::start()
       lifecycle_.mark_serving();
     }
 
-  request_processor_.handle(client_fd);
+    request_processor_.handle(client_fd);
   }
 
   close_listener_fd(false);

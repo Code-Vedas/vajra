@@ -91,9 +91,11 @@ namespace Vajra
 
     std::optional<FrameHeader> decode_frame_header(
         const std::array<std::uint8_t, kFrameHeaderSize> &encoded_header,
-        HeaderDecodeError &error)
+        HeaderDecodeError &error,
+        HeaderDecodeWarning &warning)
     {
       error = HeaderDecodeError::none;
+      warning = HeaderDecodeWarning::none;
 
       if (encoded_header[1] != 0)
       {
@@ -136,21 +138,14 @@ namespace Vajra
         return std::nullopt;
       }
 
-      if (family.value() == FrameFamily::protocol_version_negotiation &&
-          !supported_protocol_version(version))
-      {
-        error = HeaderDecodeError::unsupported_protocol_version;
-        return FrameHeader{
-            channel,
-            family.value(),
-            version,
-            payload_length,
-        };
-      }
-
       switch (validate_inbound_frame(channel, family.value(), version))
       {
       case FrameValidationError::none:
+        if (family.value() == FrameFamily::protocol_version_negotiation &&
+            !supported_protocol_version(version))
+        {
+          warning = HeaderDecodeWarning::unsupported_protocol_version;
+        }
         return FrameHeader{
             channel,
             family.value(),

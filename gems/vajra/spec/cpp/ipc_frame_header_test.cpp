@@ -29,8 +29,9 @@ namespace VajraSpecCpp
           Vajra::ipc::encode_frame_header(expected_header);
 
       Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::unknown_channel_kind;
+      Vajra::ipc::HeaderDecodeWarning warning = Vajra::ipc::HeaderDecodeWarning::unsupported_protocol_version;
       const std::optional<Vajra::ipc::FrameHeader> decoded_header =
-          Vajra::ipc::decode_frame_header(encoded_header, error);
+          Vajra::ipc::decode_frame_header(encoded_header, error, warning);
 
       if (!decoded_header.has_value())
       {
@@ -48,6 +49,11 @@ namespace VajraSpecCpp
       if (error != Vajra::ipc::HeaderDecodeError::none)
       {
         fail("successful ipc frame header decode did not clear the decode error");
+      }
+
+      if (warning != Vajra::ipc::HeaderDecodeWarning::none)
+      {
+        fail("successful ipc frame header decode did not clear the decode warning");
       }
     }
 
@@ -166,7 +172,8 @@ namespace VajraSpecCpp
       encoded_header[1] = 0x01;
 
       Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::unknown_channel_kind;
-      if (Vajra::ipc::decode_frame_header(encoded_header, error).has_value())
+      Vajra::ipc::HeaderDecodeWarning warning = Vajra::ipc::HeaderDecodeWarning::none;
+      if (Vajra::ipc::decode_frame_header(encoded_header, error, warning).has_value())
       {
         fail("reserved ipc header bits decoded successfully");
       }
@@ -189,7 +196,8 @@ namespace VajraSpecCpp
       encoded_header[0] = 0x7F;
 
       Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::channel_family_mismatch;
-      if (Vajra::ipc::decode_frame_header(encoded_header, error).has_value())
+      Vajra::ipc::HeaderDecodeWarning warning = Vajra::ipc::HeaderDecodeWarning::none;
+      if (Vajra::ipc::decode_frame_header(encoded_header, error, warning).has_value())
       {
         fail("invalid ipc channel kind decoded successfully");
       }
@@ -218,7 +226,8 @@ namespace VajraSpecCpp
       };
 
       Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::unknown_channel_kind;
-      if (Vajra::ipc::decode_frame_header(encoded_header, error).has_value())
+      Vajra::ipc::HeaderDecodeWarning warning = Vajra::ipc::HeaderDecodeWarning::none;
+      if (Vajra::ipc::decode_frame_header(encoded_header, error, warning).has_value())
       {
         fail("oversized ipc payload length decoded successfully");
       }
@@ -247,7 +256,8 @@ namespace VajraSpecCpp
       };
 
       Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::unknown_channel_kind;
-      if (Vajra::ipc::decode_frame_header(encoded_header, error).has_value())
+      Vajra::ipc::HeaderDecodeWarning warning = Vajra::ipc::HeaderDecodeWarning::none;
+      if (Vajra::ipc::decode_frame_header(encoded_header, error, warning).has_value())
       {
         fail("unsupported ipc protocol version decoded successfully");
       }
@@ -275,9 +285,10 @@ namespace VajraSpecCpp
           0x09,
       };
 
-      Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::unsupported_protocol_version;
+      Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::unknown_channel_kind;
+      Vajra::ipc::HeaderDecodeWarning warning = Vajra::ipc::HeaderDecodeWarning::none;
       const std::optional<Vajra::ipc::FrameHeader> decoded_header =
-          Vajra::ipc::decode_frame_header(encoded_header, error);
+          Vajra::ipc::decode_frame_header(encoded_header, error, warning);
 
       if (!decoded_header.has_value())
       {
@@ -291,9 +302,44 @@ namespace VajraSpecCpp
         fail("protocol negotiation header did not preserve the advertised remote version and payload length");
       }
 
-      if (error != Vajra::ipc::HeaderDecodeError::unsupported_protocol_version)
+      if (error != Vajra::ipc::HeaderDecodeError::none)
+      {
+        fail("unsupported negotiation headers must not be reported as fatal decode failures");
+      }
+
+      if (warning != Vajra::ipc::HeaderDecodeWarning::unsupported_protocol_version)
       {
         fail("unsupported negotiation headers must preserve a compatibility warning for callers");
+      }
+    }
+
+    void test_unsupported_negotiation_headers_on_the_request_channel_are_rejected()
+    {
+      const std::array<std::uint8_t, Vajra::ipc::kFrameHeaderSize> encoded_header = {
+          static_cast<std::uint8_t>(Vajra::ipc::ChannelKind::request),
+          0x00,
+          0x20,
+          0x01,
+          0x00,
+          0x01,
+          0x00,
+          0x01,
+          0x00,
+          0x00,
+          0x00,
+          0x09,
+      };
+
+      Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::unknown_channel_kind;
+      Vajra::ipc::HeaderDecodeWarning warning = Vajra::ipc::HeaderDecodeWarning::none;
+      if (Vajra::ipc::decode_frame_header(encoded_header, error, warning).has_value())
+      {
+        fail("unsupported negotiation headers on the request channel decoded successfully");
+      }
+
+      if (error != Vajra::ipc::HeaderDecodeError::channel_family_mismatch)
+      {
+        fail("unsupported negotiation headers on the request channel did not report the right decode failure");
       }
     }
 
@@ -315,7 +361,8 @@ namespace VajraSpecCpp
       };
 
       Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::unknown_channel_kind;
-      if (Vajra::ipc::decode_frame_header(encoded_header, error).has_value())
+      Vajra::ipc::HeaderDecodeWarning warning = Vajra::ipc::HeaderDecodeWarning::none;
+      if (Vajra::ipc::decode_frame_header(encoded_header, error, warning).has_value())
       {
         fail("reserved ipc frame family decoded successfully");
       }
@@ -341,7 +388,8 @@ namespace VajraSpecCpp
       };
 
       error = Vajra::ipc::HeaderDecodeError::unknown_channel_kind;
-      if (Vajra::ipc::decode_frame_header(unsupported_version_header, error).has_value())
+      warning = Vajra::ipc::HeaderDecodeWarning::none;
+      if (Vajra::ipc::decode_frame_header(unsupported_version_header, error, warning).has_value())
       {
         fail("reserved ipc frame family with an unsupported version decoded successfully");
       }
@@ -365,7 +413,8 @@ namespace VajraSpecCpp
       encoded_header[3] = 0xFF;
 
       Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::unknown_channel_kind;
-      if (Vajra::ipc::decode_frame_header(encoded_header, error).has_value())
+      Vajra::ipc::HeaderDecodeWarning warning = Vajra::ipc::HeaderDecodeWarning::none;
+      if (Vajra::ipc::decode_frame_header(encoded_header, error, warning).has_value())
       {
         fail("invalid ipc frame family decoded successfully");
       }
@@ -388,7 +437,8 @@ namespace VajraSpecCpp
       encoded_header[0] = static_cast<std::uint8_t>(Vajra::ipc::ChannelKind::control);
 
       Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::unknown_channel_kind;
-      if (Vajra::ipc::decode_frame_header(encoded_header, error).has_value())
+      Vajra::ipc::HeaderDecodeWarning warning = Vajra::ipc::HeaderDecodeWarning::none;
+      if (Vajra::ipc::decode_frame_header(encoded_header, error, warning).has_value())
       {
         fail("ipc channel/family mismatch decoded successfully");
       }
@@ -411,6 +461,7 @@ namespace VajraSpecCpp
     test_channel_family_mismatch_is_rejected_during_header_decode();
     test_unsupported_protocol_versions_are_rejected_during_header_decode();
     test_protocol_version_negotiation_headers_decode_even_for_unsupported_versions();
+    test_unsupported_negotiation_headers_on_the_request_channel_are_rejected();
     test_reserved_frame_families_are_rejected_during_header_decode();
   }
 }

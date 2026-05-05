@@ -81,6 +81,10 @@ namespace VajraSpecCpp
     void test_lifecycle_controller_preserves_failure_state()
     {
       Vajra::lifecycle::Controller controller;
+      std::vector<Vajra::lifecycle::HookPoint> hook_points;
+      controller.set_observer([&](Vajra::lifecycle::HookPoint hook_point, const Vajra::lifecycle::Snapshot &) {
+        hook_points.push_back(hook_point);
+      });
       if (!controller.begin_startup())
       {
         fail("lifecycle controller refused valid startup transition before failure");
@@ -94,6 +98,14 @@ namespace VajraSpecCpp
           snapshot.listener_owned)
       {
         fail("lifecycle controller did not preserve failed terminal state");
+      }
+
+      const std::vector<Vajra::lifecycle::HookPoint> expected_hooks = {
+          Vajra::lifecycle::HookPoint::failed_entered,
+      };
+      if (hook_points != expected_hooks)
+      {
+        fail("lifecycle controller emitted stop_completed for failed terminal state");
       }
     }
 
@@ -149,9 +161,12 @@ namespace VajraSpecCpp
 
       const Vajra::lifecycle::Snapshot snapshot = controller.snapshot();
       if (snapshot.state != Vajra::lifecycle::State::draining ||
-          snapshot.last_stop_reason != Vajra::lifecycle::StopReason::programmatic_stop)
+          snapshot.last_stop_reason != Vajra::lifecycle::StopReason::programmatic_stop ||
+          snapshot.port != 3000 ||
+          snapshot.listener_fd != 7 ||
+          !snapshot.listener_owned)
       {
-        fail("lifecycle controller did not preserve draining state when listening raced with stop");
+        fail("lifecycle controller did not preserve bound listener diagnostics when listening raced with stop");
       }
     }
 

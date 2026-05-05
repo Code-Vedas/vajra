@@ -54,6 +54,9 @@ namespace Vajra
         std::lock_guard<std::mutex> lock(mutex_);
         if (state_ == State::draining)
         {
+          listener_owned_ = true;
+          port_ = port;
+          listener_fd_ = listener_fd;
           return false;
         }
 
@@ -153,6 +156,7 @@ namespace Vajra
     void Controller::finish_stop()
     {
       Snapshot snapshot_value;
+      bool notify_observer = false;
       {
         std::lock_guard<std::mutex> lock(mutex_);
         if (state_ == State::failed)
@@ -174,10 +178,14 @@ namespace Vajra
           pending_stop_before_start_ = false;
           listener_fd_ = -1;
           snapshot_value = snapshot_unlocked();
+          notify_observer = true;
         }
       }
 
-      notify(HookPoint::stop_completed, snapshot_value);
+      if (notify_observer)
+      {
+        notify(HookPoint::stop_completed, snapshot_value);
+      }
     }
 
     void Controller::mark_failed(StopReason reason)

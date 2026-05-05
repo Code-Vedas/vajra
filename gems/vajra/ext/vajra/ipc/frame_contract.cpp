@@ -11,27 +11,32 @@ namespace Vajra
 {
   namespace ipc
   {
+    namespace
+    {
+      const FrameFamilyMetadata *find_frame_family_metadata(FrameFamily family)
+      {
+        for (const FrameFamilyMetadata &metadata : kFrameFamilyMetadata)
+        {
+          if (metadata.family == family)
+          {
+            return &metadata;
+          }
+        }
+
+        return nullptr;
+      }
+    }
+
     bool known_frame_family(FrameFamily family)
     {
-      for (const FrameFamilyMetadata &metadata : kFrameFamilyMetadata)
-      {
-        if (metadata.family == family)
-        {
-          return true;
-        }
-      }
-
-      return false;
+      return find_frame_family_metadata(family) != nullptr;
     }
 
     ProtocolVersion first_supported_protocol_version(FrameFamily family)
     {
-      for (const FrameFamilyMetadata &metadata : kFrameFamilyMetadata)
+      if (const FrameFamilyMetadata *metadata = find_frame_family_metadata(family))
       {
-        if (metadata.family == family)
-        {
-          return metadata.first_supported_version;
-        }
+        return metadata->first_supported_version;
       }
 
       throw std::invalid_argument("unknown ipc frame family");
@@ -39,12 +44,9 @@ namespace Vajra
 
     ChannelKind owning_channel(FrameFamily family)
     {
-      for (const FrameFamilyMetadata &metadata : kFrameFamilyMetadata)
+      if (const FrameFamilyMetadata *metadata = find_frame_family_metadata(family))
       {
-        if (metadata.family == family)
-        {
-          return metadata.channel;
-        }
+        return metadata->channel;
       }
 
       throw std::invalid_argument("unknown ipc frame family");

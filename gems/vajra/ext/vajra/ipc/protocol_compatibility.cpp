@@ -35,11 +35,24 @@ namespace Vajra
 
         return false;
       }
+
+      bool protocol_version_present_in_contract(ProtocolVersion version)
+      {
+        for (const CompatibilityEntry &entry : kCompatibleProtocolPairs)
+        {
+          if (entry.local == version || entry.remote == version)
+          {
+            return true;
+          }
+        }
+
+        return false;
+      }
     }
 
     bool supported_protocol_version(ProtocolVersion version)
     {
-      return version == kProtocolVersion1_0;
+      return protocol_version_present_in_contract(version);
     }
 
     CompatibilityResult check_compatibility(ProtocolVersion local, ProtocolVersion remote)

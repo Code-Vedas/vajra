@@ -56,6 +56,24 @@ namespace VajraSpecCpp
       try
       {
         static_cast<void>(Vajra::ipc::encode_frame_header({
+            Vajra::ipc::ChannelKind::control,
+            Vajra::ipc::FrameFamily::protocol_version_negotiation,
+            Vajra::ipc::kProtocolVersion1_0,
+            Vajra::ipc::kMaxFramePayloadLength + 1,
+        }));
+        fail("ipc frame header encoding accepted an oversized payload length");
+      }
+      catch (const std::invalid_argument &error)
+      {
+        if (std::string(error.what()).find("payload length") == std::string::npos)
+        {
+          fail("oversized ipc payload length did not report the right encode failure");
+        }
+      }
+
+      try
+      {
+        static_cast<void>(Vajra::ipc::encode_frame_header({
             Vajra::ipc::ChannelKind::request,
             Vajra::ipc::FrameFamily::lifecycle_command,
             Vajra::ipc::kProtocolVersion1_0,
@@ -179,6 +197,35 @@ namespace VajraSpecCpp
       if (error != Vajra::ipc::HeaderDecodeError::unknown_channel_kind)
       {
         fail("invalid ipc channel kind did not report the right decode failure");
+      }
+    }
+
+    void test_oversized_payload_lengths_are_rejected_during_header_decode()
+    {
+      const std::array<std::uint8_t, Vajra::ipc::kFrameHeaderSize> encoded_header = {
+          static_cast<std::uint8_t>(Vajra::ipc::ChannelKind::control),
+          0x00,
+          0x20,
+          0x01,
+          0x00,
+          0x01,
+          0x00,
+          0x00,
+          0x01,
+          0x00,
+          0x00,
+          0x01,
+      };
+
+      Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::unknown_channel_kind;
+      if (Vajra::ipc::decode_frame_header(encoded_header, error).has_value())
+      {
+        fail("oversized ipc payload length decoded successfully");
+      }
+
+      if (error != Vajra::ipc::HeaderDecodeError::payload_too_large)
+      {
+        fail("oversized ipc payload length did not report the right decode failure");
       }
     }
 
@@ -354,6 +401,7 @@ namespace VajraSpecCpp
     test_frame_header_encoding_rejects_invalid_contract_tuples();
     test_reserved_header_bits_are_rejected_during_header_decode();
     test_unknown_channel_kind_is_rejected_during_header_decode();
+    test_oversized_payload_lengths_are_rejected_during_header_decode();
     test_unknown_frame_family_is_rejected_during_header_decode();
     test_channel_family_mismatch_is_rejected_during_header_decode();
     test_unsupported_protocol_versions_are_rejected_during_header_decode();

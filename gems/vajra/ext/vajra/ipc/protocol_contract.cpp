@@ -14,17 +14,9 @@ namespace Vajra
   {
     namespace
     {
-      struct CompatibilityEntry
-      {
-        ProtocolVersion local;
-        ProtocolVersion remote;
-      };
-
       constexpr std::array<ProtocolVersion, 1> kSupportedProtocolVersions = {{
           kProtocolVersion1_0,
       }};
-
-      constexpr std::array<CompatibilityEntry, 0> kExplicitCrossVersionCompatibility = {};
 
       const FrameFamilyMetadata *find_frame_family_metadata(FrameFamily family)
       {
@@ -44,19 +36,6 @@ namespace Vajra
         for (const ProtocolVersion supported_version : kSupportedProtocolVersions)
         {
           if (supported_version == version)
-          {
-            return true;
-          }
-        }
-
-        return false;
-      }
-
-      bool explicitly_compatible_protocol_pair(ProtocolVersion local, ProtocolVersion remote)
-      {
-        for (const CompatibilityEntry &entry : kExplicitCrossVersionCompatibility)
-        {
-          if (entry.local == local && entry.remote == remote)
           {
             return true;
           }
@@ -176,11 +155,6 @@ namespace Vajra
       }
 
       if (local == remote)
-      {
-        return CompatibilityResult::compatible;
-      }
-
-      if (explicitly_compatible_protocol_pair(local, remote))
       {
         return CompatibilityResult::compatible;
       }

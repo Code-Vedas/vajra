@@ -65,6 +65,11 @@ namespace Vajra
 
     std::array<std::uint8_t, kFrameHeaderSize> encode_frame_header(const FrameHeader &header)
     {
+      if (header.payload_length > kMaxFramePayloadLength)
+      {
+        throw std::invalid_argument("cannot encode ipc frame header with payload length above the maximum frame size");
+      }
+
       switch (validate_outbound_frame(header.channel, header.family, header.version))
       {
       case FrameValidationError::none:
@@ -93,6 +98,13 @@ namespace Vajra
       if (encoded_header[1] != 0)
       {
         error = HeaderDecodeError::reserved_bits_set;
+        return std::nullopt;
+      }
+
+      const std::uint32_t payload_length = read_big_endian_u32(encoded_header, 8);
+      if (payload_length > kMaxFramePayloadLength)
+      {
+        error = HeaderDecodeError::payload_too_large;
         return std::nullopt;
       }
 
@@ -131,7 +143,7 @@ namespace Vajra
             channel,
             family.value(),
             version,
-            read_big_endian_u32(encoded_header, 8),
+            payload_length,
         };
       case FrameValidationError::unknown_frame_family:
         error = HeaderDecodeError::unknown_frame_family;

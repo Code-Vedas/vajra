@@ -57,12 +57,14 @@ The binary header contract is fail-closed:
 - unknown frame-family ids are rejected
 - request/control channel-family mismatches are rejected
 - non-zero reserved header bits are rejected
+- payload lengths above the maximum frame size are rejected
 - non-negotiation frames reject unsupported protocol versions before execution
 - reserved frame families remain distinguishable from merely inactive ones
 
 The payload length is part of the shared binary framing contract so both
 request-channel and control-channel decoders can delimit variable-size frame
-bodies without inventing an outer transport-specific wrapper.
+bodies without inventing an outer transport-specific wrapper. The current
+maximum payload length is `16 MiB`.
 
 ## Debuggability
 

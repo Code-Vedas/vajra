@@ -31,6 +31,7 @@ namespace Vajra
     {
       none,
       reserved_bits_set,
+      payload_too_large,
       unknown_channel_kind,
       unknown_frame_family,
       channel_family_mismatch,
@@ -40,6 +41,7 @@ namespace Vajra
     };
 
     constexpr std::size_t kFrameHeaderSize = 12;
+    constexpr std::uint32_t kMaxFramePayloadLength = 16 * 1024 * 1024;
 
     std::array<std::uint8_t, kFrameHeaderSize> encode_frame_header(const FrameHeader &header);
     std::optional<FrameHeader> decode_frame_header(

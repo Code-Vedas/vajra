@@ -34,6 +34,7 @@ Vajra uses two framing directions with distinct roles:
 
 - the request path uses custom binary framing suited to hot-path execution data
 - the control path uses MessagePack-backed payloads suited to lifecycle and operator coordination
+- one protocol contract governs version support, compatibility, family activation, and reservation semantics across both channels
 - frame-family responsibilities stay explicit and separate from byte-layout details
 
 ## Binary Header Layout

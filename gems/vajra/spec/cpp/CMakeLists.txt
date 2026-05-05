@@ -17,9 +17,8 @@ add_executable(vajra_server_test
   request_head_test.cpp
   response_test.cpp
   server_test.cpp
-  ../../ext/vajra/ipc/frame_contract.cpp
+  ../../ext/vajra/ipc/protocol_contract.cpp
   ../../ext/vajra/ipc/frame_header.cpp
-  ../../ext/vajra/ipc/protocol_compatibility.cpp
   ../../ext/vajra/listener/listener_socket.cpp
   ../../ext/vajra/request/request_head_reader.cpp
   ../../ext/vajra/request/request_processor.cpp

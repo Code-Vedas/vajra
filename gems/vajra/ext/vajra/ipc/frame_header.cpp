@@ -65,37 +65,21 @@ namespace Vajra
 
     std::array<std::uint8_t, kFrameHeaderSize> encode_frame_header(const FrameHeader &header)
     {
-      if (!known_frame_family(header.family))
+      switch (validate_outbound_frame(header.channel, header.family, header.version))
       {
-        throw std::invalid_argument("cannot encode unknown ipc frame family");
-      }
-
-      if (!valid_on_channel(header.family, header.channel))
-      {
-        throw std::invalid_argument("cannot encode ipc frame family on the wrong channel");
-      }
-
-      if (reserved_family(header.family))
-      {
-        throw std::invalid_argument("cannot encode reserved ipc frame family");
-      }
-
-      if (!supported_protocol_version(header.version))
-      {
-        throw std::invalid_argument("cannot encode ipc frame header for an unsupported protocol version");
-      }
-
-      if (header.family == FrameFamily::protocol_version_negotiation)
-      {
+      case FrameValidationError::none:
         return build_encoded_header(header);
-      }
-
-      if (!frame_family_active_for_protocol_version(header.family, header.version))
-      {
+      case FrameValidationError::unknown_frame_family:
+        throw std::invalid_argument("cannot encode unknown ipc frame family");
+      case FrameValidationError::channel_family_mismatch:
+        throw std::invalid_argument("cannot encode ipc frame family on the wrong channel");
+      case FrameValidationError::reserved_frame_family:
+        throw std::invalid_argument("cannot encode reserved ipc frame family");
+      case FrameValidationError::unsupported_protocol_version:
+        throw std::invalid_argument("cannot encode ipc frame header for an unsupported protocol version");
+      case FrameValidationError::unavailable_frame_family:
         throw std::invalid_argument("cannot encode unavailable ipc frame family for the requested protocol version");
       }
-
-      return build_encoded_header(header);
     }
 
     std::optional<FrameHeader> decode_frame_header(
@@ -138,46 +122,31 @@ namespace Vajra
         return std::nullopt;
       }
 
-      if (!valid_on_channel(family.value(), channel))
+      switch (validate_inbound_frame(channel, family.value(), version))
       {
-        error = HeaderDecodeError::channel_family_mismatch;
-        return std::nullopt;
-      }
-
-      if (family.value() == FrameFamily::protocol_version_negotiation)
-      {
+      case FrameValidationError::none:
         return FrameHeader{
             channel,
             family.value(),
             version,
             read_big_endian_u32(encoded_header, 8),
         };
-      }
-
-      if (reserved_family(family.value()))
-      {
+      case FrameValidationError::unknown_frame_family:
+        error = HeaderDecodeError::unknown_frame_family;
+        return std::nullopt;
+      case FrameValidationError::channel_family_mismatch:
+        error = HeaderDecodeError::channel_family_mismatch;
+        return std::nullopt;
+      case FrameValidationError::reserved_frame_family:
         error = HeaderDecodeError::reserved_frame_family;
         return std::nullopt;
-      }
-
-      if (!supported_protocol_version(version))
-      {
+      case FrameValidationError::unsupported_protocol_version:
         error = HeaderDecodeError::unsupported_protocol_version;
         return std::nullopt;
-      }
-
-      if (!frame_family_active_for_protocol_version(family.value(), version))
-      {
+      case FrameValidationError::unavailable_frame_family:
         error = HeaderDecodeError::unavailable_frame_family;
         return std::nullopt;
       }
-
-      return FrameHeader{
-          channel,
-          family.value(),
-          version,
-          read_big_endian_u32(encoded_header, 8),
-      };
     }
   }
 }

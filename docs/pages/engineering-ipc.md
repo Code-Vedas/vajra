@@ -39,7 +39,7 @@ Vajra uses two framing directions with distinct roles:
 ## Binary Header Layout
 
 Request-channel and control-channel binary frames use the same fixed-width
-8-byte header:
+12-byte header:
 
 | Bytes | Meaning |
 | --- | --- |
@@ -48,6 +48,7 @@ Request-channel and control-channel binary frames use the same fixed-width
 | `2..3` | frame-family wire id, big-endian |
 | `4..5` | protocol major version, big-endian |
 | `6..7` | protocol minor version, big-endian |
+| `8..11` | payload length in bytes, big-endian |
 
 The binary header contract is fail-closed:
 
@@ -57,6 +58,10 @@ The binary header contract is fail-closed:
 - non-zero reserved header bits are rejected
 - non-negotiation frames reject unsupported protocol versions before execution
 - reserved frame families remain distinguishable from merely inactive ones
+
+The payload length is part of the shared binary framing contract so both
+request-channel and control-channel decoders can delimit variable-size frame
+bodies without inventing an outer transport-specific wrapper.
 
 ## Debuggability
 

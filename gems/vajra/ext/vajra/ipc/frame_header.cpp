@@ -22,6 +22,14 @@ namespace Vajra
             static_cast<std::uint16_t>(encoded_header[offset + 1]));
       }
 
+      std::uint32_t read_big_endian_u32(const std::array<std::uint8_t, kFrameHeaderSize> &encoded_header, std::size_t offset)
+      {
+        return (static_cast<std::uint32_t>(encoded_header[offset]) << 24) |
+               (static_cast<std::uint32_t>(encoded_header[offset + 1]) << 16) |
+               (static_cast<std::uint32_t>(encoded_header[offset + 2]) << 8) |
+               static_cast<std::uint32_t>(encoded_header[offset + 3]);
+      }
+
       void write_big_endian_u16(
           std::array<std::uint8_t, kFrameHeaderSize> &encoded_header,
           std::size_t offset,
@@ -29,6 +37,17 @@ namespace Vajra
       {
         encoded_header[offset] = static_cast<std::uint8_t>((value >> 8) & 0xFF);
         encoded_header[offset + 1] = static_cast<std::uint8_t>(value & 0xFF);
+      }
+
+      void write_big_endian_u32(
+          std::array<std::uint8_t, kFrameHeaderSize> &encoded_header,
+          std::size_t offset,
+          std::uint32_t value)
+      {
+        encoded_header[offset] = static_cast<std::uint8_t>((value >> 24) & 0xFF);
+        encoded_header[offset + 1] = static_cast<std::uint8_t>((value >> 16) & 0xFF);
+        encoded_header[offset + 2] = static_cast<std::uint8_t>((value >> 8) & 0xFF);
+        encoded_header[offset + 3] = static_cast<std::uint8_t>(value & 0xFF);
       }
 
       std::array<std::uint8_t, kFrameHeaderSize> build_encoded_header(const FrameHeader &header)
@@ -39,6 +58,7 @@ namespace Vajra
         write_big_endian_u16(encoded_header, 2, wire_id(header.family));
         write_big_endian_u16(encoded_header, 4, header.version.major);
         write_big_endian_u16(encoded_header, 6, header.version.minor);
+        write_big_endian_u32(encoded_header, 8, header.payload_length);
         return encoded_header;
       }
     }
@@ -130,6 +150,7 @@ namespace Vajra
             channel,
             family.value(),
             version,
+            read_big_endian_u32(encoded_header, 8),
         };
       }
 
@@ -155,6 +176,7 @@ namespace Vajra
           channel,
           family.value(),
           version,
+          read_big_endian_u32(encoded_header, 8),
       };
     }
   }

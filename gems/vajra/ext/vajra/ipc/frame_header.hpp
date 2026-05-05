@@ -24,6 +24,7 @@ namespace Vajra
       ChannelKind channel;
       FrameFamily family;
       ProtocolVersion version;
+      std::uint32_t payload_length;
     };
 
     enum class HeaderDecodeError
@@ -38,7 +39,7 @@ namespace Vajra
       unavailable_frame_family,
     };
 
-    constexpr std::size_t kFrameHeaderSize = 8;
+    constexpr std::size_t kFrameHeaderSize = 12;
 
     std::array<std::uint8_t, kFrameHeaderSize> encode_frame_header(const FrameHeader &header);
     std::optional<FrameHeader> decode_frame_header(

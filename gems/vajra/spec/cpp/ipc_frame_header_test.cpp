@@ -23,6 +23,7 @@ namespace VajraSpecCpp
           Vajra::ipc::ChannelKind::control,
           Vajra::ipc::FrameFamily::protocol_version_negotiation,
           Vajra::ipc::kProtocolVersion1_0,
+          42,
       };
       const std::array<std::uint8_t, Vajra::ipc::kFrameHeaderSize> encoded_header =
           Vajra::ipc::encode_frame_header(expected_header);
@@ -38,7 +39,8 @@ namespace VajraSpecCpp
 
       if (decoded_header->channel != expected_header.channel ||
           decoded_header->family != expected_header.family ||
-          decoded_header->version != expected_header.version)
+          decoded_header->version != expected_header.version ||
+          decoded_header->payload_length != expected_header.payload_length)
       {
         fail("ipc frame header did not round trip through binary encoding");
       }
@@ -57,6 +59,7 @@ namespace VajraSpecCpp
             Vajra::ipc::ChannelKind::request,
             Vajra::ipc::FrameFamily::lifecycle_command,
             Vajra::ipc::kProtocolVersion1_0,
+            0,
         }));
         fail("ipc frame header encoding accepted a channel/family mismatch");
       }
@@ -70,6 +73,7 @@ namespace VajraSpecCpp
             Vajra::ipc::ChannelKind::control,
             Vajra::ipc::FrameFamily::telemetry_status_reserved,
             Vajra::ipc::kProtocolVersion1_0,
+            0,
         }));
         fail("ipc frame header encoding accepted a reserved frame family");
       }
@@ -87,6 +91,7 @@ namespace VajraSpecCpp
             Vajra::ipc::ChannelKind::control,
             Vajra::ipc::FrameFamily::process_registration_identity,
             Vajra::ipc::ProtocolVersion{1, 1},
+            0,
         }));
         fail("ipc frame header encoding accepted an unsupported protocol version");
       }
@@ -98,12 +103,27 @@ namespace VajraSpecCpp
         }
       }
 
+      const std::array<std::uint8_t, Vajra::ipc::kFrameHeaderSize> negotiation_header =
+          Vajra::ipc::encode_frame_header({
+              Vajra::ipc::ChannelKind::control,
+              Vajra::ipc::FrameFamily::protocol_version_negotiation,
+              Vajra::ipc::kProtocolVersion1_0,
+              7,
+          });
+
+      if (negotiation_header[8] != 0x00 || negotiation_header[9] != 0x00 ||
+          negotiation_header[10] != 0x00 || negotiation_header[11] != 0x07)
+      {
+        fail("ipc negotiation frame header did not preserve the payload length");
+      }
+
       try
       {
         static_cast<void>(Vajra::ipc::encode_frame_header({
             Vajra::ipc::ChannelKind::control,
             Vajra::ipc::FrameFamily::protocol_version_negotiation,
             Vajra::ipc::ProtocolVersion{1, 1},
+            0,
         }));
         fail("ipc negotiation frame header encoding accepted an unsupported local protocol version");
       }
@@ -123,6 +143,7 @@ namespace VajraSpecCpp
               Vajra::ipc::ChannelKind::control,
               Vajra::ipc::FrameFamily::protocol_version_negotiation,
               Vajra::ipc::kProtocolVersion1_0,
+              0,
           });
       encoded_header[1] = 0x01;
 
@@ -145,6 +166,7 @@ namespace VajraSpecCpp
               Vajra::ipc::ChannelKind::request,
               Vajra::ipc::FrameFamily::request_execution_input,
               Vajra::ipc::kProtocolVersion1_0,
+              0,
           });
       encoded_header[0] = 0x7F;
 
@@ -171,6 +193,10 @@ namespace VajraSpecCpp
           0x01,
           0x00,
           0x01,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
       };
 
       Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::unknown_channel_kind;
@@ -196,6 +222,10 @@ namespace VajraSpecCpp
           0x01,
           0x00,
           0x01,
+          0x00,
+          0x00,
+          0x00,
+          0x09,
       };
 
       Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::unsupported_protocol_version;
@@ -208,9 +238,10 @@ namespace VajraSpecCpp
       }
 
       if (decoded_header->family != Vajra::ipc::FrameFamily::protocol_version_negotiation ||
-          decoded_header->version != Vajra::ipc::ProtocolVersion{1, 1})
+          decoded_header->version != Vajra::ipc::ProtocolVersion{1, 1} ||
+          decoded_header->payload_length != 9)
       {
-        fail("protocol negotiation header did not preserve the advertised remote version");
+        fail("protocol negotiation header did not preserve the advertised remote version and payload length");
       }
     }
 
@@ -223,6 +254,10 @@ namespace VajraSpecCpp
           0x07,
           0x00,
           0x01,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
           0x00,
           0x00,
       };
@@ -247,6 +282,10 @@ namespace VajraSpecCpp
           0x01,
           0x00,
           0x01,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
       };
 
       error = Vajra::ipc::HeaderDecodeError::unknown_channel_kind;
@@ -268,6 +307,7 @@ namespace VajraSpecCpp
               Vajra::ipc::ChannelKind::control,
               Vajra::ipc::FrameFamily::protocol_version_negotiation,
               Vajra::ipc::kProtocolVersion1_0,
+              0,
           });
       encoded_header[2] = 0xFF;
       encoded_header[3] = 0xFF;
@@ -291,6 +331,7 @@ namespace VajraSpecCpp
               Vajra::ipc::ChannelKind::request,
               Vajra::ipc::FrameFamily::request_execution_input,
               Vajra::ipc::kProtocolVersion1_0,
+              0,
           });
       encoded_header[0] = static_cast<std::uint8_t>(Vajra::ipc::ChannelKind::control);
 

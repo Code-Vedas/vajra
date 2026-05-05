@@ -8,13 +8,12 @@
 require 'pty'
 
 root_dir = File.expand_path('..', __dir__)
-Dir.chdir(root_dir)
 
 command = ['bundle', 'exec', 'reek', *ARGV]
 output = +''
 status = nil
 
-PTY.spawn(*command) do |reader, _writer, pid|
+PTY.spawn(*command, chdir: root_dir) do |reader, _writer, pid|
   reader.each { |line| output << line }
 rescue Errno::EIO
   nil

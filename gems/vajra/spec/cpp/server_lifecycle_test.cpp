@@ -9,12 +9,33 @@
 #include "test_support.hpp"
 
 #include <exception>
+#include <sstream>
 #include <thread>
 
 namespace VajraSpecCpp
 {
   namespace
   {
+    void expect_stopped_snapshot(
+        const Vajra::Server &server,
+        Vajra::lifecycle::StopReason expected_reason)
+    {
+      const Vajra::lifecycle::Snapshot snapshot = server.lifecycle_snapshot();
+      if (snapshot.state != Vajra::lifecycle::State::stopped ||
+          snapshot.last_stop_reason != expected_reason ||
+          snapshot.listener_owned)
+      {
+        std::ostringstream message;
+        message << "server lifecycle snapshot did not reach the expected stopped state"
+                << " state=" << static_cast<int>(snapshot.state)
+                << " stop_reason=" << static_cast<int>(snapshot.last_stop_reason)
+                << " listener_owned=" << snapshot.listener_owned
+                << " port=" << snapshot.port
+                << " listener_fd=" << snapshot.listener_fd;
+        fail(message.str());
+      }
+    }
+
     void test_start_and_stop_release_listener()
     {
       for (int attempt = 0; attempt < 10; ++attempt)
@@ -46,6 +67,7 @@ namespace VajraSpecCpp
           }
 
           assert_can_rebind(port);
+          expect_stopped_snapshot(server, Vajra::lifecycle::StopReason::programmatic_stop);
           return;
         }
         catch (...)
@@ -75,6 +97,71 @@ namespace VajraSpecCpp
       server.stop();
       server.start();
       assert_can_rebind(port);
+      expect_stopped_snapshot(server, Vajra::lifecycle::StopReason::programmatic_stop);
+    }
+
+    void test_repeated_start_stop_cycles_remain_reusable()
+    {
+      for (int cycle = 0; cycle < 3; ++cycle)
+      {
+        const int port = available_port();
+        Vajra::Server server(port, Vajra::request::kDefaultMaxRequestHeadBytes);
+        std::exception_ptr server_error;
+
+        std::thread server_thread([&]() {
+          try
+          {
+            server.start();
+          }
+          catch (...)
+          {
+            server_error = std::current_exception();
+          }
+        });
+
+        wait_until_listening(port);
+        server.stop();
+        server_thread.join();
+
+        if (server_error)
+        {
+          std::rethrow_exception(server_error);
+        }
+
+        assert_can_rebind(port);
+        expect_stopped_snapshot(server, Vajra::lifecycle::StopReason::programmatic_stop);
+      }
+    }
+
+    void test_repeated_stop_requests_are_idempotent()
+    {
+      const int port = available_port();
+      Vajra::Server server(port, Vajra::request::kDefaultMaxRequestHeadBytes);
+      std::exception_ptr server_error;
+
+      std::thread server_thread([&]() {
+        try
+        {
+          server.start();
+        }
+        catch (...)
+        {
+          server_error = std::current_exception();
+        }
+      });
+
+      wait_until_listening(port);
+      server.stop();
+      server.stop();
+      server_thread.join();
+
+      if (server_error)
+      {
+        std::rethrow_exception(server_error);
+      }
+
+      assert_can_rebind(port);
+      expect_stopped_snapshot(server, Vajra::lifecycle::StopReason::programmatic_stop);
     }
   }
 
@@ -82,5 +169,7 @@ namespace VajraSpecCpp
   {
     test_start_and_stop_release_listener();
     test_stop_before_start_exits_cleanly();
+    test_repeated_start_stop_cycles_remain_reusable();
+    test_repeated_stop_requests_are_idempotent();
   }
 }

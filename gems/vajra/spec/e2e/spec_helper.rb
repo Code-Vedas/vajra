@@ -40,7 +40,7 @@ module VajraE2EHelpers
   end
 
   def listener_banner(port)
-    "Vajra listening on port #{port}"
+    "listening on port #{port}"
   end
 
   def wait_for_banner(output)
@@ -49,7 +49,8 @@ module VajraE2EHelpers
         line = output.gets
         raise 'vajra exited before startup banner' if line.nil?
 
-        match = line.match(/Vajra listening on port (\d+)/)
+        match = line.match(/\[Vajra\]\[lifecycle\] .* listening on port (\d+)/) ||
+                line.match(/\[Vajra\]\[lifecycle\] .* event=boot_complete .* port=(\d+)/)
         return Integer(match[1]) if match
       end
     end

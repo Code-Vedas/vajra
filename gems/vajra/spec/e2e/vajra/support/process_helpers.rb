@@ -65,11 +65,11 @@ module VajraE2EProcessHelpers
     end
   end
 
-  def idle_shutdown(port: disposable_listener_port)
+  def idle_shutdown(port: disposable_listener_port, signal: 'INT')
     Open3.popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       selected_port = wait_for_banner(output)
 
-      status = stop_process(wait_thread)
+      status = stop_process(wait_thread, signal:)
 
       { exitstatus: status.exitstatus, output: output.read, port: selected_port }
     ensure

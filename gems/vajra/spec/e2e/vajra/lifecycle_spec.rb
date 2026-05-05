@@ -13,6 +13,13 @@ RSpec.describe 'Vajra lifecycle', :e2e, :integration do # rubocop:disable RSpec/
 
     expect(shutdown[:exitstatus]).to eq(0)
     expect(shutdown[:output]).not_to include('accept failed')
+    expect(shutdown[:output]).to include(
+      '[Vajra][lifecycle]',
+      'event=drain_requested',
+      'event=stop_completed',
+      'mode=single_process',
+      'worker_processes=0'
+    )
 
     rebound_server = bind_port(port: shutdown[:port])
     rebound_server.close
@@ -23,11 +30,26 @@ RSpec.describe 'Vajra lifecycle', :e2e, :integration do # rubocop:disable RSpec/
     )
   end
 
+  it 'shuts down cleanly on SIGTERM and releases the listener immediately' do
+    shutdown = idle_shutdown(signal: 'TERM')
+
+    expect(shutdown[:exitstatus]).to eq(0)
+    expect(shutdown[:output]).not_to include('accept failed')
+
+    rebound_server = bind_port(port: shutdown[:port])
+    rebound_server.close
+  end
+
   it 'supports programmatic Vajra.stop and releases the listener' do
     shutdown = programmatic_shutdown
 
     expect(shutdown[:exitstatus]).to eq(0), shutdown[:output]
     expect(shutdown[:output]).not_to include('accept failed')
+    expect(shutdown[:output]).to include(
+      '[Vajra][lifecycle]',
+      'event=drain_requested',
+      'stop_reason=programmatic_stop'
+    )
   end
 
   it 'survives repeated process start stop thrashing and releases the listener every time' do

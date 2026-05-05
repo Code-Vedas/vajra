@@ -6,8 +6,11 @@
 #ifndef VAJRA_SERVER_HPP
 #define VAJRA_SERVER_HPP
 
-#include <atomic>
 #include <cstddef>
+#include <functional>
+#include <atomic>
+
+#include "lifecycle/lifecycle_controller.hpp"
 #include "listener/listener_socket.hpp"
 #include "request/request_head_error.hpp"
 #include "request/request_processor.hpp"
@@ -22,14 +25,15 @@ namespace Vajra
 
     void start();
     void stop();
+    lifecycle::Snapshot lifecycle_snapshot() const;
+    void set_lifecycle_observer(lifecycle::Controller::Observer observer);
 
   private:
     int port_;
     std::atomic<int> server_fd_;
-    std::atomic<bool> running_;
-    std::atomic<bool> stop_requested_;
     listener::Socket listener_socket_;
     request::RequestProcessor request_processor_;
+    lifecycle::Controller lifecycle_;
 
     void close_listener_fd(bool interrupt_accept);
   };

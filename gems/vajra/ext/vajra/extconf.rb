@@ -9,7 +9,7 @@ require 'mkmf'
 
 append_cflags('-fvisibility=hidden')
 
-source_files = Dir.chdir(__dir__) { Dir.glob('**/*.cpp') }
+source_files = Dir.glob('**/*.cpp', base: __dir__)
 source_directories = source_files.map { |path| File.dirname(path) }.uniq.sort
 source_basenames = source_files.map { |path| File.basename(path) }.sort
 duplicate_basenames = source_basenames.tally.select { |_, count| count > 1 }.keys

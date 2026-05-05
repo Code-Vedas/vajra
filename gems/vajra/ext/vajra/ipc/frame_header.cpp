@@ -136,6 +136,18 @@ namespace Vajra
         return std::nullopt;
       }
 
+      if (family.value() == FrameFamily::protocol_version_negotiation &&
+          !supported_protocol_version(version))
+      {
+        error = HeaderDecodeError::unsupported_protocol_version;
+        return FrameHeader{
+            channel,
+            family.value(),
+            version,
+            payload_length,
+        };
+      }
+
       switch (validate_inbound_frame(channel, family.value(), version))
       {
       case FrameValidationError::none:

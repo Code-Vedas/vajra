@@ -290,6 +290,11 @@ namespace VajraSpecCpp
       {
         fail("protocol negotiation header did not preserve the advertised remote version and payload length");
       }
+
+      if (error != Vajra::ipc::HeaderDecodeError::unsupported_protocol_version)
+      {
+        fail("unsupported negotiation headers must preserve a compatibility warning for callers");
+      }
     }
 
     void test_reserved_frame_families_are_rejected_during_header_decode()

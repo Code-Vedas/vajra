@@ -23,9 +23,15 @@ namespace Vajra
     {
     }
 
-    void Controller::begin_startup()
+    bool Controller::begin_startup()
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (state_ == State::stopped && pending_stop_before_start_)
+      {
+        pending_stop_before_start_ = false;
+        return false;
+      }
+
       if (state_ != State::stopped)
       {
         throw std::logic_error("lifecycle startup can only begin from stopped");
@@ -37,13 +43,20 @@ namespace Vajra
       pending_stop_before_start_ = false;
       port_ = -1;
       listener_fd_ = -1;
+      return true;
     }
 
-    void Controller::mark_listening(int listener_fd, int port)
+    bool Controller::mark_listening(int listener_fd, int port)
     {
       Snapshot snapshot_value;
+      bool notify_observer = false;
       {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (state_ == State::draining)
+        {
+          return false;
+        }
+
         if (state_ != State::booting)
         {
           throw std::logic_error("lifecycle can only enter listening from booting");
@@ -54,9 +67,14 @@ namespace Vajra
         port_ = port;
         listener_fd_ = listener_fd;
         snapshot_value = snapshot_unlocked();
+        notify_observer = true;
       }
 
-      notify(HookPoint::boot_complete, snapshot_value);
+      if (notify_observer)
+      {
+        notify(HookPoint::boot_complete, snapshot_value);
+      }
+      return true;
     }
 
     void Controller::mark_serving()
@@ -187,18 +205,6 @@ namespace Vajra
     {
       std::lock_guard<std::mutex> lock(mutex_);
       return snapshot_unlocked();
-    }
-
-    bool Controller::consume_pending_stop_before_start()
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (state_ != State::stopped || !pending_stop_before_start_)
-      {
-        return false;
-      }
-
-      pending_stop_before_start_ = false;
-      return true;
     }
 
     Snapshot Controller::snapshot_unlocked() const

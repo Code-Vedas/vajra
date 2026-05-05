@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <utility>
@@ -178,14 +179,13 @@ void Vajra::Server::close_listener_fd(bool interrupt_accept)
 
 void Vajra::Server::start()
 {
-  if (lifecycle_.consume_pending_stop_before_start())
+  if (!lifecycle_.begin_startup())
   {
     close_listener_fd(false);
     return;
   }
 
   log_booting_event();
-  lifecycle_.begin_startup();
 
   listener::SocketBinding binding;
   try
@@ -200,14 +200,12 @@ void Vajra::Server::start()
 
   port_ = binding.port;
   server_fd_.store(binding.fd);
-  if (lifecycle_.snapshot().state == lifecycle::State::draining || server_fd_.load() < 0)
+  if (!lifecycle_.mark_listening(binding.fd, binding.port) || server_fd_.load() < 0)
   {
     close_listener_fd(false);
     lifecycle_.finish_stop();
     return;
   }
-
-  lifecycle_.mark_listening(binding.fd, binding.port);
   log_listening_banner(port_);
 
   for (;;)

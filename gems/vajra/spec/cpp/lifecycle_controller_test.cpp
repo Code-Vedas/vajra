@@ -22,8 +22,10 @@ namespace VajraSpecCpp
         hook_points.push_back(hook_point);
       });
 
-      controller.begin_startup();
-      controller.mark_listening(7, 3000);
+      if (!controller.begin_startup() || !controller.mark_listening(7, 3000))
+      {
+        fail("lifecycle controller failed to begin normal startup");
+      }
       controller.mark_serving();
       controller.request_stop(Vajra::lifecycle::StopReason::programmatic_stop);
       controller.finish_stop();
@@ -61,7 +63,10 @@ namespace VajraSpecCpp
       {
       }
 
-      controller.begin_startup();
+      if (!controller.begin_startup())
+      {
+        fail("lifecycle controller refused valid startup transition");
+      }
 
       try
       {
@@ -76,7 +81,10 @@ namespace VajraSpecCpp
     void test_lifecycle_controller_preserves_failure_state()
     {
       Vajra::lifecycle::Controller controller;
-      controller.begin_startup();
+      if (!controller.begin_startup())
+      {
+        fail("lifecycle controller refused valid startup transition before failure");
+      }
       controller.mark_failed(Vajra::lifecycle::StopReason::startup_failure);
       controller.finish_stop();
 
@@ -92,8 +100,10 @@ namespace VajraSpecCpp
     void test_lifecycle_controller_stop_requests_are_idempotent()
     {
       Vajra::lifecycle::Controller controller;
-      controller.begin_startup();
-      controller.mark_listening(7, 3000);
+      if (!controller.begin_startup() || !controller.mark_listening(7, 3000))
+      {
+        fail("lifecycle controller failed to begin normal startup");
+      }
       controller.request_stop(Vajra::lifecycle::StopReason::signal_shutdown);
       controller.request_stop(Vajra::lifecycle::StopReason::programmatic_stop);
       controller.finish_stop();
@@ -108,8 +118,10 @@ namespace VajraSpecCpp
     void test_lifecycle_controller_ignores_serving_transition_after_drain_begins()
     {
       Vajra::lifecycle::Controller controller;
-      controller.begin_startup();
-      controller.mark_listening(7, 3000);
+      if (!controller.begin_startup() || !controller.mark_listening(7, 3000))
+      {
+        fail("lifecycle controller failed to begin normal startup");
+      }
       controller.request_stop(Vajra::lifecycle::StopReason::programmatic_stop);
       controller.mark_serving();
 
@@ -121,6 +133,28 @@ namespace VajraSpecCpp
       }
     }
 
+    void test_lifecycle_controller_rejects_listening_completion_after_drain_begins()
+    {
+      Vajra::lifecycle::Controller controller;
+      if (!controller.begin_startup())
+      {
+        fail("lifecycle controller refused valid startup transition");
+      }
+
+      controller.request_stop(Vajra::lifecycle::StopReason::programmatic_stop);
+      if (controller.mark_listening(7, 3000))
+      {
+        fail("lifecycle controller accepted listening after drain began");
+      }
+
+      const Vajra::lifecycle::Snapshot snapshot = controller.snapshot();
+      if (snapshot.state != Vajra::lifecycle::State::draining ||
+          snapshot.last_stop_reason != Vajra::lifecycle::StopReason::programmatic_stop)
+      {
+        fail("lifecycle controller did not preserve draining state when listening raced with stop");
+      }
+    }
+
     void test_lifecycle_controller_tracks_stop_before_start_separately_from_stopped_state()
     {
       Vajra::lifecycle::Controller controller;
@@ -129,20 +163,24 @@ namespace VajraSpecCpp
       const Vajra::lifecycle::Snapshot requested_snapshot = controller.snapshot();
       if (requested_snapshot.state != Vajra::lifecycle::State::stopped ||
           requested_snapshot.last_stop_reason != Vajra::lifecycle::StopReason::programmatic_stop ||
-          !controller.consume_pending_stop_before_start())
+          controller.begin_startup())
       {
         fail("lifecycle controller did not preserve stop-before-start request separately");
       }
 
-      if (controller.consume_pending_stop_before_start())
+      if (!controller.begin_startup())
       {
-        fail("lifecycle controller consumed stop-before-start request more than once");
+        fail("lifecycle controller did not allow startup after consuming stop-before-start request");
       }
 
       controller.request_stop(Vajra::lifecycle::StopReason::programmatic_stop);
-      if (controller.consume_pending_stop_before_start())
+      try
       {
-        fail("lifecycle controller re-entered pending stop after already-stopped stop request");
+        controller.begin_startup();
+        fail("lifecycle controller accepted startup while draining after repeated stop request");
+      }
+      catch (const std::logic_error &)
+      {
       }
     }
   }
@@ -154,6 +192,7 @@ namespace VajraSpecCpp
     test_lifecycle_controller_preserves_failure_state();
     test_lifecycle_controller_stop_requests_are_idempotent();
     test_lifecycle_controller_ignores_serving_transition_after_drain_begins();
+    test_lifecycle_controller_rejects_listening_completion_after_drain_begins();
     test_lifecycle_controller_tracks_stop_before_start_separately_from_stopped_state();
   }
 }

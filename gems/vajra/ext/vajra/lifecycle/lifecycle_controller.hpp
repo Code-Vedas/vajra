@@ -58,13 +58,12 @@ namespace Vajra
 
       Controller();
 
-      void begin_startup();
-      void mark_listening(int listener_fd, int port);
+      bool begin_startup();
+      bool mark_listening(int listener_fd, int port);
       void mark_serving();
       void request_stop(StopReason reason);
       void finish_stop();
       void mark_failed(StopReason reason);
-      bool consume_pending_stop_before_start();
 
       Snapshot snapshot() const;
       void set_observer(Observer observer);

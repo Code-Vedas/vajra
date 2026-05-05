@@ -36,11 +36,24 @@ namespace Vajra
         return false;
       }
 
+      bool version_has_active_frame_family(ProtocolVersion version)
+      {
+        for (const FrameFamilyVersionSupport &support : kFrameFamilyVersionSupport)
+        {
+          if (support.version == version)
+          {
+            return true;
+          }
+        }
+
+        return false;
+      }
     }
 
     bool supported_protocol_version(ProtocolVersion version)
     {
-      return explicitly_compatible_protocol_pair(version, version);
+      return explicitly_compatible_protocol_pair(version, version) &&
+             version_has_active_frame_family(version);
     }
 
     CompatibilityResult check_compatibility(ProtocolVersion local, ProtocolVersion remote)

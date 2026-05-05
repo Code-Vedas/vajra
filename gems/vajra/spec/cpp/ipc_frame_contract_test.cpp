@@ -34,6 +34,15 @@ namespace VajraSpecCpp
       {
         fail("unknown ipc frame wire id decoded successfully");
       }
+
+      try
+      {
+        static_cast<void>(Vajra::ipc::wire_id(static_cast<Vajra::ipc::FrameFamily>(0xFFFF)));
+        fail("unknown ipc frame family unexpectedly produced a wire id");
+      }
+      catch (const std::invalid_argument &)
+      {
+      }
     }
 
     void test_unknown_enum_values_are_not_treated_as_valid_control_families()

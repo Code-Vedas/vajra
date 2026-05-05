@@ -36,6 +36,28 @@ Vajra uses two framing directions with distinct roles:
 - the control path uses MessagePack-backed payloads suited to lifecycle and operator coordination
 - frame-family responsibilities stay explicit and separate from byte-layout details
 
+## Binary Header Layout
+
+Request-channel and control-channel binary frames use the same fixed-width
+8-byte header:
+
+| Bytes | Meaning |
+| --- | --- |
+| `0` | channel kind |
+| `1` | reserved byte, encoded as zero and rejected if non-zero |
+| `2..3` | frame-family wire id, big-endian |
+| `4..5` | protocol major version, big-endian |
+| `6..7` | protocol minor version, big-endian |
+
+The binary header contract is fail-closed:
+
+- unknown channel values are rejected
+- unknown frame-family ids are rejected
+- request/control channel-family mismatches are rejected
+- non-zero reserved header bits are rejected
+- non-negotiation frames reject unsupported protocol versions before execution
+- reserved frame families remain distinguishable from merely inactive ones
+
 ## Debuggability
 
 The IPC contract keeps debugging work explicit instead of hiding protocol state:

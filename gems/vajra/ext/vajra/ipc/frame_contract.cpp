@@ -100,6 +100,11 @@ namespace Vajra
 
     std::uint16_t wire_id(FrameFamily family)
     {
+      if (!known_frame_family(family))
+      {
+        throw std::invalid_argument("unknown ipc frame family");
+      }
+
       return static_cast<std::uint16_t>(family);
     }
 

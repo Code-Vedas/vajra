@@ -55,11 +55,6 @@ namespace Vajra
         throw std::invalid_argument("cannot encode ipc frame family on the wrong channel");
       }
 
-      if (header.family == FrameFamily::protocol_version_negotiation)
-      {
-        return build_encoded_header(header);
-      }
-
       if (reserved_family(header.family))
       {
         throw std::invalid_argument("cannot encode reserved ipc frame family");
@@ -68,6 +63,11 @@ namespace Vajra
       if (!supported_protocol_version(header.version))
       {
         throw std::invalid_argument("cannot encode ipc frame header for an unsupported protocol version");
+      }
+
+      if (header.family == FrameFamily::protocol_version_negotiation)
+      {
+        return build_encoded_header(header);
       }
 
       if (!frame_family_active_for_protocol_version(header.family, header.version))

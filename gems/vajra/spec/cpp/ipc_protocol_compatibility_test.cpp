@@ -104,6 +104,25 @@ namespace VajraSpecCpp
         fail("reserved frame families must not become available without an explicit version table entry");
       }
     }
+
+    void test_outbound_negotiation_frames_require_explicit_activation()
+    {
+      if (Vajra::ipc::validate_outbound_frame(
+              Vajra::ipc::ChannelKind::control,
+              Vajra::ipc::FrameFamily::protocol_version_negotiation,
+              Vajra::ipc::kProtocolVersion1_0) != Vajra::ipc::FrameValidationError::none)
+      {
+        fail("baseline negotiation frame is not encodable for its active protocol version");
+      }
+
+      if (Vajra::ipc::validate_outbound_frame(
+              Vajra::ipc::ChannelKind::control,
+              Vajra::ipc::FrameFamily::protocol_version_negotiation,
+              Vajra::ipc::ProtocolVersion{1, 1}) != Vajra::ipc::FrameValidationError::unsupported_protocol_version)
+      {
+        fail("unsupported protocol versions must not make negotiation frames encodable without explicit activation");
+      }
+    }
   }
 
   void run_ipc_protocol_compatibility_tests()
@@ -114,5 +133,6 @@ namespace VajraSpecCpp
     test_incompatible_major_version_is_rejected();
     test_unsupported_minor_version_is_rejected();
     test_supported_frame_families_follow_protocol_compatibility();
+    test_outbound_negotiation_frames_require_explicit_activation();
   }
 }

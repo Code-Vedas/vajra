@@ -198,11 +198,6 @@ namespace Vajra
         return FrameValidationError::unsupported_protocol_version;
       }
 
-      if (negotiation_frame_family(family))
-      {
-        return FrameValidationError::none;
-      }
-
       if (!frame_family_active_for_protocol_version(family, version))
       {
         return FrameValidationError::unavailable_frame_family;

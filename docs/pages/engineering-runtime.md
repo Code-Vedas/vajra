@@ -63,3 +63,11 @@ The repo shape answers these questions:
 - where listener state lives
 - where diagnostics are emitted
 - where shutdown ownership transitions from Ruby to native code
+
+The runtime also preserves a hard split between:
+
+- request-path frames that carry executable application data
+- control-path frames that carry lifecycle, readiness, compatibility, and diagnostics
+
+That split is part of the runtime ownership model, not an optional transport
+detail.

@@ -21,6 +21,7 @@ int main()
 {
   try
   {
+    VajraSpecCpp::run_ipc_contract_tests();
     VajraSpecCpp::run_server_lifecycle_tests();
     VajraSpecCpp::run_request_head_tests();
     VajraSpecCpp::run_response_tests();

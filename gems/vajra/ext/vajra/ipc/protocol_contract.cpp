@@ -14,10 +14,6 @@ namespace Vajra
   {
     namespace
     {
-      constexpr std::array<ProtocolVersion, 1> kSupportedProtocolVersions = {{
-          kProtocolVersion1_0,
-      }};
-
       const FrameFamilyMetadata *find_frame_family_metadata(FrameFamily family)
       {
         for (const FrameFamilyMetadata &metadata : kFrameFamilyMetadata)
@@ -29,19 +25,6 @@ namespace Vajra
         }
 
         return nullptr;
-      }
-
-      bool supported_protocol_version_entry(ProtocolVersion version)
-      {
-        for (const ProtocolVersion supported_version : kSupportedProtocolVersions)
-        {
-          if (supported_version == version)
-          {
-            return true;
-          }
-        }
-
-        return false;
       }
 
       bool version_has_active_frame_family(ProtocolVersion version)
@@ -116,12 +99,7 @@ namespace Vajra
 
     bool reserved_family(FrameFamily family)
     {
-      if (const FrameFamilyMetadata *metadata = find_frame_family_metadata(family))
-      {
-        return metadata->reserved;
-      }
-
-      return false;
+      return known_frame_family(family) && !first_supported_protocol_version(family).has_value();
     }
 
     std::uint16_t wire_id(FrameFamily family)
@@ -174,8 +152,7 @@ namespace Vajra
 
     bool supported_protocol_version(ProtocolVersion version)
     {
-      return supported_protocol_version_entry(version) &&
-             version_has_active_frame_family(version);
+      return version_has_active_frame_family(version);
     }
 
     bool frame_family_active_for_protocol_version(FrameFamily family, ProtocolVersion version)

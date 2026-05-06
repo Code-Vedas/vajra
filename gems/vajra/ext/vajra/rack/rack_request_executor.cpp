@@ -21,11 +21,9 @@
 
 namespace
 {
-  std::atomic<bool> rack_execution_installed{false};
-  ID id_call;
-  ID id_message;
-  ID id_backtrace;
-  ID id_to_a;
+  std::atomic<bool> rack_execution_callback_installed_flag{false};
+  std::atomic<bool> rack_execution_on_ruby_thread{false};
+  VALUE rack_execution_callback = Qnil;
 
   struct ExecutionCallContext
   {
@@ -45,29 +43,12 @@ namespace
 
   std::string ruby_string_value(VALUE value)
   {
-    VALUE string_value = rb_obj_as_string(value);
-    return std::string(RSTRING_PTR(string_value), static_cast<std::size_t>(RSTRING_LEN(string_value)));
-  }
-
-  void ensure_ruby_ids()
-  {
-    if (id_call != 0)
+    if (RB_TYPE_P(value, T_STRING) == 0)
     {
-      return;
+      throw std::runtime_error("Rack execution returned a non-string normalized value");
     }
 
-    id_call = rb_intern("call");
-    id_message = rb_intern("message");
-    id_backtrace = rb_intern("backtrace");
-    id_to_a = rb_intern("to_a");
-  }
-
-  VALUE rack_execution_module()
-  {
-    ensure_ruby_ids();
-    const VALUE vajra_module = rb_const_get(rb_cObject, rb_intern("Vajra"));
-    const VALUE internal_module = rb_const_get(vajra_module, rb_intern("Internal"));
-    return rb_const_get(internal_module, rb_intern("RackExecution"));
+    return std::string(RSTRING_PTR(value), static_cast<std::size_t>(RSTRING_LEN(value)));
   }
 
   VALUE ruby_env_entries_from(const std::vector<Vajra::request::RackEnvEntry> &env_entries)
@@ -91,21 +72,19 @@ namespace
   VALUE protected_execute_rack_request(VALUE data)
   {
     auto *context = reinterpret_cast<ExecutionCallContext *>(data);
-    return rb_funcall(rack_execution_module(), id_call, 1, ruby_env_entries_from(*context->env_entries));
+    if (NIL_P(rack_execution_callback))
+    {
+      return Qnil;
+    }
+
+    VALUE env_entries = ruby_env_entries_from(*context->env_entries);
+    VALUE arguments[] = {env_entries};
+    return rb_proc_call(rack_execution_callback, rb_ary_new_from_values(1, arguments));
   }
 
   std::string exception_message(VALUE exception)
   {
-    VALUE message = rb_funcall(exception, id_message, 0);
-    std::string rendered = ruby_string_value(message);
-    VALUE backtrace = rb_funcall(exception, id_backtrace, 0);
-    if (NIL_P(backtrace) || RARRAY_LEN(backtrace) == 0)
-    {
-      return rendered;
-    }
-
-    VALUE first_frame = rb_ary_entry(backtrace, 0);
-    return rendered + " (" + ruby_string_value(first_frame) + ")";
+    return std::string(rb_obj_classname(exception));
   }
 
   Vajra::response::Header response_header_from_ruby(VALUE pair)
@@ -157,7 +136,7 @@ namespace
     }
 
     VALUE status = rb_ary_entry(value, 0);
-    VALUE headers = rb_funcall(rb_ary_entry(value, 1), id_to_a, 0);
+    VALUE headers = rb_ary_entry(value, 1);
     VALUE body = rb_ary_entry(value, 2);
 
     if (TYPE(headers) != T_ARRAY)
@@ -250,15 +229,31 @@ namespace
   }
 }
 
-void Vajra::rack::set_rack_execution_installed(bool installed)
+void Vajra::rack::initialize_rack_execution_bridge()
 {
-  rack_execution_installed.store(installed, std::memory_order_release);
+  rb_global_variable(&rack_execution_callback);
+}
+
+void Vajra::rack::set_rack_execution_callback(VALUE callback)
+{
+  rack_execution_callback = callback;
+  rack_execution_callback_installed_flag.store(!NIL_P(callback), std::memory_order_release);
+}
+
+bool Vajra::rack::rack_execution_callback_installed()
+{
+  return rack_execution_callback_installed_flag.load(std::memory_order_acquire);
+}
+
+void Vajra::rack::set_rack_execution_on_ruby_thread(bool enabled)
+{
+  rack_execution_on_ruby_thread.store(enabled, std::memory_order_release);
 }
 
 std::optional<Vajra::response::Response> Vajra::rack::RackRequestExecutor::execute(
     const request::RequestContext &request_context) const
 {
-  if (!rack_execution_installed.load(std::memory_order_acquire))
+  if (!rack_execution_callback_installed_flag.load(std::memory_order_acquire))
   {
     return std::nullopt;
   }
@@ -267,7 +262,14 @@ std::optional<Vajra::response::Response> Vajra::rack::RackRequestExecutor::execu
   request::RackEnvBuilder builder;
   const std::vector<request::RackEnvEntry> env_entries = builder.build(request_context);
   ExecutionCallContext context{&env_entries, std::nullopt, ""};
-  rb_thread_call_with_gvl(execute_rack_request_with_gvl, &context);
+  if (rack_execution_on_ruby_thread.load(std::memory_order_acquire))
+  {
+    execute_rack_request_with_gvl(&context);
+  }
+  else
+  {
+    rb_thread_call_with_gvl(execute_rack_request_with_gvl, &context);
+  }
 
   if (!context.error_message.empty())
   {

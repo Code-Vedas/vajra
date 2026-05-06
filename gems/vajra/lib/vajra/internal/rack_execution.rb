@@ -24,7 +24,7 @@ module Vajra
         app.method(:call)
 
         APP_MUTEX.synchronize { APP_STATE.app = app }
-        __native_set_installed__(true)
+        __native_set_callback__(proc { |env_entries| Vajra::Internal::RackExecution.call(env_entries) })
         app
       rescue NameError
         raise TypeError, 'Rack app must respond to #call'
@@ -32,7 +32,7 @@ module Vajra
 
       def uninstall!
         APP_MUTEX.synchronize { APP_STATE.app = nil }
-        __native_set_installed__(false)
+        __native_set_callback__(nil)
       end
 
       def installed?

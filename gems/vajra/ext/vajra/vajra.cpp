@@ -386,11 +386,11 @@ namespace
     return Qnil;
   }
 
-  VALUE rb_rack_execution_native_set_installed(VALUE self, VALUE installed)
+  VALUE rb_rack_execution_native_set_callback(VALUE self, VALUE callback)
   {
     (void)self;
-    Vajra::rack::set_rack_execution_installed(RTEST(installed));
-    return installed;
+    Vajra::rack::set_rack_execution_callback(callback);
+    return callback;
   }
 }
 
@@ -426,7 +426,17 @@ namespace VajraNative
       }
 
       ServerStartContext context{server, nullptr};
-      rb_thread_call_without_gvl(run_server_without_gvl, &context, RUBY_UBF_IO, nullptr);
+      const bool run_rack_execution_on_ruby_thread = Vajra::rack::rack_execution_callback_installed();
+      Vajra::rack::set_rack_execution_on_ruby_thread(run_rack_execution_on_ruby_thread);
+      if (run_rack_execution_on_ruby_thread)
+      {
+        run_server_without_gvl(&context);
+      }
+      else
+      {
+        rb_thread_call_without_gvl(run_server_without_gvl, &context, RUBY_UBF_IO, nullptr);
+      }
+      Vajra::rack::set_rack_execution_on_ruby_thread(false);
       if (context.error)
       {
         std::rethrow_exception(context.error);
@@ -434,6 +444,7 @@ namespace VajraNative
     }
     catch (...)
     {
+      Vajra::rack::set_rack_execution_on_ruby_thread(false);
       std::lock_guard<std::mutex> lock(server_mutex);
       server_instance.reset();
       throw;
@@ -459,6 +470,7 @@ extern "C" void Init_vajra()
 {
   id_port = rb_intern("port");
   id_max_request_head_bytes = rb_intern("max_request_head_bytes");
+  Vajra::rack::initialize_rack_execution_bridge();
   VALUE mVajra = rb_define_module("Vajra");
   VALUE mInternal = rb_define_module_under(mVajra, "Internal");
   VALUE mRackExecution = rb_define_module_under(mInternal, "RackExecution");
@@ -466,7 +478,7 @@ extern "C" void Init_vajra()
   rb_define_singleton_method(mVajra, "stop", RUBY_METHOD_FUNC(rb_vajra_stop), 0);
   rb_define_singleton_method(
       mRackExecution,
-      "__native_set_installed__",
-      RUBY_METHOD_FUNC(rb_rack_execution_native_set_installed),
+      "__native_set_callback__",
+      RUBY_METHOD_FUNC(rb_rack_execution_native_set_callback),
       1);
 }

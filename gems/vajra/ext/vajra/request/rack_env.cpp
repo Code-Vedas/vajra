@@ -61,6 +61,12 @@ namespace
         continue;
       }
 
+      if (character == '_')
+      {
+        throw Vajra::request::bad_request_error(
+            "request header names must not contain underscores for Rack environment translation");
+      }
+
       if (!valid_header_name_character(character))
       {
         throw Vajra::request::bad_request_error("invalid request header name for Rack environment");
@@ -70,12 +76,6 @@ namespace
       {
         normalized.push_back('_');
         continue;
-      }
-
-      if (character == '_')
-      {
-        throw Vajra::request::bad_request_error(
-            "request header names must not contain underscores for Rack environment translation");
       }
 
       normalized.push_back(static_cast<char>(character));

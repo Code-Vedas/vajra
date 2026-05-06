@@ -24,6 +24,7 @@ namespace Vajra
     class ResponseSerializer
     {
     public:
+      void validate(const Response &response) const;
       std::string serialize(const Response &response) const;
 
     private:

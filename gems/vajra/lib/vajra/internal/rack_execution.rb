@@ -21,7 +21,11 @@ module Vajra
       APP_STATE = AppState.new(nil)
 
       def install!(app)
+        app.method(:call)
+
         APP_MUTEX.synchronize { APP_STATE.app = app }
+      rescue NameError
+        raise TypeError, 'Rack app must respond to #call'
       end
 
       def uninstall!

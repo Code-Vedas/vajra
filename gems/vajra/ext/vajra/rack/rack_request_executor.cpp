@@ -34,7 +34,17 @@ namespace
   struct InstalledCheckContext
   {
     bool installed = false;
+    std::string error_message;
   };
+
+  struct ResponseNormalizationContext
+  {
+    VALUE result = Qnil;
+    std::optional<Vajra::response::Response> response;
+    std::string error_message;
+  };
+
+  std::string exception_message(VALUE exception);
 
   std::string ruby_string_value(VALUE value)
   {
@@ -78,6 +88,11 @@ namespace
     return ruby_entries;
   }
 
+  VALUE protected_installed_check(VALUE)
+  {
+    return rb_funcall(rack_execution_module(), id_installed, 0);
+  }
+
   VALUE protected_execute_rack_request(VALUE data)
   {
     auto *context = reinterpret_cast<ExecutionCallContext *>(data);
@@ -93,7 +108,16 @@ namespace
   void *installed_with_gvl(void *data)
   {
     auto *context = static_cast<InstalledCheckContext *>(data);
-    context->installed = RTEST(rb_funcall(rack_execution_module(), id_installed, 0));
+    int state = 0;
+    VALUE result = rb_protect(protected_installed_check, Qnil, &state);
+    if (state != 0)
+    {
+      context->error_message = exception_message(rb_errinfo());
+      rb_set_errinfo(Qnil);
+      return nullptr;
+    }
+
+    context->installed = RTEST(result);
     return nullptr;
   }
 
@@ -184,29 +208,51 @@ namespace
         Vajra::response::ConnectionBehavior::close};
   }
 
+  VALUE protected_normalize_rack_response(VALUE data)
+  {
+    auto *context = reinterpret_cast<ResponseNormalizationContext *>(data);
+    try
+    {
+      context->response = response_from_ruby(context->result);
+    }
+    catch (const std::exception &error)
+    {
+      context->error_message = error.what();
+    }
+    return Qnil;
+  }
+
   void *execute_rack_request_with_gvl(void *data)
   {
     auto *context = static_cast<ExecutionCallContext *>(data);
 
-    try
+    int state = 0;
+    VALUE result = rb_protect(protected_execute_rack_request, reinterpret_cast<VALUE>(context), &state);
+    if (state != 0)
     {
-      int state = 0;
-      VALUE result = rb_protect(protected_execute_rack_request, reinterpret_cast<VALUE>(context), &state);
+      context->error_message = exception_message(rb_errinfo());
+      rb_set_errinfo(Qnil);
+      return nullptr;
+    }
+
+    if (!NIL_P(result))
+    {
+      ResponseNormalizationContext normalization_context{result, std::nullopt, ""};
+      state = 0;
+      rb_protect(protected_normalize_rack_response, reinterpret_cast<VALUE>(&normalization_context), &state);
       if (state != 0)
       {
         context->error_message = exception_message(rb_errinfo());
         rb_set_errinfo(Qnil);
         return nullptr;
       }
-
-      if (!NIL_P(result))
+      if (!normalization_context.error_message.empty())
       {
-        context->response = response_from_ruby(result);
+        context->error_message = normalization_context.error_message;
+        return nullptr;
       }
-    }
-    catch (const std::exception &error)
-    {
-      context->error_message = error.what();
+
+      context->response = std::move(normalization_context.response);
     }
 
     return nullptr;
@@ -306,6 +352,11 @@ std::optional<Vajra::response::Response> Vajra::rack::RackRequestExecutor::execu
 {
   InstalledCheckContext installed_check_context{};
   rb_thread_call_with_gvl(installed_with_gvl, &installed_check_context);
+  if (!installed_check_context.error_message.empty())
+  {
+    throw std::runtime_error("Rack execution installation check failed: " + installed_check_context.error_message);
+  }
+
   if (!installed_check_context.installed)
   {
     return std::nullopt;

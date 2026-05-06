@@ -18,6 +18,21 @@ RSpec.describe Vajra::Internal::RackExecution do
     expect(described_class.installed?).to be(true)
   end
 
+  it 'accepts callable rack app objects' do
+    app = Class.new do
+      def call(_env)
+        [200, { 'Content-Type' => 'text/plain' }, ['OK']]
+      end
+    end.new
+
+    expect(described_class.install!(app)).to equal(app)
+  end
+
+  it 'rejects non-callable rack app objects' do
+    expect { described_class.install!(Object.new) }
+      .to raise_error(TypeError, 'Rack app must respond to #call')
+  end
+
   it 'builds the Rack env and normalizes the response body and headers' do
     captured_env = nil
     headers = Class.new do

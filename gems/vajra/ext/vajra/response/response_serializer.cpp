@@ -139,6 +139,11 @@ std::string Vajra::response::ResponseSerializer::serialize(const Response &respo
   return serialized;
 }
 
+void Vajra::response::ResponseSerializer::validate(const Response &response) const
+{
+  validate_response(response);
+}
+
 void Vajra::response::ResponseSerializer::validate_response(const Response &response) const
 {
   validate_status(response.status);

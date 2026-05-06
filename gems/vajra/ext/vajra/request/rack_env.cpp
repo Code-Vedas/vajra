@@ -12,6 +12,37 @@
 
 namespace
 {
+  bool valid_header_name_character(unsigned char character)
+  {
+    if ((character >= '0' && character <= '9') || (character >= 'A' && character <= 'Z') ||
+        (character >= 'a' && character <= 'z'))
+    {
+      return true;
+    }
+
+    switch (character)
+    {
+      case '!':
+      case '#':
+      case '$':
+      case '%':
+      case '&':
+      case '\'':
+      case '*':
+      case '+':
+      case '-':
+      case '.':
+      case '^':
+      case '_':
+      case '`':
+      case '|':
+      case '~':
+        return true;
+      default:
+        return false;
+    }
+  }
+
   std::string normalize_header_env_key(const std::string &header_name)
   {
     std::string normalized;
@@ -26,13 +57,18 @@ namespace
         continue;
       }
 
+      if (!valid_header_name_character(character))
+      {
+        throw Vajra::request::bad_request_error("invalid request header name for Rack environment");
+      }
+
       if (character == '-')
       {
         normalized.push_back('_');
         continue;
       }
 
-      throw Vajra::request::bad_request_error("invalid request header name for Rack environment");
+      normalized.push_back(static_cast<char>(character));
     }
 
     if (normalized.empty())
@@ -57,7 +93,7 @@ namespace
     {
       if (entry.key == key)
       {
-        entry.value += "," + value;
+        entry.value += (key == "HTTP_COOKIE" ? "; " : ",") + value;
         return;
       }
     }

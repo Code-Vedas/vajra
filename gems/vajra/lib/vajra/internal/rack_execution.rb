@@ -62,9 +62,11 @@ module Vajra
       private_class_method :build_env
 
       def normalize_headers(headers)
-        headers.map do |name, value|
-          [String(name), String(value)]
+        normalized_headers = []
+        headers.each do |name, value|
+          normalized_headers << [String(name), String(value)]
         end
+        normalized_headers
       end
       private_class_method :normalize_headers
 

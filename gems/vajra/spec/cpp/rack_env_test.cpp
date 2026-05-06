@@ -92,6 +92,9 @@ namespace VajraSpecCpp
               {
                   Vajra::request::ParsedHeader{"Host", "example.test"},
                   Vajra::request::ParsedHeader{"Content-Type", "application/json"},
+                  Vajra::request::ParsedHeader{"X_Foo", "kept"},
+                  Vajra::request::ParsedHeader{"Cookie", "a=1"},
+                  Vajra::request::ParsedHeader{"Cookie", "b=2"},
                   Vajra::request::ParsedHeader{"X-Trace-Id", "abc123"},
                   Vajra::request::ParsedHeader{"X-Trace-Id", "def456"},
               }},
@@ -110,6 +113,8 @@ namespace VajraSpecCpp
       expect_entry_value(env_entries, "REMOTE_PORT", "54321");
       expect_entry_value(env_entries, "rack.url_scheme", "http");
       expect_entry_value(env_entries, "HTTP_HOST", "example.test");
+      expect_entry_value(env_entries, "HTTP_X_FOO", "kept");
+      expect_entry_value(env_entries, "HTTP_COOKIE", "a=1; b=2");
       expect_entry_value(env_entries, "CONTENT_TYPE", "application/json");
       expect_entry_value(env_entries, "HTTP_X_TRACE_ID", "abc123,def456");
     }

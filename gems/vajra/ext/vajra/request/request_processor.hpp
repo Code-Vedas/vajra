@@ -10,7 +10,6 @@
 #include "request_executor.hpp"
 #include "request_head_parser.hpp"
 #include "request_head_reader.hpp"
-#include "rack_env.hpp"
 #include "response/response_writer.hpp"
 
 #include <cstddef>
@@ -40,7 +39,6 @@ namespace Vajra
       HeadReader request_head_reader_;
       RequestHeadParser request_head_parser_;
       Vajra::response::ResponseWriter response_writer_;
-      RackEnvBuilder rack_env_builder_;
       std::shared_ptr<const RequestExecutor> request_executor_;
     };
   }

@@ -48,4 +48,59 @@ RSpec.describe 'Vajra Rack environment integration', :e2e, :integration do # rub
     )
     expect(env_snapshot.fetch('REMOTE_PORT')).to match(/\A\d+\z/)
   end
+
+  it 'keeps the default success path when no Rack app is installed' do
+    script = <<~RUBY
+      require "vajra"
+      Vajra.start
+    RUBY
+
+    result = rack_app_request_result(
+      script:,
+      request:
+        "GET / HTTP/1.1\r\n" \
+        "Host: example.test\r\n" \
+        "X_Foo: kept\r\n" \
+        "Connection: close\r\n\r\n"
+    )
+
+    response = parse_http_response(result[:response])
+
+    expect(result[:exitstatus]).to eq(0)
+    expect(response[:status_line]).to eq('HTTP/1.1 200 OK')
+    expect(response[:body]).to eq('OK')
+  end
+
+  it 'preserves binary rack response bodies' do
+    script = <<~RUBY
+      require "vajra"
+
+      Vajra::Internal::RackExecution.install!(
+        lambda do |_rack_env|
+          [200, { "Content-Type" => "application/octet-stream" }, ["a\\0b".b]]
+        end
+      )
+
+      Vajra.start
+    RUBY
+
+    result = rack_app_request_result(
+      script:,
+      request:
+        "GET /binary HTTP/1.1\r\n" \
+        "Host: example.test\r\n" \
+        "Connection: close\r\n\r\n"
+    )
+
+    response = parse_http_response(result[:response])
+
+    expect(result[:exitstatus]).to eq(0)
+    expect(response[:status_line]).to eq('HTTP/1.1 200 OK')
+    expect(response[:headers]).to include(
+      'content-type' => 'application/octet-stream',
+      'content-length' => '3',
+      'connection' => 'close'
+    )
+    expect(response[:body].bytes).to eq([97, 0, 98])
+  end
 end

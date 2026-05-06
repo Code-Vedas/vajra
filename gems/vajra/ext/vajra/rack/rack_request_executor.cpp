@@ -9,7 +9,7 @@
 #include "ruby.h"
 #include "ruby/thread.h"
 
-#include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -21,16 +21,43 @@ namespace
   ID id_call;
   ID id_message;
   ID id_backtrace;
+  ID id_to_a;
 
   struct ExecutionCallContext
   {
     const std::vector<Vajra::request::RackEnvEntry> *env_entries;
-    VALUE result = Qnil;
-    VALUE exception = Qnil;
+    std::optional<Vajra::response::Response> response;
+    std::string error_message;
   };
+
+  struct InstalledCheckContext
+  {
+    bool installed = false;
+  };
+
+  std::string ruby_string_value(VALUE value)
+  {
+    VALUE string_value = rb_obj_as_string(value);
+    return std::string(RSTRING_PTR(string_value), static_cast<std::size_t>(RSTRING_LEN(string_value)));
+  }
+
+  void ensure_ruby_ids()
+  {
+    if (id_installed != 0)
+    {
+      return;
+    }
+
+    id_installed = rb_intern("installed?");
+    id_call = rb_intern("call");
+    id_message = rb_intern("message");
+    id_backtrace = rb_intern("backtrace");
+    id_to_a = rb_intern("to_a");
+  }
 
   VALUE rack_execution_module()
   {
+    ensure_ruby_ids();
     const VALUE vajra_module = rb_const_get(rb_cObject, rb_intern("Vajra"));
     const VALUE internal_module = rb_const_get(vajra_module, rb_intern("Internal"));
     return rb_const_get(internal_module, rb_intern("RackExecution"));
@@ -62,25 +89,17 @@ namespace
     return rb_funcall(execution_module, id_call, 1, ruby_env_entries_from(*context->env_entries));
   }
 
-  void *execute_rack_request_with_gvl(void *data)
+  void *installed_with_gvl(void *data)
   {
-    auto *context = static_cast<ExecutionCallContext *>(data);
-
-    int state = 0;
-    context->result = rb_protect(protected_execute_rack_request, reinterpret_cast<VALUE>(context), &state);
-    if (state != 0)
-    {
-      context->exception = rb_errinfo();
-      rb_set_errinfo(Qnil);
-    }
-
+    auto *context = static_cast<InstalledCheckContext *>(data);
+    context->installed = RTEST(rb_funcall(rack_execution_module(), id_installed, 0));
     return nullptr;
   }
 
   std::string exception_message(VALUE exception)
   {
     VALUE message = rb_funcall(exception, id_message, 0);
-    std::string rendered = StringValueCStr(message);
+    std::string rendered = ruby_string_value(message);
     VALUE backtrace = rb_funcall(exception, id_backtrace, 0);
     if (NIL_P(backtrace) || RARRAY_LEN(backtrace) == 0)
     {
@@ -88,7 +107,7 @@ namespace
     }
 
     VALUE first_frame = rb_ary_entry(backtrace, 0);
-    return rendered + " (" + StringValueCStr(first_frame) + ")";
+    return rendered + " (" + ruby_string_value(first_frame) + ")";
   }
 
   Vajra::response::Header response_header_from_ruby(VALUE pair)
@@ -100,7 +119,7 @@ namespace
 
     VALUE name = rb_ary_entry(pair, 0);
     VALUE value = rb_ary_entry(pair, 1);
-    return Vajra::response::Header{StringValueCStr(name), StringValueCStr(value)};
+    return Vajra::response::Header{ruby_string_value(name), ruby_string_value(value)};
   }
 
   std::string reason_phrase_for_status(int status_code)
@@ -140,7 +159,7 @@ namespace
     }
 
     VALUE status = rb_ary_entry(value, 0);
-    VALUE headers = rb_ary_entry(value, 1);
+    VALUE headers = rb_funcall(rb_ary_entry(value, 1), id_to_a, 0);
     VALUE body = rb_ary_entry(value, 2);
 
     if (TYPE(headers) != T_ARRAY)
@@ -160,37 +179,58 @@ namespace
     return Vajra::response::Response{
         Vajra::response::Status{status_code, reason_phrase_for_status(status_code)},
         std::move(response_headers),
-        StringValueCStr(body),
+        ruby_string_value(body),
         Vajra::response::ConnectionBehavior::close};
+  }
+
+  void *execute_rack_request_with_gvl(void *data)
+  {
+    auto *context = static_cast<ExecutionCallContext *>(data);
+
+    try
+    {
+      int state = 0;
+      VALUE result = rb_protect(protected_execute_rack_request, reinterpret_cast<VALUE>(context), &state);
+      if (state != 0)
+      {
+        context->error_message = exception_message(rb_errinfo());
+        rb_set_errinfo(Qnil);
+        return nullptr;
+      }
+
+      if (!NIL_P(result))
+      {
+        context->response = response_from_ruby(result);
+      }
+    }
+    catch (const std::exception &error)
+    {
+      context->error_message = error.what();
+    }
+
+    return nullptr;
   }
 }
 
 std::optional<Vajra::response::Response> Vajra::rack::RackRequestExecutor::execute(
     const request::RequestContext &request_context) const
 {
-  if (id_installed == 0)
-  {
-    id_installed = rb_intern("installed?");
-    id_call = rb_intern("call");
-    id_message = rb_intern("message");
-    id_backtrace = rb_intern("backtrace");
-  }
-
-  request::RackEnvBuilder builder;
-  const std::vector<request::RackEnvEntry> env_entries = builder.build(request_context);
-
-  ExecutionCallContext context{&env_entries, Qnil, Qnil};
-  rb_thread_call_with_gvl(execute_rack_request_with_gvl, &context);
-
-  if (!NIL_P(context.exception))
-  {
-    throw std::runtime_error("Rack request execution failed: " + exception_message(context.exception));
-  }
-
-  if (NIL_P(context.result))
+  InstalledCheckContext installed_check_context{};
+  rb_thread_call_with_gvl(installed_with_gvl, &installed_check_context);
+  if (!installed_check_context.installed)
   {
     return std::nullopt;
   }
 
-  return response_from_ruby(context.result);
+  request::RackEnvBuilder builder;
+  const std::vector<request::RackEnvEntry> env_entries = builder.build(request_context);
+  ExecutionCallContext context{&env_entries, std::nullopt, ""};
+  rb_thread_call_with_gvl(execute_rack_request_with_gvl, &context);
+
+  if (!context.error_message.empty())
+  {
+    throw std::runtime_error("Rack request execution failed: " + context.error_message);
+  }
+
+  return context.response;
 }

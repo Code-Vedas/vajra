@@ -20,6 +20,11 @@ RSpec.describe Vajra::Internal::RackExecution do
 
   it 'builds the Rack env and normalizes the response body and headers' do
     captured_env = nil
+    headers = Class.new do
+      def each
+        yield :content_type, 'text/plain'
+      end
+    end.new
     closing_body = Class.new do
       def initialize(chunks)
         @chunks = chunks
@@ -40,7 +45,7 @@ RSpec.describe Vajra::Internal::RackExecution do
 
     described_class.install!(lambda { |env|
       captured_env = env
-      [200, { content_type: 'text/plain' }, closing_body]
+      [200, headers, closing_body]
     })
 
     status, headers, body = described_class.call(
@@ -83,5 +88,13 @@ RSpec.describe Vajra::Internal::RackExecution do
     expect(status).to eq(204)
     expect(headers).to eq([])
     expect(body).to eq('')
+  end
+
+  it 'preserves binary body bytes' do
+    described_class.install!(->(_env) { [200, {}, ["a\0b".b]] })
+
+    _status, _headers, body = described_class.call([%w[REQUEST_METHOD GET]])
+
+    expect(body.bytes).to eq([97, 0, 98])
   end
 end

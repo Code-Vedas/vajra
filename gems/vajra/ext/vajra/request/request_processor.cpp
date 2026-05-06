@@ -139,7 +139,6 @@ Vajra::request::RequestProcessor::RequestProcessor(
     : request_head_reader_(max_request_head_bytes),
       request_head_parser_(),
       response_writer_(),
-      rack_env_builder_(),
       request_executor_(std::move(request_executor))
 {
 }
@@ -175,7 +174,6 @@ void Vajra::request::RequestProcessor::handle(int client_fd, const SocketContext
       request_context = RequestContext{
           request_head_parser_.parse(read_result.request_head),
           socket_context};
-      (void)rack_env_builder_.build(request_context);
     }
     catch (const HeadError &error)
     {

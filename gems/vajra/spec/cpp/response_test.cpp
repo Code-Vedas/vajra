@@ -19,6 +19,15 @@ namespace VajraSpecCpp
 {
   namespace
   {
+    class RaisingRequestExecutor final : public Vajra::request::RequestExecutor
+    {
+    public:
+      std::optional<Vajra::response::Response> execute(const Vajra::request::RequestContext &) const override
+      {
+        throw std::runtime_error("boom");
+      }
+    };
+
     std::thread start_request_processor_thread(
         const Vajra::request::RequestProcessor &processor,
         FileDescriptorGuard &server_socket)
@@ -685,6 +694,61 @@ namespace VajraSpecCpp
         throw;
       }
     }
+
+    void test_request_processor_returns_internal_server_error_when_executor_raises()
+    {
+      int sockets[2];
+      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
+      {
+        fail("socketpair failed while setting up executor failure test");
+      }
+
+      FileDescriptorGuard client_socket(sockets[0]);
+      FileDescriptorGuard server_socket(sockets[1]);
+      suppress_sigpipe(client_socket.get());
+
+      const auto request_executor = std::make_shared<RaisingRequestExecutor>();
+      const Vajra::request::RequestProcessor processor(
+          Vajra::request::kDefaultMaxRequestHeadBytes,
+          request_executor);
+      std::thread processor_thread = start_request_processor_thread(processor, server_socket);
+
+      try
+      {
+        if (!send_all(
+                client_socket.get(),
+                "GET /boom HTTP/1.1\r\n"
+                "Host: example.test\r\n"
+                "Connection: close\r\n"
+                "\r\n"))
+        {
+          fail("failed to send request for executor failure test");
+        }
+
+        const std::string response = read_http_response(client_socket.get());
+        if (response.find("HTTP/1.1 500 Internal Server Error\r\n") != 0)
+        {
+          fail("executor failure did not return a 500 response");
+        }
+
+        if (response.find("Connection: close\r\n") == std::string::npos)
+        {
+          fail("executor failure did not force connection close");
+        }
+
+        client_socket.close_if_open();
+        processor_thread.join();
+      }
+      catch (...)
+      {
+        client_socket.close_if_open();
+        if (processor_thread.joinable())
+        {
+          processor_thread.join();
+        }
+        throw;
+      }
+    }
   }
 
   void run_response_tests()
@@ -707,5 +771,6 @@ namespace VajraSpecCpp
     test_request_processor_handles_pipelined_read_ahead_without_losing_the_next_request();
     test_request_processor_closes_after_parse_error_response();
     test_request_processor_closes_after_request_body_framing();
+    test_request_processor_returns_internal_server_error_when_executor_raises();
   }
 }

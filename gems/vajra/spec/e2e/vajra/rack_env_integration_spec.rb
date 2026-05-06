@@ -103,4 +103,34 @@ RSpec.describe 'Vajra Rack environment integration', :e2e, :integration do # rub
     )
     expect(response[:body].bytes).to eq([97, 0, 98])
   end
+
+  it 'rejects non-zero content length until rack body transport exists' do
+    script = <<~RUBY
+      require "vajra"
+
+      Vajra::Internal::RackExecution.install!(
+        lambda do |_rack_env|
+          [200, { "Content-Type" => "text/plain" }, ["unexpected"]]
+        end
+      )
+
+      Vajra.start
+    RUBY
+
+    result = rack_app_request_result(
+      script:,
+      request:
+        "POST /projects HTTP/1.1\r\n" \
+        "Host: example.test\r\n" \
+        "Content-Length: 3\r\n" \
+        "Connection: close\r\n\r\n" \
+        'abc'
+    )
+
+    response = parse_http_response(result[:response])
+
+    expect(result[:exitstatus]).to eq(0)
+    expect(response[:status_line]).to eq('HTTP/1.1 400 Bad Request')
+    expect(response[:headers]).to include('connection' => 'close')
+  end
 end

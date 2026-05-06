@@ -6,6 +6,7 @@
 #include "request_processor.hpp"
 
 #include "request_context.hpp"
+#include "response/response_serializer.hpp"
 
 #include <iostream>
 #include <string>
@@ -188,6 +189,11 @@ void Vajra::request::RequestProcessor::handle(int client_fd, const SocketContext
     {
       response = response_for(request_context, connection_behavior);
     }
+    catch (const HeadError &error)
+    {
+      reject_request_head(client_fd, error);
+      return;
+    }
     catch (const std::exception &error)
     {
       reject_request_execution(client_fd, error);
@@ -221,6 +227,8 @@ Vajra::response::Response Vajra::request::RequestProcessor::response_for(
     return response_writer_.success_response(connection_behavior);
   }
 
+  Vajra::response::ResponseSerializer serializer;
+  (void)serializer.serialize(*response);
   response->connection_behavior = connection_behavior;
   return *response;
 }

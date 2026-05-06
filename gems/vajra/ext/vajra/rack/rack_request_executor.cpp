@@ -6,6 +6,7 @@
 #include "rack_request_executor.hpp"
 
 #include "request/rack_env.hpp"
+#include "request/request_head_error.hpp"
 #include "ruby.h"
 #include "ruby/thread.h"
 
@@ -210,6 +211,94 @@ namespace
 
     return nullptr;
   }
+
+  bool ascii_case_equal(char left, char right)
+  {
+    if (left >= 'A' && left <= 'Z')
+    {
+      left = static_cast<char>(left - 'A' + 'a');
+    }
+
+    if (right >= 'A' && right <= 'Z')
+    {
+      right = static_cast<char>(right - 'A' + 'a');
+    }
+
+    return left == right;
+  }
+
+  bool ascii_case_insensitive_equal(const std::string &left, const std::string &right)
+  {
+    if (left.size() != right.size())
+    {
+      return false;
+    }
+
+    for (std::size_t index = 0; index < left.size(); ++index)
+    {
+      if (!ascii_case_equal(left[index], right[index]))
+      {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  std::string strip_http_whitespace(const std::string &value)
+  {
+    const std::size_t start = value.find_first_not_of(" \t");
+    if (start == std::string::npos)
+    {
+      return "";
+    }
+
+    const std::size_t end = value.find_last_not_of(" \t");
+    return value.substr(start, end - start + 1);
+  }
+
+  bool content_length_is_zero(const std::string &value)
+  {
+    const std::string normalized = strip_http_whitespace(value);
+    if (normalized.empty())
+    {
+      return false;
+    }
+
+    for (const char character : normalized)
+    {
+      if (character < '0' || character > '9')
+      {
+        return false;
+      }
+
+      if (character != '0')
+      {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  void ensure_bodyless_rack_request(const Vajra::request::RequestContext &request_context)
+  {
+    for (const Vajra::request::ParsedHeader &header : request_context.request.headers)
+    {
+      if (!ascii_case_insensitive_equal(header.name, "Content-Length"))
+      {
+        continue;
+      }
+
+      if (content_length_is_zero(header.value))
+      {
+        continue;
+      }
+
+      throw Vajra::request::bad_request_error(
+          "Rack request execution does not support request bodies until body transport is implemented");
+    }
+  }
 }
 
 std::optional<Vajra::response::Response> Vajra::rack::RackRequestExecutor::execute(
@@ -222,6 +311,7 @@ std::optional<Vajra::response::Response> Vajra::rack::RackRequestExecutor::execu
     return std::nullopt;
   }
 
+  ensure_bodyless_rack_request(request_context);
   request::RackEnvBuilder builder;
   const std::vector<request::RackEnvEntry> env_entries = builder.build(request_context);
   ExecutionCallContext context{&env_entries, std::nullopt, ""};

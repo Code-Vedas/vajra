@@ -33,7 +33,6 @@ namespace
       case '-':
       case '.':
       case '^':
-      case '_':
       case '`':
       case '|':
       case '~':
@@ -41,6 +40,11 @@ namespace
       default:
         return false;
     }
+  }
+
+  bool valid_header_value_character(unsigned char character)
+  {
+    return character == '\t' || (character >= 0x20 && character != 0x7F);
   }
 
   std::string normalize_header_env_key(const std::string &header_name)
@@ -68,6 +72,12 @@ namespace
         continue;
       }
 
+      if (character == '_')
+      {
+        throw Vajra::request::bad_request_error(
+            "request header names must not contain underscores for Rack environment translation");
+      }
+
       normalized.push_back(static_cast<char>(character));
     }
 
@@ -82,6 +92,17 @@ namespace
     }
 
     return "HTTP_" + normalized;
+  }
+
+  void validate_header_value(const std::string &value)
+  {
+    for (const unsigned char character : value)
+    {
+      if (!valid_header_value_character(character))
+      {
+        throw Vajra::request::bad_request_error("invalid request header value for Rack environment");
+      }
+    }
   }
 
   void insert_or_append_header(
@@ -122,6 +143,7 @@ std::vector<Vajra::request::RackEnvEntry> Vajra::request::RackEnvBuilder::build(
 
   for (const ParsedHeader &header : request_context.request.headers)
   {
+    validate_header_value(header.value);
     insert_or_append_header(entries, normalize_header_env_key(header.name), header.value);
   }
 

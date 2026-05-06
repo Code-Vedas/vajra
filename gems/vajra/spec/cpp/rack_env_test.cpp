@@ -92,7 +92,7 @@ namespace VajraSpecCpp
               {
                   Vajra::request::ParsedHeader{"Host", "example.test"},
                   Vajra::request::ParsedHeader{"Content-Type", "application/json"},
-                  Vajra::request::ParsedHeader{"X_Foo", "kept"},
+                  Vajra::request::ParsedHeader{"X-Foo", "kept"},
                   Vajra::request::ParsedHeader{"Cookie", "a=1"},
                   Vajra::request::ParsedHeader{"Cookie", "b=2"},
                   Vajra::request::ParsedHeader{"X-Trace-Id", "abc123"},
@@ -144,6 +144,58 @@ namespace VajraSpecCpp
 
       fail("unsupported Rack header name characters were accepted");
     }
+
+    void test_build_rejects_header_names_with_underscores()
+    {
+      Vajra::request::RackEnvBuilder builder;
+      const Vajra::request::RequestContext request_context{
+          Vajra::request::ParsedRequest{
+              Vajra::request::ParsedRequestLine{"GET", "/", "HTTP/1.1"},
+              {Vajra::request::ParsedHeader{"X_Foo", "ambiguous"}}},
+          Vajra::request::SocketContext{"127.0.0.1", 10'000, "127.0.0.1", 3000, "http"}};
+
+      try
+      {
+        (void)builder.build(request_context);
+      }
+      catch (const Vajra::request::HeadError &error)
+      {
+        if (error.kind() != Vajra::request::HeadFailureKind::bad_request)
+        {
+          fail("header name underscore rejection used the wrong failure kind");
+        }
+
+        return;
+      }
+
+      fail("ambiguous Rack header names with underscores were accepted");
+    }
+
+    void test_build_rejects_unsafe_header_value_bytes()
+    {
+      Vajra::request::RackEnvBuilder builder;
+      const Vajra::request::RequestContext request_context{
+          Vajra::request::ParsedRequest{
+              Vajra::request::ParsedRequestLine{"GET", "/", "HTTP/1.1"},
+              {Vajra::request::ParsedHeader{"X-Trace-Id", std::string("bad\0value", 9)}}},
+          Vajra::request::SocketContext{"127.0.0.1", 10'000, "127.0.0.1", 3000, "http"}};
+
+      try
+      {
+        (void)builder.build(request_context);
+      }
+      catch (const Vajra::request::HeadError &error)
+      {
+        if (error.kind() != Vajra::request::HeadFailureKind::bad_request)
+        {
+          fail("unsafe Rack header value used the wrong failure kind");
+        }
+
+        return;
+      }
+
+      fail("unsafe Rack header value bytes were accepted");
+    }
   }
 
   void run_rack_env_tests()
@@ -152,5 +204,7 @@ namespace VajraSpecCpp
     test_split_target_rejects_non_absolute_targets();
     test_build_maps_method_path_query_headers_and_socket_context();
     test_build_rejects_unsupported_header_name_characters();
+    test_build_rejects_header_names_with_underscores();
+    test_build_rejects_unsafe_header_value_bytes();
   }
 }

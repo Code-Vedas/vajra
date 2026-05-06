@@ -67,11 +67,13 @@ RSpec.describe Vajra::Internal::RackExecution do
       'SCRIPT_NAME' => '',
       'PATH_INFO' => '/projects',
       'QUERY_STRING' => 'filter=active',
+      'rack.version' => [1, 6],
       'rack.url_scheme' => 'http',
       'rack.multithread' => false,
       'rack.multiprocess' => false,
       'rack.run_once' => false
     )
+    expect(captured_env.fetch('rack.input').external_encoding).to eq(Encoding::BINARY)
     expect(captured_env.fetch('rack.input').read).to eq('')
     expect(captured_env.fetch('rack.errors')).to equal($stderr)
   end
@@ -91,10 +93,27 @@ RSpec.describe Vajra::Internal::RackExecution do
   end
 
   it 'preserves binary body bytes' do
-    described_class.install!(->(_env) { [200, {}, ["a\0b".b]] })
+    described_class.install!(->(_env) { [200, {}, ["\xFF\0\x80".b]] })
 
     _status, _headers, body = described_class.call([%w[REQUEST_METHOD GET]])
 
-    expect(body.bytes).to eq([97, 0, 98])
+    expect(body.encoding).to eq(Encoding::BINARY)
+    expect(body.bytes).to eq([255, 0, 128])
+  end
+
+  it 'does not swallow close errors from the response body' do
+    closing_body = Class.new do
+      def each
+        yield 'OK'
+      end
+
+      def close
+        nil.missing_method
+      end
+    end.new
+
+    described_class.install!(->(_env) { [200, {}, closing_body] })
+
+    expect { described_class.call([%w[REQUEST_METHOD GET]]) }.to raise_error(NoMethodError)
   end
 end

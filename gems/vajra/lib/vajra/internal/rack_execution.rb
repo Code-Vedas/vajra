@@ -13,6 +13,8 @@ module Vajra
     module RackExecution
       module_function
 
+      RACK_VERSION = [1, 6].freeze
+
       # Stores the currently installed Rack-compatible app.
       AppState = Struct.new(:app)
       APP_MUTEX = Mutex.new
@@ -51,8 +53,9 @@ module Vajra
 
         env['SCRIPT_NAME'] ||= ''
         env['QUERY_STRING'] ||= ''
+        env['rack.version'] = RACK_VERSION
         env['rack.url_scheme'] ||= 'http'
-        env['rack.input'] = StringIO.new('')
+        env['rack.input'] = StringIO.new(''.b)
         env['rack.errors'] = $stderr
         env['rack.multithread'] = false
         env['rack.multiprocess'] = false
@@ -81,19 +84,22 @@ module Vajra
       private_class_method :current_app
 
       def collect_body(body)
-        collected_body = +''
+        collected_body = String.new(encoding: Encoding::BINARY)
         body.each do |chunk|
-          collected_body << String(chunk)
+          collected_body << String(chunk).b
         end
         collected_body
       ensure
-        begin
-          body.close
-        rescue NoMethodError
-          nil
-        end
+        close_body(body)
       end
       private_class_method :collect_body
+
+      def close_body(body)
+        body.close
+      rescue NoMethodError => e
+        raise unless e.name == :close && e.receiver.equal?(body)
+      end
+      private_class_method :close_body
     end
   end
 end

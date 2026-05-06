@@ -104,6 +104,45 @@ RSpec.describe 'Vajra Rack environment integration', :e2e, :integration do # rub
     expect(response[:body].bytes).to eq([97, 0, 98])
   end
 
+  it 'preserves binary request header values in the Rack env' do
+    script = <<~RUBY
+      require "json"
+      require "vajra"
+
+      Vajra::Internal::RackExecution.install!(
+        lambda do |rack_env|
+          value = rack_env.fetch("HTTP_X_OBS_TEXT")
+          [200, { "Content-Type" => "application/json" }, [JSON.generate({
+            "encoding" => value.encoding.name,
+            "bytes" => value.bytes
+          })]]
+        end
+      )
+
+      Vajra.start
+    RUBY
+
+    request = [
+      "GET /binary-header HTTP/1.1\r\n",
+      "Host: example.test\r\n",
+      'X-Obs-Text: '.b,
+      [0x80, 0xFF].pack('C*'),
+      "\r\n",
+      "Connection: close\r\n\r\n"
+    ].join
+
+    result = rack_app_request_result(script:, request:)
+    response = parse_http_response(result[:response])
+    snapshot = JSON.parse(response[:body])
+
+    expect(result[:exitstatus]).to eq(0)
+    expect(response[:status_line]).to eq('HTTP/1.1 200 OK')
+    expect(snapshot).to eq(
+      'encoding' => 'ASCII-8BIT',
+      'bytes' => [128, 255]
+    )
+  end
+
   it 'rejects non-zero content length until rack body transport exists' do
     script = <<~RUBY
       require "vajra"

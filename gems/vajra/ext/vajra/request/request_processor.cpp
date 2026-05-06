@@ -5,6 +5,7 @@
 
 #include "request_processor.hpp"
 
+#include "http_field_utils.hpp"
 #include "request_context.hpp"
 #include "response/response_serializer.hpp"
 
@@ -16,54 +17,9 @@
 
 namespace
 {
-  bool ascii_case_equal(char left, char right)
-  {
-    if (left >= 'A' && left <= 'Z')
-    {
-      left = static_cast<char>(left - 'A' + 'a');
-    }
-
-    if (right >= 'A' && right <= 'Z')
-    {
-      right = static_cast<char>(right - 'A' + 'a');
-    }
-
-    return left == right;
-  }
-
-  bool ascii_case_insensitive_equal(const std::string &left, const std::string &right)
-  {
-    if (left.size() != right.size())
-    {
-      return false;
-    }
-
-    for (std::size_t index = 0; index < left.size(); ++index)
-    {
-      if (!ascii_case_equal(left[index], right[index]))
-      {
-        return false;
-      }
-    }
-
-    return true;
-  }
-
-  std::string strip_http_whitespace(const std::string &value)
-  {
-    const std::size_t start = value.find_first_not_of(" \t");
-    if (start == std::string::npos)
-    {
-      return "";
-    }
-
-    const std::size_t end = value.find_last_not_of(" \t");
-    return value.substr(start, end - start + 1);
-  }
-
   bool header_named(const Vajra::request::ParsedHeader &header, const std::string &expected_name)
   {
-    return ascii_case_insensitive_equal(header.name, expected_name);
+    return Vajra::request::ascii_case_insensitive_equal(header.name, expected_name);
   }
 
   bool header_value_contains_token(const std::string &value, const std::string &expected_token)
@@ -72,8 +28,8 @@ namespace
     while (cursor <= value.size())
     {
       const std::size_t delimiter = value.find(',', cursor);
-      const std::string token = strip_http_whitespace(value.substr(cursor, delimiter - cursor));
-      if (!token.empty() && ascii_case_insensitive_equal(token, expected_token))
+      const std::string token = Vajra::request::strip_http_whitespace(value.substr(cursor, delimiter - cursor));
+      if (!token.empty() && Vajra::request::ascii_case_insensitive_equal(token, expected_token))
       {
         return true;
       }
@@ -88,31 +44,6 @@ namespace
 
     return false;
   }
-
-  bool content_length_is_zero(const std::string &value)
-  {
-    const std::string normalized = strip_http_whitespace(value);
-    if (normalized.empty())
-    {
-      return false;
-    }
-
-    for (const char character : normalized)
-    {
-      if (character < '0' || character > '9')
-      {
-        return false;
-      }
-
-      if (character != '0')
-      {
-        return false;
-      }
-    }
-
-    return true;
-  }
-
   std::string lowercase_header_name(const std::string &name)
   {
     std::string normalized;
@@ -311,7 +242,7 @@ Vajra::response::ConnectionBehavior Vajra::request::RequestProcessor::connection
 
     if (header_named(header, "Content-Length"))
     {
-      if (saw_content_length || !content_length_is_zero(header.value))
+      if (saw_content_length || !Vajra::request::content_length_is_zero(header.value))
       {
         return Vajra::response::ConnectionBehavior::close;
       }

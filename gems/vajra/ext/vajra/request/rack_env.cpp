@@ -12,6 +12,8 @@
 
 namespace
 {
+  constexpr std::size_t kFixedRackEnvEntryCount = 10;
+
   bool valid_header_name_character(unsigned char character)
   {
     if ((character >= '0' && character <= '9') || (character >= 'A' && character <= 'Z') ||
@@ -129,7 +131,7 @@ std::vector<Vajra::request::RackEnvEntry> Vajra::request::RackEnvBuilder::build(
   const RackRequestTarget request_target = split_target(request_context.request.request_line.target);
 
   std::vector<RackEnvEntry> entries;
-  entries.reserve(request_context.request.headers.size() + 8);
+  entries.reserve(request_context.request.headers.size() + kFixedRackEnvEntryCount);
   entries.push_back(RackEnvEntry{"REQUEST_METHOD", request_context.request.request_line.method});
   entries.push_back(RackEnvEntry{"SCRIPT_NAME", ""});
   entries.push_back(RackEnvEntry{"PATH_INFO", request_target.path_info});

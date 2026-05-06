@@ -5,9 +5,11 @@
 
 #include "rack_request_executor.hpp"
 
+#include "request/http_field_utils.hpp"
 #include "request/rack_env.hpp"
 #include "request/request_head_error.hpp"
 #include "ruby.h"
+#include "ruby/encoding.h"
 #include "ruby/thread.h"
 
 #include <optional>
@@ -80,8 +82,12 @@ namespace
     for (const Vajra::request::RackEnvEntry &entry : env_entries)
     {
       VALUE pair = rb_ary_new_capa(2);
-      rb_ary_push(pair, rb_utf8_str_new(entry.key.data(), static_cast<long>(entry.key.size())));
-      rb_ary_push(pair, rb_utf8_str_new(entry.value.data(), static_cast<long>(entry.value.size())));
+      VALUE key = rb_str_new(entry.key.data(), static_cast<long>(entry.key.size()));
+      VALUE value = rb_str_new(entry.value.data(), static_cast<long>(entry.value.size()));
+      rb_enc_associate_index(key, rb_ascii8bit_encindex());
+      rb_enc_associate_index(value, rb_ascii8bit_encindex());
+      rb_ary_push(pair, key);
+      rb_ary_push(pair, value);
       rb_ary_push(ruby_entries, pair);
     }
 
@@ -257,86 +263,16 @@ namespace
 
     return nullptr;
   }
-
-  bool ascii_case_equal(char left, char right)
-  {
-    if (left >= 'A' && left <= 'Z')
-    {
-      left = static_cast<char>(left - 'A' + 'a');
-    }
-
-    if (right >= 'A' && right <= 'Z')
-    {
-      right = static_cast<char>(right - 'A' + 'a');
-    }
-
-    return left == right;
-  }
-
-  bool ascii_case_insensitive_equal(const std::string &left, const std::string &right)
-  {
-    if (left.size() != right.size())
-    {
-      return false;
-    }
-
-    for (std::size_t index = 0; index < left.size(); ++index)
-    {
-      if (!ascii_case_equal(left[index], right[index]))
-      {
-        return false;
-      }
-    }
-
-    return true;
-  }
-
-  std::string strip_http_whitespace(const std::string &value)
-  {
-    const std::size_t start = value.find_first_not_of(" \t");
-    if (start == std::string::npos)
-    {
-      return "";
-    }
-
-    const std::size_t end = value.find_last_not_of(" \t");
-    return value.substr(start, end - start + 1);
-  }
-
-  bool content_length_is_zero(const std::string &value)
-  {
-    const std::string normalized = strip_http_whitespace(value);
-    if (normalized.empty())
-    {
-      return false;
-    }
-
-    for (const char character : normalized)
-    {
-      if (character < '0' || character > '9')
-      {
-        return false;
-      }
-
-      if (character != '0')
-      {
-        return false;
-      }
-    }
-
-    return true;
-  }
-
   void ensure_bodyless_rack_request(const Vajra::request::RequestContext &request_context)
   {
     for (const Vajra::request::ParsedHeader &header : request_context.request.headers)
     {
-      if (!ascii_case_insensitive_equal(header.name, "Content-Length"))
+      if (!Vajra::request::ascii_case_insensitive_equal(header.name, "Content-Length"))
       {
         continue;
       }
 
-      if (content_length_is_zero(header.value))
+      if (Vajra::request::content_length_is_zero(header.value))
       {
         continue;
       }

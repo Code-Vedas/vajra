@@ -139,4 +139,53 @@ module VajraE2EHttpHelpers
       cleanup_process(wait_thread, output)
     end
   end
+
+  def rack_env_request_result(request:, port: disposable_listener_port, env: {})
+    script = <<~RUBY
+      require "json"
+      require "vajra"
+
+      Vajra::Internal::RackExecution.install!(
+        lambda do |rack_env|
+          captured_env = %w[
+            REQUEST_METHOD
+            SCRIPT_NAME
+            PATH_INFO
+            QUERY_STRING
+            SERVER_PROTOCOL
+            SERVER_NAME
+            SERVER_PORT
+            REMOTE_ADDR
+            REMOTE_PORT
+            rack.url_scheme
+            HTTP_HOST
+            HTTP_X_TRACE_ID
+            CONTENT_TYPE
+            CONTENT_LENGTH
+          ].each_with_object({}) do |key, values|
+            values[key] = rack_env[key]
+          end
+
+          [200, { "Content-Type" => "application/json" }, [JSON.generate(captured_env)]]
+        end
+      )
+
+      Vajra.start
+    RUBY
+
+    Open3.popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      selected_port = wait_for_banner(output)
+
+      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+      socket.write(request)
+      response = read_raw_http_response(socket)
+      socket.close
+
+      status = stop_process(wait_thread)
+
+      { exitstatus: status.exitstatus, response:, output: output.read, port: selected_port }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
 end

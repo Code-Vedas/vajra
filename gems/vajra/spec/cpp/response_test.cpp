@@ -30,7 +30,9 @@ namespace VajraSpecCpp
       }
 
       server_socket.close_if_open();
-      return std::thread([&processor, owned_fd]() { processor.handle(owned_fd); });
+      return std::thread([&processor, owned_fd]() {
+        processor.handle(owned_fd, Vajra::request::SocketContext{"127.0.0.1", 12'345, "127.0.0.1", 3000, "http"});
+      });
     }
 
     void expect_serialization_error(

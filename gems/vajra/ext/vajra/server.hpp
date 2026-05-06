@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <functional>
 #include <atomic>
+#include <memory>
 
 #include "lifecycle/lifecycle_controller.hpp"
 #include "listener/listener_socket.hpp"
@@ -20,7 +21,10 @@ namespace Vajra
   class Server
   {
   public:
-    explicit Server(int port, std::size_t max_request_head_bytes = request::kDefaultMaxRequestHeadBytes);
+    explicit Server(
+        int port,
+        std::size_t max_request_head_bytes = request::kDefaultMaxRequestHeadBytes,
+        std::shared_ptr<const request::RequestExecutor> request_executor = nullptr);
     ~Server();
 
     void start();

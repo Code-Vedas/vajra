@@ -14,6 +14,7 @@ add_executable(vajra_server_test
   ipc_frame_header_test.cpp
   ipc_protocol_compatibility_test.cpp
   lifecycle_controller_test.cpp
+  rack_env_test.cpp
   server_lifecycle_test.cpp
   request_head_test.cpp
   response_test.cpp
@@ -24,6 +25,7 @@ add_executable(vajra_server_test
   ../../ext/vajra/listener/listener_socket.cpp
   ../../ext/vajra/request/request_head_reader.cpp
   ../../ext/vajra/request/request_processor.cpp
+  ../../ext/vajra/request/rack_env.cpp
   ../../ext/vajra/response/response_serializer.cpp
   ../../ext/vajra/response/response_writer.cpp
   ../../ext/vajra/server.cpp

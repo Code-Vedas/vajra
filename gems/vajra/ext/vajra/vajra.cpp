@@ -4,6 +4,7 @@
 // LICENSE file in the root directory of this source tree.
 
 #include "vajra.hpp"
+#include "rack/rack_request_executor.hpp"
 #include "ruby.h"
 #include "ruby/thread.h"
 
@@ -410,7 +411,10 @@ namespace VajraNative
         }
 
         shutting_down = 0;
-        server_instance = std::make_unique<Vajra::Server>(port, max_request_head_bytes);
+        server_instance = std::make_unique<Vajra::Server>(
+            port,
+            max_request_head_bytes,
+            std::make_shared<Vajra::rack::RackRequestExecutor>());
         server = server_instance.get();
       }
 

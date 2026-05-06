@@ -5,6 +5,9 @@
 
 #include "request_processor.hpp"
 
+#include "request_context.hpp"
+
+#include <iostream>
 #include <string>
 #include <unistd.h>
 #include <utility>
@@ -130,14 +133,18 @@ namespace
   };
 }
 
-Vajra::request::RequestProcessor::RequestProcessor(std::size_t max_request_head_bytes)
+Vajra::request::RequestProcessor::RequestProcessor(
+    std::size_t max_request_head_bytes,
+    std::shared_ptr<const RequestExecutor> request_executor)
     : request_head_reader_(max_request_head_bytes),
       request_head_parser_(),
-      response_writer_()
+      response_writer_(),
+      rack_env_builder_(),
+      request_executor_(std::move(request_executor))
 {
 }
 
-void Vajra::request::RequestProcessor::handle(int client_fd) const
+void Vajra::request::RequestProcessor::handle(int client_fd, const SocketContext &socket_context) const
 {
   ClientSocketGuard client_socket_guard(client_fd);
   std::string buffered_bytes;
@@ -162,10 +169,13 @@ void Vajra::request::RequestProcessor::handle(int client_fd) const
 
     buffered_bytes = std::move(read_result.trailing_bytes);
 
-    ParsedRequest request;
+    RequestContext request_context;
     try
     {
-      request = request_head_parser_.parse(read_result.request_head);
+      request_context = RequestContext{
+          request_head_parser_.parse(read_result.request_head),
+          socket_context};
+      (void)rack_env_builder_.build(request_context);
     }
     catch (const HeadError &error)
     {
@@ -173,8 +183,20 @@ void Vajra::request::RequestProcessor::handle(int client_fd) const
       return;
     }
 
-    const Vajra::response::ConnectionBehavior connection_behavior = connection_behavior_for(request);
-    if (!response_writer_.send(client_fd, response_writer_.success_response(connection_behavior)))
+    const Vajra::response::ConnectionBehavior connection_behavior = connection_behavior_for(request_context.request);
+
+    Vajra::response::Response response;
+    try
+    {
+      response = response_for(request_context, connection_behavior);
+    }
+    catch (const std::exception &error)
+    {
+      reject_request_execution(client_fd, error);
+      return;
+    }
+
+    if (!response_writer_.send(client_fd, response))
     {
       return;
     }
@@ -186,10 +208,35 @@ void Vajra::request::RequestProcessor::handle(int client_fd) const
   }
 }
 
+Vajra::response::Response Vajra::request::RequestProcessor::response_for(
+    const RequestContext &request_context,
+    Vajra::response::ConnectionBehavior connection_behavior) const
+{
+  if (!request_executor_)
+  {
+    return response_writer_.success_response(connection_behavior);
+  }
+
+  std::optional<Vajra::response::Response> response = request_executor_->execute(request_context);
+  if (!response)
+  {
+    return response_writer_.success_response(connection_behavior);
+  }
+
+  response->connection_behavior = connection_behavior;
+  return *response;
+}
+
 void Vajra::request::RequestProcessor::reject_request_head(int client_fd, const HeadError &error) const
 {
   response_writer_.log_request_head_error(error);
   (void)response_writer_.send(client_fd, response_writer_.request_head_failure_response(error.kind()));
+}
+
+void Vajra::request::RequestProcessor::reject_request_execution(int client_fd, const std::exception &error) const
+{
+  std::cerr << "request execution failed: " << error.what() << std::endl;
+  (void)response_writer_.send(client_fd, response_writer_.internal_server_error_response());
 }
 
 Vajra::response::ConnectionBehavior Vajra::request::RequestProcessor::connection_behavior_for(

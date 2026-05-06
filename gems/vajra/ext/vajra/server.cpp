@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <cstdint>
 #include <ctime>
 #include <iomanip>
 #include <iostream>
@@ -21,6 +22,36 @@
 
 namespace
 {
+  std::string socket_address(sockaddr_in address)
+  {
+    char buffer[INET_ADDRSTRLEN] = {0};
+    if (inet_ntop(AF_INET, &address.sin_addr, buffer, sizeof(buffer)) == nullptr)
+    {
+      return "";
+    }
+
+    return buffer;
+  }
+
+  Vajra::request::SocketContext socket_context_for(int client_fd, const sockaddr_in &client_addr, int fallback_port)
+  {
+    sockaddr_in local_addr{};
+    socklen_t local_addr_length = sizeof(local_addr);
+    if (getsockname(client_fd, reinterpret_cast<sockaddr *>(&local_addr), &local_addr_length) != 0)
+    {
+      local_addr.sin_family = AF_INET;
+      local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+      local_addr.sin_port = htons(static_cast<std::uint16_t>(fallback_port));
+    }
+
+    return Vajra::request::SocketContext{
+        socket_address(client_addr),
+        ntohs(client_addr.sin_port),
+        socket_address(local_addr),
+        ntohs(local_addr.sin_port),
+        "http"};
+  }
+
   const char *state_name(Vajra::lifecycle::State state)
   {
     switch (state)
@@ -125,11 +156,14 @@ namespace
   }
 }
 
-Vajra::Server::Server(int port, std::size_t max_request_head_bytes)
+Vajra::Server::Server(
+    int port,
+    std::size_t max_request_head_bytes,
+    std::shared_ptr<const request::RequestExecutor> request_executor)
     : port_(port),
       server_fd_(-1),
       listener_socket_(),
-      request_processor_(max_request_head_bytes),
+      request_processor_(max_request_head_bytes, std::move(request_executor)),
       lifecycle_()
 {
   set_lifecycle_observer([](lifecycle::HookPoint hook_point, const lifecycle::Snapshot &snapshot) {
@@ -257,7 +291,7 @@ void Vajra::Server::start()
       lifecycle_.mark_serving();
     }
 
-    request_processor_.handle(client_fd);
+    request_processor_.handle(client_fd, socket_context_for(client_fd, client_addr, port_));
   }
 
   close_listener_fd(false);

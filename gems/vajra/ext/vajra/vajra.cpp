@@ -426,17 +426,7 @@ namespace VajraNative
       }
 
       ServerStartContext context{server, nullptr};
-      const bool run_rack_execution_on_ruby_thread = Vajra::rack::rack_execution_callback_installed();
-      Vajra::rack::set_rack_execution_on_ruby_thread(run_rack_execution_on_ruby_thread);
-      if (run_rack_execution_on_ruby_thread)
-      {
-        run_server_without_gvl(&context);
-      }
-      else
-      {
-        rb_thread_call_without_gvl(run_server_without_gvl, &context, RUBY_UBF_IO, nullptr);
-      }
-      Vajra::rack::set_rack_execution_on_ruby_thread(false);
+      rb_thread_call_without_gvl(run_server_without_gvl, &context, RUBY_UBF_IO, nullptr);
       if (context.error)
       {
         std::rethrow_exception(context.error);
@@ -444,7 +434,6 @@ namespace VajraNative
     }
     catch (...)
     {
-      Vajra::rack::set_rack_execution_on_ruby_thread(false);
       std::lock_guard<std::mutex> lock(server_mutex);
       server_instance.reset();
       throw;

@@ -22,8 +22,8 @@
 namespace
 {
   std::atomic<bool> rack_execution_callback_installed_flag{false};
-  std::atomic<bool> rack_execution_on_ruby_thread{false};
   VALUE rack_execution_callback = Qnil;
+  ID id_message_ivar;
 
   struct ExecutionCallContext
   {
@@ -84,7 +84,14 @@ namespace
 
   std::string exception_message(VALUE exception)
   {
-    return std::string(rb_obj_classname(exception));
+    const std::string class_name = rb_obj_classname(exception);
+    const VALUE message = rb_ivar_get(exception, id_message_ivar);
+    if (RB_TYPE_P(message, T_STRING) == 0)
+    {
+      return class_name;
+    }
+
+    return class_name + ": " + ruby_string_value(message);
   }
 
   Vajra::response::Header response_header_from_ruby(VALUE pair)
@@ -232,22 +239,13 @@ namespace
 void Vajra::rack::initialize_rack_execution_bridge()
 {
   rb_global_variable(&rack_execution_callback);
+  id_message_ivar = rb_intern("mesg");
 }
 
 void Vajra::rack::set_rack_execution_callback(VALUE callback)
 {
   rack_execution_callback = callback;
   rack_execution_callback_installed_flag.store(!NIL_P(callback), std::memory_order_release);
-}
-
-bool Vajra::rack::rack_execution_callback_installed()
-{
-  return rack_execution_callback_installed_flag.load(std::memory_order_acquire);
-}
-
-void Vajra::rack::set_rack_execution_on_ruby_thread(bool enabled)
-{
-  rack_execution_on_ruby_thread.store(enabled, std::memory_order_release);
 }
 
 std::optional<Vajra::response::Response> Vajra::rack::RackRequestExecutor::execute(
@@ -262,14 +260,7 @@ std::optional<Vajra::response::Response> Vajra::rack::RackRequestExecutor::execu
   request::RackEnvBuilder builder;
   const std::vector<request::RackEnvEntry> env_entries = builder.build(request_context);
   ExecutionCallContext context{&env_entries, std::nullopt, ""};
-  if (rack_execution_on_ruby_thread.load(std::memory_order_acquire))
-  {
-    execute_rack_request_with_gvl(&context);
-  }
-  else
-  {
-    rb_thread_call_with_gvl(execute_rack_request_with_gvl, &context);
-  }
+  rb_thread_call_with_gvl(execute_rack_request_with_gvl, &context);
 
   if (!context.error_message.empty())
   {

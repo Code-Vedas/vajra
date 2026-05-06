@@ -15,8 +15,6 @@ namespace Vajra
   {
     void initialize_rack_execution_bridge();
     void set_rack_execution_callback(VALUE callback);
-    bool rack_execution_callback_installed();
-    void set_rack_execution_on_ruby_thread(bool enabled);
 
     class RackRequestExecutor final : public request::RequestExecutor
     {

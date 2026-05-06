@@ -23,6 +23,15 @@ RSpec.describe 'Vajra e2e HTTP helpers', :e2e, :integration do # rubocop:disable
     )
   end
 
+  it 'raises a diagnosable error for incomplete HTTP responses' do
+    raw_response = "HTTP/1.1 200 OK\r\nContent-Length: 2"
+
+    expect { helper_host.parse_http_response(raw_response) }.to raise_error(
+      ArgumentError,
+      /incomplete HTTP response/
+    )
+  end
+
   it 'parses Content-Length case-insensitively when reading a response' do
     socket = instance_double(TCPSocket)
 

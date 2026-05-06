@@ -8,7 +8,7 @@
 module VajraE2EHttpHelpers
   def parse_http_response(response)
     headers, body = response.split("\r\n\r\n", 2)
-    raise ArgumentError, "incomplete HTTP response: #{response.inspect}" if headers.nil?
+    raise ArgumentError, "incomplete HTTP response: #{response.inspect}" if body.nil?
 
     header_lines = headers.split("\r\n")
     status_line = header_lines.shift

@@ -8,10 +8,10 @@ module Vajra
     module RackExecution
       RACK_VERSION: Array[Integer]
 
-      def self.install!: (untyped app) -> untyped
+      def self.install!: (Proc) -> Proc
       def self.uninstall!: () -> nil
       def self.installed?: () -> bool
-      def self.call: (Array[[String, String]] env_entries) -> [Integer, Array[[String, String]], String]?
+      def self.call: (Array[[String, String]]) -> [Integer, Array[[String, String]], String]?
     end
   end
 end

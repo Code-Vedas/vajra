@@ -239,7 +239,7 @@ namespace
 void Vajra::rack::initialize_rack_execution_bridge()
 {
   rb_global_variable(&rack_execution_callback);
-  id_message_ivar = rb_intern("mesg");
+  id_message_ivar = rb_intern("@mesg");
 }
 
 void Vajra::rack::set_rack_execution_callback(VALUE callback)

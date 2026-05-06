@@ -64,11 +64,16 @@ module Vajra
       def normalize_headers(headers)
         normalized_headers = []
         headers.each do |name, value|
-          normalized_headers << [String(name), String(value)]
+          append_normalized_header(normalized_headers, name, value)
         end
         normalized_headers
       end
       private_class_method :normalize_headers
+
+      def append_normalized_header(normalized_headers, name, value)
+        normalized_headers << [String(name), String(value)]
+      end
+      private_class_method :append_normalized_header
 
       def current_app
         APP_MUTEX.synchronize { APP_STATE.app }

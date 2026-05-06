@@ -39,7 +39,7 @@ module Vajra
            \__/ /_/   \_\ \___/  |_| \_\ /_/   \_\
       TEXT
 
-      "#{art}\nv#{Vajra::VERSION}\n"
+      "#{art}\nv#{Vajra::VERSION}\n\n"
     end
   end
 end

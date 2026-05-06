@@ -43,8 +43,8 @@ clear and enforceable.
 ## Shutdown Model
 
 The native runtime installs signal handlers for `SIGINT` and `SIGTERM`. A stop
-request transitions the listener toward shutdown and releases the server
-instance from the process.
+request transitions the listener through an explicit draining state before the
+listener is released and the server instance leaves the process.
 
 ## Runtime Scope
 

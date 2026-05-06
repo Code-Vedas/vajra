@@ -13,11 +13,13 @@ add_executable(vajra_server_test
   ipc_frame_contract_test.cpp
   ipc_frame_header_test.cpp
   ipc_protocol_compatibility_test.cpp
+  lifecycle_controller_test.cpp
   server_lifecycle_test.cpp
   request_head_test.cpp
   response_test.cpp
   server_test.cpp
   ../../ext/vajra/ipc/protocol_contract.cpp
+  ../../ext/vajra/lifecycle/lifecycle_controller.cpp
   ../../ext/vajra/ipc/frame_header.cpp
   ../../ext/vajra/listener/listener_socket.cpp
   ../../ext/vajra/request/request_head_reader.cpp

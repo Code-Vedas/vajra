@@ -33,8 +33,8 @@ Gem::Specification.new do |spec|
   spec.metadata['rubygems_mfa_required'] = 'true'
   spec.bindir = 'exe'
   spec.executables = ['vajra']
-  spec.files = Dir.chdir(File.expand_path(__dir__)) do
-    Dir[
+  spec.files = Dir.glob(
+    [
       '{bin,exe,ext,lib,sig}/**/*',
       'LICENSE',
       'README.md',
@@ -43,8 +43,9 @@ Gem::Specification.new do |spec|
       '.reek.yml',
       '.rubocop.yml',
       '.ruby-version'
-    ]
-  end
+    ],
+    base: File.expand_path(__dir__)
+  )
   spec.require_paths = ['lib']
   spec.extensions = ['ext/vajra/extconf.rb']
 end

@@ -36,7 +36,7 @@ The intended runtime state model is explicit and readable:
 - failed
 
 Supervision preserves those explicit transitions rather than burying lifecycle
-state in incidental flags.
+state in incidental flags or incidental file-descriptor ownership.
 
 ## Supervision Direction
 
@@ -63,6 +63,7 @@ The repo shape answers these questions:
 - where listener state lives
 - where diagnostics are emitted
 - where shutdown ownership transitions from Ruby to native code
+- where later supervision can observe lifecycle state without inferring it from listener flags
 
 The runtime also preserves a hard split between:
 

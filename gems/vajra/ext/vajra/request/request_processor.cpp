@@ -7,6 +7,7 @@
 
 #include "http_field_utils.hpp"
 #include "request_context.hpp"
+#include "response/http_header_utils.hpp"
 #include "response/response_serializer.hpp"
 
 #include <chrono>
@@ -65,48 +66,6 @@ namespace
 
     return false;
   }
-  std::string lowercase_header_name(const std::string &name)
-  {
-    std::string normalized;
-    normalized.reserve(name.size());
-
-    for (const unsigned char character : name)
-    {
-      if (character >= 'A' && character <= 'Z')
-      {
-        normalized.push_back(static_cast<char>(character - 'A' + 'a'));
-      }
-      else
-      {
-        normalized.push_back(static_cast<char>(character));
-      }
-    }
-
-    return normalized;
-  }
-
-  bool framing_header_name(const std::string &name)
-  {
-    const std::string normalized = lowercase_header_name(name);
-    return normalized == "content-length" || normalized == "connection" || normalized == "transfer-encoding";
-  }
-
-  std::vector<Vajra::response::Header> strip_framing_headers(const std::vector<Vajra::response::Header> &headers)
-  {
-    std::vector<Vajra::response::Header> filtered_headers;
-    filtered_headers.reserve(headers.size());
-
-    for (const Vajra::response::Header &header : headers)
-    {
-      if (!framing_header_name(header.name))
-      {
-        filtered_headers.push_back(header);
-      }
-    }
-
-    return filtered_headers;
-  }
-
   class ClientSocketGuard
   {
   public:
@@ -222,7 +181,7 @@ Vajra::response::Response Vajra::request::RequestProcessor::response_for(
     return response_writer_.success_response(connection_behavior);
   }
 
-  response->headers = strip_framing_headers(response->headers);
+  response->headers = Vajra::response::strip_framing_headers(response->headers);
   response->connection_behavior = connection_behavior;
   Vajra::response::ResponseSerializer serializer;
   serializer.validate(*response);

@@ -74,7 +74,7 @@ RSpec.describe Vajra::Internal::RackExecution do
     )
 
     expect(status).to eq(200)
-    expect(headers).to eq([['content_type', 'text/plain']])
+    expect(headers).to eq([['content-type', 'text/plain']])
     expect(body).to eq('OK')
     expect(closing_body.closed?).to be(true)
     expect(captured_env).to include(

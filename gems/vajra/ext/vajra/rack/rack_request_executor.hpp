@@ -12,6 +12,8 @@ namespace Vajra
 {
   namespace rack
   {
+    void set_rack_execution_installed(bool installed);
+
     class RackRequestExecutor final : public request::RequestExecutor
     {
     public:

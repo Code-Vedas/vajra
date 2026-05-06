@@ -4,6 +4,7 @@
 // LICENSE file in the root directory of this source tree.
 
 #include "response_serializer.hpp"
+#include "http_header_utils.hpp"
 
 namespace
 {
@@ -24,33 +25,6 @@ namespace
     }
 
     return false;
-  }
-
-  std::string lowercase_header_name(const std::string &name)
-  {
-    std::string normalized;
-    normalized.reserve(name.size());
-
-    for (const unsigned char character : name)
-    {
-      if (character >= 'A' && character <= 'Z')
-      {
-        normalized.push_back(static_cast<char>(character - 'A' + 'a'));
-      }
-      else
-      {
-        normalized.push_back(static_cast<char>(character));
-      }
-    }
-
-    return normalized;
-  }
-
-  bool forbidden_framing_header(const std::string &name)
-  {
-    const std::string normalized_name = lowercase_header_name(name);
-    return normalized_name == "content-length" || normalized_name == "connection" ||
-           normalized_name == "transfer-encoding";
   }
 
   bool forbids_message_body(int status_code)
@@ -187,7 +161,7 @@ void Vajra::response::ResponseSerializer::validate_header(const Header &header) 
     }
   }
 
-  if (forbidden_framing_header(header.name))
+  if (Vajra::response::framing_header_name(header.name))
   {
     throw SerializationError("response headers must not override HTTP framing headers");
   }

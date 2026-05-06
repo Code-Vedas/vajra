@@ -24,12 +24,15 @@ module Vajra
         app.method(:call)
 
         APP_MUTEX.synchronize { APP_STATE.app = app }
+        __native_set_installed__(true)
+        app
       rescue NameError
         raise TypeError, 'Rack app must respond to #call'
       end
 
       def uninstall!
         APP_MUTEX.synchronize { APP_STATE.app = nil }
+        __native_set_installed__(false)
       end
 
       def installed?
@@ -78,9 +81,14 @@ module Vajra
       private_class_method :normalize_headers
 
       def append_normalized_header(normalized_headers, name, value)
-        normalized_headers << [String(name), String(value)]
+        normalized_headers << [normalize_header_name(name), String(value)]
       end
       private_class_method :append_normalized_header
+
+      def normalize_header_name(name)
+        String(name).tr('_', '-')
+      end
+      private_class_method :normalize_header_name
 
       def current_app
         APP_MUTEX.synchronize { APP_STATE.app }

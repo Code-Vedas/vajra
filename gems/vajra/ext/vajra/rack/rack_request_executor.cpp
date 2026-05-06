@@ -12,6 +12,7 @@
 #include "ruby/encoding.h"
 #include "ruby/thread.h"
 
+#include <atomic>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -20,7 +21,7 @@
 
 namespace
 {
-  ID id_installed;
+  std::atomic<bool> rack_execution_installed{false};
   ID id_call;
   ID id_message;
   ID id_backtrace;
@@ -30,12 +31,6 @@ namespace
   {
     const std::vector<Vajra::request::RackEnvEntry> *env_entries;
     std::optional<Vajra::response::Response> response;
-    std::string error_message;
-  };
-
-  struct InstalledCheckContext
-  {
-    bool installed = false;
     std::string error_message;
   };
 
@@ -56,12 +51,11 @@ namespace
 
   void ensure_ruby_ids()
   {
-    if (id_installed != 0)
+    if (id_call != 0)
     {
       return;
     }
 
-    id_installed = rb_intern("installed?");
     id_call = rb_intern("call");
     id_message = rb_intern("message");
     id_backtrace = rb_intern("backtrace");
@@ -94,37 +88,10 @@ namespace
     return ruby_entries;
   }
 
-  VALUE protected_installed_check(VALUE)
-  {
-    return rb_funcall(rack_execution_module(), id_installed, 0);
-  }
-
   VALUE protected_execute_rack_request(VALUE data)
   {
     auto *context = reinterpret_cast<ExecutionCallContext *>(data);
-    const VALUE execution_module = rack_execution_module();
-    if (!RTEST(rb_funcall(execution_module, id_installed, 0)))
-    {
-      return Qnil;
-    }
-
-    return rb_funcall(execution_module, id_call, 1, ruby_env_entries_from(*context->env_entries));
-  }
-
-  void *installed_with_gvl(void *data)
-  {
-    auto *context = static_cast<InstalledCheckContext *>(data);
-    int state = 0;
-    VALUE result = rb_protect(protected_installed_check, Qnil, &state);
-    if (state != 0)
-    {
-      context->error_message = exception_message(rb_errinfo());
-      rb_set_errinfo(Qnil);
-      return nullptr;
-    }
-
-    context->installed = RTEST(result);
-    return nullptr;
+    return rb_funcall(rack_execution_module(), id_call, 1, ruby_env_entries_from(*context->env_entries));
   }
 
   std::string exception_message(VALUE exception)
@@ -283,17 +250,15 @@ namespace
   }
 }
 
+void Vajra::rack::set_rack_execution_installed(bool installed)
+{
+  rack_execution_installed.store(installed, std::memory_order_release);
+}
+
 std::optional<Vajra::response::Response> Vajra::rack::RackRequestExecutor::execute(
     const request::RequestContext &request_context) const
 {
-  InstalledCheckContext installed_check_context{};
-  rb_thread_call_with_gvl(installed_with_gvl, &installed_check_context);
-  if (!installed_check_context.error_message.empty())
-  {
-    throw std::runtime_error("Rack execution installation check failed: " + installed_check_context.error_message);
-  }
-
-  if (!installed_check_context.installed)
+  if (!rack_execution_installed.load(std::memory_order_acquire))
   {
     return std::nullopt;
   }

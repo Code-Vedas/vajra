@@ -385,6 +385,13 @@ namespace
     }
     return Qnil;
   }
+
+  VALUE rb_rack_execution_native_set_installed(VALUE self, VALUE installed)
+  {
+    (void)self;
+    Vajra::rack::set_rack_execution_installed(RTEST(installed));
+    return installed;
+  }
 }
 
 namespace VajraNative
@@ -453,6 +460,13 @@ extern "C" void Init_vajra()
   id_port = rb_intern("port");
   id_max_request_head_bytes = rb_intern("max_request_head_bytes");
   VALUE mVajra = rb_define_module("Vajra");
+  VALUE mInternal = rb_define_module_under(mVajra, "Internal");
+  VALUE mRackExecution = rb_define_module_under(mInternal, "RackExecution");
   rb_define_singleton_method(mVajra, "start", RUBY_METHOD_FUNC(rb_vajra_start), -1);
   rb_define_singleton_method(mVajra, "stop", RUBY_METHOD_FUNC(rb_vajra_stop), 0);
+  rb_define_singleton_method(
+      mRackExecution,
+      "__native_set_installed__",
+      RUBY_METHOD_FUNC(rb_rack_execution_native_set_installed),
+      1);
 }

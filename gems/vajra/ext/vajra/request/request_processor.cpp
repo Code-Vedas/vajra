@@ -9,7 +9,11 @@
 #include "request_context.hpp"
 #include "response/response_serializer.hpp"
 
+#include <chrono>
+#include <ctime>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <unistd.h>
 #include <utility>
@@ -17,6 +21,23 @@
 
 namespace
 {
+  std::string utc_timestamp()
+  {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+    std::tm utc_time{};
+    gmtime_r(&now_time, &utc_time);
+
+    std::ostringstream timestamp;
+    timestamp << std::put_time(&utc_time, "%Y-%m-%dT%H:%M:%SZ");
+    return timestamp.str();
+  }
+
+  void log_request_error(const std::string &message)
+  {
+    std::cerr << "[Vajra][error] " << utc_timestamp() << ' ' << message << std::endl;
+  }
+
   bool header_named(const Vajra::request::ParsedHeader &header, const std::string &expected_name)
   {
     return Vajra::request::ascii_case_insensitive_equal(header.name, expected_name);
@@ -216,7 +237,9 @@ void Vajra::request::RequestProcessor::reject_request_head(int client_fd, const 
 
 void Vajra::request::RequestProcessor::reject_request_execution(int client_fd, const std::exception &error) const
 {
-  std::cerr << "request execution failed: " << error.what() << std::endl;
+  std::ostringstream message;
+  message << "request execution failed: client_fd=" << client_fd << " error=" << error.what();
+  log_request_error(message.str());
   (void)response_writer_.send(client_fd, response_writer_.internal_server_error_response());
 }
 

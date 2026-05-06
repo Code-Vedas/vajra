@@ -8,6 +8,8 @@
 module VajraE2EHttpHelpers
   def parse_http_response(response)
     headers, body = response.split("\r\n\r\n", 2)
+    raise ArgumentError, "incomplete HTTP response: #{response.inspect}" if headers.nil?
+
     header_lines = headers.split("\r\n")
     status_line = header_lines.shift
     parsed_headers = header_lines.to_h do |line|
@@ -20,7 +22,14 @@ module VajraE2EHttpHelpers
     { raw: response, status_line:, headers: parsed_headers, body: body || '' }
   end
 
-  def read_http_response(socket, buffered_bytes: +'', timeout: VajraE2EHelpers::HTTP_RESPONSE_READ_TIMEOUT_SECONDS)
+  def read_http_response(
+    socket,
+    buffered_bytes: +'',
+    timeout: VajraE2EHelpers::HTTP_RESPONSE_READ_TIMEOUT_SECONDS,
+    wait_thread: nil,
+    output: nil,
+    request_label: 'request'
+  )
     Timeout.timeout(timeout) do
       response = String.new(buffered_bytes)
 
@@ -37,11 +46,26 @@ module VajraE2EHttpHelpers
 
       [parse_http_response(complete_response), trailing_bytes]
     end
+  rescue EOFError, Errno::ECONNRESET => e
+    raise e.class, http_read_failure_message(e, request_label, wait_thread, output, buffered_bytes)
   end
 
-  def read_raw_http_response(socket, timeout: VajraE2EHelpers::HTTP_RESPONSE_READ_TIMEOUT_SECONDS)
-    response, = read_http_response(socket, timeout:)
+  def read_raw_http_response(
+    socket,
+    timeout: VajraE2EHelpers::HTTP_RESPONSE_READ_TIMEOUT_SECONDS,
+    wait_thread: nil,
+    output: nil,
+    request_label: 'request'
+  )
+    response, = read_http_response(socket, timeout:, wait_thread:, output:, request_label:)
     response[:raw]
+  end
+
+  def http_read_failure_message(error, request_label, wait_thread, output, buffered_bytes)
+    message = "#{request_label} failed while reading HTTP response: #{error.class}: #{error.message}"
+    message << " buffered_bytes=#{buffered_bytes.inspect}" unless buffered_bytes.empty?
+    message << " process=#{process_diagnostics(wait_thread, output)}" if wait_thread && output
+    message
   end
 
   def request_response(port: disposable_listener_port)
@@ -50,7 +74,7 @@ module VajraE2EHttpHelpers
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
       socket.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-      response = read_raw_http_response(socket)
+      response = read_raw_http_response(socket, wait_thread:, output:, request_label: 'request_response')
       socket.close
 
       status = stop_process(wait_thread)
@@ -67,7 +91,7 @@ module VajraE2EHttpHelpers
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
       socket.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-      response = read_raw_http_response(socket)
+      response = read_raw_http_response(socket, wait_thread:, output:, request_label: 'request_response_from_inline_start')
       socket.close
 
       status = stop_process(wait_thread, timeout:)
@@ -85,10 +109,22 @@ module VajraE2EHttpHelpers
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
       buffered_bytes = +''
       socket.write("GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n")
-      first_response, buffered_bytes = read_http_response(socket, buffered_bytes:)
+      first_response, buffered_bytes = read_http_response(
+        socket,
+        buffered_bytes:,
+        wait_thread:,
+        output:,
+        request_label: 'sequential_request_result:first'
+      )
 
       socket.write("GET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-      second_response, buffered_bytes = read_http_response(socket, buffered_bytes:)
+      second_response, buffered_bytes = read_http_response(
+        socket,
+        buffered_bytes:,
+        wait_thread:,
+        output:,
+        request_label: 'sequential_request_result:second'
+      )
       connection_closed = Timeout.timeout(2) { socket.read == '' }
       socket.close
 
@@ -120,8 +156,20 @@ module VajraE2EHttpHelpers
         "Host: localhost\r\n" \
         "Connection: close\r\n\r\n"
       )
-      first_response, buffered_bytes = read_http_response(socket, buffered_bytes:)
-      second_response, buffered_bytes = read_http_response(socket, buffered_bytes:)
+      first_response, buffered_bytes = read_http_response(
+        socket,
+        buffered_bytes:,
+        wait_thread:,
+        output:,
+        request_label: 'pipelined_request_result:first'
+      )
+      second_response, buffered_bytes = read_http_response(
+        socket,
+        buffered_bytes:,
+        wait_thread:,
+        output:,
+        request_label: 'pipelined_request_result:second'
+      )
       connection_closed = Timeout.timeout(2) { socket.read == '' }
       socket.close
 
@@ -178,7 +226,7 @@ module VajraE2EHttpHelpers
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
       socket.write(request)
-      response = read_raw_http_response(socket)
+      response = read_raw_http_response(socket, wait_thread:, output:, request_label: 'rack_env_request_result')
       socket.close
 
       status = stop_process(wait_thread)
@@ -195,7 +243,7 @@ module VajraE2EHttpHelpers
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
       socket.write(request)
-      response = read_raw_http_response(socket)
+      response = read_raw_http_response(socket, wait_thread:, output:, request_label: 'rack_app_request_result')
       socket.close
 
       status = stop_process(wait_thread)

@@ -346,6 +346,12 @@ namespace
   {
     for (const Vajra::request::ParsedHeader &header : request_context.request.headers)
     {
+      if (Vajra::request::ascii_case_insensitive_equal(header.name, "Transfer-Encoding"))
+      {
+        throw Vajra::request::bad_request_error(
+            "Rack request execution does not support request bodies until body transport is implemented");
+      }
+
       if (!Vajra::request::ascii_case_insensitive_equal(header.name, "Content-Length"))
       {
         continue;

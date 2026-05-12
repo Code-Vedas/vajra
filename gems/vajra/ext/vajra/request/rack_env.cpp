@@ -80,7 +80,7 @@ namespace
         continue;
       }
 
-      normalized.push_back(static_cast<char>(character));
+      throw Vajra::request::bad_request_error("invalid request header name for Rack environment");
     }
 
     if (normalized.empty())

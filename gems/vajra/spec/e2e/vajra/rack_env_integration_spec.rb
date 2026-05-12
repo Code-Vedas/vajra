@@ -167,6 +167,36 @@ RSpec.describe 'Vajra Rack environment integration', :e2e, :integration do # rub
     expect(result[:output]).to include('out-of-range HTTP status code')
   end
 
+  it 'rejects Rack responses with non-integer status codes' do
+    script = <<~RUBY
+      require "vajra"
+
+      Vajra::Internal::RackExecution.__native_set_callback__(
+        proc do |_rack_env|
+          ["200", [["Content-Type", "text/plain"]], "unexpected"]
+        end
+      )
+
+      Vajra.start
+    RUBY
+
+    result = rack_app_request_result(
+      script:,
+      request:
+        "GET /invalid-status-type HTTP/1.1\r\n" \
+        "Host: example.test\r\n" \
+        "Connection: close\r\n\r\n"
+    )
+
+    response = parse_http_response(result[:response])
+
+    expect(result[:exitstatus]).to eq(0)
+    expect(response[:status_line]).to eq('HTTP/1.1 500 Internal Server Error')
+    expect(response[:headers]).to include('connection' => 'close')
+    expect(result[:output]).to include('Rack request execution failed')
+    expect(result[:output]).to include('non-integer HTTP status code')
+  end
+
   it 'preserves binary request header values in the Rack env' do
     script = <<~RUBY
       require "json"

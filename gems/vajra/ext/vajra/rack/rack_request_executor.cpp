@@ -242,6 +242,11 @@ namespace
 
   int status_code_from_ruby(VALUE status)
   {
+    if (RB_INTEGER_TYPE_P(status) == 0)
+    {
+      throw std::runtime_error("Rack execution returned a non-integer HTTP status code");
+    }
+
     const long status_code = NUM2LONG(status);
     if (status_code < 100 || status_code > 599)
     {

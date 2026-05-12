@@ -171,6 +171,32 @@ namespace VajraSpecCpp
       fail("ambiguous Rack header names with underscores were accepted");
     }
 
+    void test_build_rejects_header_names_with_non_cgi_safe_token_characters()
+    {
+      Vajra::request::RackEnvBuilder builder;
+      const Vajra::request::RequestContext request_context{
+          Vajra::request::ParsedRequest{
+              Vajra::request::ParsedRequestLine{"GET", "/", "HTTP/1.1"},
+              {Vajra::request::ParsedHeader{"X.Foo", "ambiguous"}}},
+          Vajra::request::SocketContext{"127.0.0.1", 10'000, "127.0.0.1", 3000, "http"}};
+
+      try
+      {
+        (void)builder.build(request_context);
+      }
+      catch (const Vajra::request::HeadError &error)
+      {
+        if (error.kind() != Vajra::request::HeadFailureKind::bad_request)
+        {
+          fail("non-CGI-safe Rack header name used the wrong failure kind");
+        }
+
+        return;
+      }
+
+      fail("non-CGI-safe Rack header name characters were accepted");
+    }
+
     void test_build_rejects_unsafe_header_value_bytes()
     {
       Vajra::request::RackEnvBuilder builder;
@@ -263,6 +289,7 @@ namespace VajraSpecCpp
     test_build_maps_method_path_query_headers_and_socket_context();
     test_build_rejects_unsupported_header_name_characters();
     test_build_rejects_header_names_with_underscores();
+    test_build_rejects_header_names_with_non_cgi_safe_token_characters();
     test_build_rejects_unsafe_header_value_bytes();
     test_build_rejects_duplicate_content_length_headers();
     test_build_rejects_duplicate_content_type_headers();

@@ -27,4 +27,18 @@ RSpec.describe 'Vajra e2e process helpers', :e2e, :integration do # rubocop:disa
 
     expect(helper_host.read_available_output(output)).to eq('partial output')
   end
+
+  it 'returns captured output when read_nonblock raises EOFError' do
+    output = instance_double(IO)
+    first_chunk = true
+
+    allow(output).to receive(:read_nonblock) do
+      raise EOFError, 'end of file reached' unless first_chunk
+
+      first_chunk = false
+      'partial output'
+    end
+
+    expect(helper_host.read_available_output(output)).to eq('partial output')
+  end
 end

@@ -19,12 +19,10 @@ RSpec.describe 'Vajra e2e process helpers', :e2e, :integration do # rubocop:disa
     first_chunk = true
 
     allow(output).to receive(:read_nonblock) do
-      if first_chunk
-        first_chunk = false
-        'partial output'
-      else
-        raise IOError, 'closed stream'
-      end
+      raise IOError, 'closed stream' unless first_chunk
+
+      first_chunk = false
+      'partial output'
     end
 
     expect(helper_host.read_available_output(output)).to eq('partial output')

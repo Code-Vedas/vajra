@@ -24,13 +24,13 @@ module VajraE2EHttpHelpers
 
   def read_http_response(
     socket,
-    buffered_bytes: +'',
+    buffered_bytes: String.new(encoding: Encoding::BINARY),
     timeout: VajraE2EHelpers::HTTP_RESPONSE_READ_TIMEOUT_SECONDS,
     wait_thread: nil,
     output: nil,
     request_label: 'request'
   )
-    response = String.new(buffered_bytes)
+    response = String.new(buffered_bytes, encoding: Encoding::BINARY)
 
     Timeout.timeout(timeout) do
       response << socket.readpartial(4096) until response.include?("\r\n\r\n")
@@ -42,7 +42,7 @@ module VajraE2EHttpHelpers
       body << socket.readpartial(4096) while body.bytesize < content_length
 
       complete_response = "#{headers}\r\n\r\n#{body.byteslice(0, content_length)}"
-      trailing_bytes = body.byteslice(content_length..) || +''
+      trailing_bytes = body.byteslice(content_length..) || String.new(encoding: Encoding::BINARY)
 
       [parse_http_response(complete_response), trailing_bytes]
     end

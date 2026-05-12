@@ -30,9 +30,9 @@ module VajraE2EHttpHelpers
     output: nil,
     request_label: 'request'
   )
-    Timeout.timeout(timeout) do
-      response = String.new(buffered_bytes)
+    response = String.new(buffered_bytes)
 
+    Timeout.timeout(timeout) do
       response << socket.readpartial(4096) until response.include?("\r\n\r\n")
 
       headers, body = response.split("\r\n\r\n", 2)
@@ -47,7 +47,7 @@ module VajraE2EHttpHelpers
       [parse_http_response(complete_response), trailing_bytes]
     end
   rescue EOFError, Errno::ECONNRESET => e
-    raise e.class, http_read_failure_message(e, request_label, wait_thread, output, buffered_bytes), e.backtrace
+    raise e.class, http_read_failure_message(e, request_label, wait_thread, output, buffered_bytes, response), e.backtrace
   end
 
   def read_raw_http_response(
@@ -61,9 +61,12 @@ module VajraE2EHttpHelpers
     response[:raw]
   end
 
-  def http_read_failure_message(error, request_label, wait_thread, output, buffered_bytes)
+  def http_read_failure_message(error, request_label, wait_thread, output, buffered_bytes, response)
     message = "#{request_label} failed while reading HTTP response: #{error.class}: #{error.message}"
     message << " buffered_bytes=#{buffered_bytes.inspect}" unless buffered_bytes.empty?
+    if response.bytesize > buffered_bytes.bytesize
+      message << " response_so_far=#{response.inspect}"
+    end
     message << " process=#{process_diagnostics(wait_thread, output)}" if wait_thread && output
     message
   end

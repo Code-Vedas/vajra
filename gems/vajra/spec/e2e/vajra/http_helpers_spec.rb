@@ -63,4 +63,22 @@ RSpec.describe 'Vajra e2e HTTP helpers', :e2e, :integration do # rubocop:disable
       expect(error.backtrace.first).to eq('/tmp/http_helpers_spec.rb:27')
     end
   end
+
+  it 'includes partial response bytes when the socket closes mid-response' do
+    socket = instance_double(TCPSocket)
+    first_chunk = true
+
+    allow(socket).to receive(:readpartial) do
+      if first_chunk
+        first_chunk = false
+        "HTTP/1.1 200 OK\r\nCont"
+      else
+        raise EOFError, 'socket closed'
+      end
+    end
+
+    expect { helper_host.read_http_response(socket) }.to raise_error(EOFError) do |error|
+      expect(error.message).to include('response_so_far="HTTP/1.1 200 OK\\r\\nCont"')
+    end
+  end
 end

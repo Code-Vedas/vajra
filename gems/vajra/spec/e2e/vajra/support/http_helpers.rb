@@ -19,7 +19,7 @@ module VajraE2EHttpHelpers
       [name.downcase, value.strip]
     end
 
-    { raw: response, status_line:, headers: parsed_headers, body: body || '' }
+    { raw: response, status_line:, headers: parsed_headers, body: }
   end
 
   def read_http_response(

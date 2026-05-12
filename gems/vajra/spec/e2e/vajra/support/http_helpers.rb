@@ -64,9 +64,7 @@ module VajraE2EHttpHelpers
   def http_read_failure_message(error, request_label, wait_thread, output, buffered_bytes, response)
     message = "#{request_label} failed while reading HTTP response: #{error.class}: #{error.message}"
     message << " buffered_bytes=#{buffered_bytes.inspect}" unless buffered_bytes.empty?
-    if response.bytesize > buffered_bytes.bytesize
-      message << " response_so_far=#{response.inspect}"
-    end
+    message << " response_so_far=#{response.inspect}" if response.bytesize > buffered_bytes.bytesize
     message << " process=#{process_diagnostics(wait_thread, output)}" if wait_thread && output
     message
   end

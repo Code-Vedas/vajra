@@ -69,12 +69,10 @@ RSpec.describe 'Vajra e2e HTTP helpers', :e2e, :integration do # rubocop:disable
     first_chunk = true
 
     allow(socket).to receive(:readpartial) do
-      if first_chunk
-        first_chunk = false
-        "HTTP/1.1 200 OK\r\nCont"
-      else
-        raise EOFError, 'socket closed'
-      end
+      raise EOFError, 'socket closed' unless first_chunk
+
+      first_chunk = false
+      "HTTP/1.1 200 OK\r\nCont"
     end
 
     expect { helper_host.read_http_response(socket) }.to raise_error(EOFError) do |error|

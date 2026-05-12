@@ -54,7 +54,7 @@ RSpec.describe 'Vajra e2e HTTP helpers', :e2e, :integration do # rubocop:disable
     binary_body = "\x80\xFF".b
 
     allow(socket).to receive(:readpartial).and_return(
-      "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n".b + binary_body + "tail".b
+      "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n".b + binary_body + 'tail'.b
     )
 
     response, trailing_bytes = helper_host.read_http_response(socket)
@@ -62,7 +62,7 @@ RSpec.describe 'Vajra e2e HTTP helpers', :e2e, :integration do # rubocop:disable
     expect(response[:body].encoding).to eq(Encoding::BINARY)
     expect(response[:body].bytes).to eq([128, 255])
     expect(trailing_bytes.encoding).to eq(Encoding::BINARY)
-    expect(trailing_bytes).to eq("tail".b)
+    expect(trailing_bytes).to eq('tail'.b)
   end
 
   it 'preserves the original backtrace when HTTP response reads fail' do

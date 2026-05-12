@@ -325,4 +325,20 @@ RSpec.describe 'Vajra Rack environment integration', :e2e, :integration do # rub
     expect(response[:status_line]).to eq('HTTP/1.1 400 Bad Request')
     expect(response[:headers]).to include('connection' => 'close')
   end
+
+  it 'rejects duplicate host headers during rack env translation' do
+    result = rack_env_request_result(
+      request:
+        "GET /projects HTTP/1.1\r\n" \
+        "Host: example.test\r\n" \
+        "Host: evil.test\r\n" \
+        "Connection: close\r\n\r\n"
+    )
+
+    response = parse_http_response(result[:response])
+
+    expect(result[:exitstatus]).to eq(0)
+    expect(response[:status_line]).to eq('HTTP/1.1 400 Bad Request')
+    expect(response[:headers]).to include('connection' => 'close')
+  end
 end

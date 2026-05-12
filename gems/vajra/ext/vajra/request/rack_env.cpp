@@ -94,7 +94,7 @@ namespace
     if (existing_entry != entry_positions.end())
     {
       Vajra::request::RackEnvEntry &entry = entries.at(existing_entry->second);
-      if (key == "CONTENT_LENGTH" || key == "CONTENT_TYPE")
+      if (key == "CONTENT_LENGTH" || key == "CONTENT_TYPE" || key == "HTTP_HOST")
       {
         throw Vajra::request::bad_request_error("duplicate Rack CGI header is not allowed");
       }

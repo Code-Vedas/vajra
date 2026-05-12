@@ -280,6 +280,35 @@ namespace VajraSpecCpp
 
       fail("duplicate Content-Type headers were accepted");
     }
+
+    void test_build_rejects_duplicate_host_headers()
+    {
+      Vajra::request::RackEnvBuilder builder;
+      const Vajra::request::RequestContext request_context{
+          Vajra::request::ParsedRequest{
+              Vajra::request::ParsedRequestLine{"GET", "/", "HTTP/1.1"},
+              {
+                  Vajra::request::ParsedHeader{"Host", "example.test"},
+                  Vajra::request::ParsedHeader{"Host", "evil.test"},
+              }},
+          Vajra::request::SocketContext{"127.0.0.1", 10'000, "127.0.0.1", 3000, "http"}};
+
+      try
+      {
+        (void)builder.build(request_context);
+      }
+      catch (const Vajra::request::HeadError &error)
+      {
+        if (error.kind() != Vajra::request::HeadFailureKind::bad_request)
+        {
+          fail("duplicate Host used the wrong failure kind");
+        }
+
+        return;
+      }
+
+      fail("duplicate Host headers were accepted");
+    }
   }
 
   void run_rack_env_tests()
@@ -293,5 +322,6 @@ namespace VajraSpecCpp
     test_build_rejects_unsafe_header_value_bytes();
     test_build_rejects_duplicate_content_length_headers();
     test_build_rejects_duplicate_content_type_headers();
+    test_build_rejects_duplicate_host_headers();
   }
 }

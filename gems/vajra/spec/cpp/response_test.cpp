@@ -19,6 +19,55 @@ namespace VajraSpecCpp
 {
   namespace
   {
+    class RaisingRequestExecutor final : public Vajra::request::RequestExecutor
+    {
+    public:
+      std::optional<Vajra::response::Response> execute(const Vajra::request::RequestContext &) const override
+      {
+        throw std::runtime_error("boom");
+      }
+    };
+
+    class HeadErrorRequestExecutor final : public Vajra::request::RequestExecutor
+    {
+    public:
+      std::optional<Vajra::response::Response> execute(const Vajra::request::RequestContext &) const override
+      {
+        throw Vajra::request::bad_request_error("invalid Rack environment translation");
+      }
+    };
+
+    class InvalidResponseRequestExecutor final : public Vajra::request::RequestExecutor
+    {
+    public:
+      std::optional<Vajra::response::Response> execute(const Vajra::request::RequestContext &) const override
+      {
+        return Vajra::response::Response{
+            Vajra::response::Status{200, "OK"},
+            {Vajra::response::Header{"Bad Header", "value"}},
+            "OK",
+            Vajra::response::ConnectionBehavior::close};
+      }
+    };
+
+    class FramingHeadersRequestExecutor final : public Vajra::request::RequestExecutor
+    {
+    public:
+      std::optional<Vajra::response::Response> execute(const Vajra::request::RequestContext &) const override
+      {
+        return Vajra::response::Response{
+            Vajra::response::Status{200, "OK"},
+            {
+                Vajra::response::Header{"Content-Type", "text/plain"},
+                Vajra::response::Header{"Content-Length", "999"},
+                Vajra::response::Header{"Connection", "keep-alive"},
+                Vajra::response::Header{"Transfer-Encoding", "chunked"},
+            },
+            "OK",
+            Vajra::response::ConnectionBehavior::close};
+      }
+    };
+
     std::thread start_request_processor_thread(
         const Vajra::request::RequestProcessor &processor,
         FileDescriptorGuard &server_socket)
@@ -30,7 +79,9 @@ namespace VajraSpecCpp
       }
 
       server_socket.close_if_open();
-      return std::thread([&processor, owned_fd]() { processor.handle(owned_fd); });
+      return std::thread([&processor, owned_fd]() {
+        processor.handle(owned_fd, Vajra::request::SocketContext{"127.0.0.1", 12'345, "127.0.0.1", 3000, "http"});
+      });
     }
 
     void expect_serialization_error(
@@ -683,6 +734,226 @@ namespace VajraSpecCpp
         throw;
       }
     }
+
+    void test_request_processor_returns_internal_server_error_when_executor_raises()
+    {
+      int sockets[2];
+      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
+      {
+        fail("socketpair failed while setting up executor failure test");
+      }
+
+      FileDescriptorGuard client_socket(sockets[0]);
+      FileDescriptorGuard server_socket(sockets[1]);
+      suppress_sigpipe(client_socket.get());
+
+      const auto request_executor = std::make_shared<RaisingRequestExecutor>();
+      const Vajra::request::RequestProcessor processor(
+          Vajra::request::kDefaultMaxRequestHeadBytes,
+          request_executor);
+      std::thread processor_thread = start_request_processor_thread(processor, server_socket);
+
+      try
+      {
+        if (!send_all(
+                client_socket.get(),
+                "GET /boom HTTP/1.1\r\n"
+                "Host: example.test\r\n"
+                "Connection: close\r\n"
+                "\r\n"))
+        {
+          fail("failed to send request for executor failure test");
+        }
+
+        const std::string response = read_http_response(client_socket.get());
+        if (response.find("HTTP/1.1 500 Internal Server Error\r\n") != 0)
+        {
+          fail("executor failure did not return a 500 response");
+        }
+
+        if (response.find("Connection: close\r\n") == std::string::npos)
+        {
+          fail("executor failure did not force connection close");
+        }
+
+        client_socket.close_if_open();
+        processor_thread.join();
+      }
+      catch (...)
+      {
+        client_socket.close_if_open();
+        if (processor_thread.joinable())
+        {
+          processor_thread.join();
+        }
+        throw;
+      }
+    }
+
+    void test_request_processor_returns_bad_request_when_executor_raises_head_error()
+    {
+      int sockets[2];
+      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
+      {
+        fail("socketpair failed while setting up head error executor test");
+      }
+
+      FileDescriptorGuard client_socket(sockets[0]);
+      FileDescriptorGuard server_socket(sockets[1]);
+      suppress_sigpipe(client_socket.get());
+
+      const auto request_executor = std::make_shared<HeadErrorRequestExecutor>();
+      const Vajra::request::RequestProcessor processor(
+          Vajra::request::kDefaultMaxRequestHeadBytes,
+          request_executor);
+      std::thread processor_thread = start_request_processor_thread(processor, server_socket);
+
+      try
+      {
+        if (!send_all(
+                client_socket.get(),
+                "GET /bad HTTP/1.1\r\n"
+                "Host: example.test\r\n"
+                "Connection: close\r\n"
+                "\r\n"))
+        {
+          fail("failed to send request for head error executor test");
+        }
+
+        const std::string response = read_http_response(client_socket.get());
+        if (response.find("HTTP/1.1 400 Bad Request\r\n") != 0)
+        {
+          fail("executor head error did not return a 400 response");
+        }
+
+        client_socket.close_if_open();
+        processor_thread.join();
+      }
+      catch (...)
+      {
+        client_socket.close_if_open();
+        if (processor_thread.joinable())
+        {
+          processor_thread.join();
+        }
+        throw;
+      }
+    }
+
+    void test_request_processor_returns_internal_server_error_when_executor_response_is_invalid()
+    {
+      int sockets[2];
+      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
+      {
+        fail("socketpair failed while setting up invalid response executor test");
+      }
+
+      FileDescriptorGuard client_socket(sockets[0]);
+      FileDescriptorGuard server_socket(sockets[1]);
+      suppress_sigpipe(client_socket.get());
+
+      const auto request_executor = std::make_shared<InvalidResponseRequestExecutor>();
+      const Vajra::request::RequestProcessor processor(
+          Vajra::request::kDefaultMaxRequestHeadBytes,
+          request_executor);
+      std::thread processor_thread = start_request_processor_thread(processor, server_socket);
+
+      try
+      {
+        if (!send_all(
+                client_socket.get(),
+                "GET /invalid HTTP/1.1\r\n"
+                "Host: example.test\r\n"
+                "Connection: close\r\n"
+                "\r\n"))
+        {
+          fail("failed to send request for invalid response executor test");
+        }
+
+        const std::string response = read_http_response(client_socket.get());
+        if (response.find("HTTP/1.1 500 Internal Server Error\r\n") != 0)
+        {
+          fail("invalid executor response did not return a 500 response");
+        }
+
+        client_socket.close_if_open();
+        processor_thread.join();
+      }
+      catch (...)
+      {
+        client_socket.close_if_open();
+        if (processor_thread.joinable())
+        {
+          processor_thread.join();
+        }
+        throw;
+      }
+    }
+
+    void test_request_processor_strips_executor_framing_headers_before_sending()
+    {
+      int sockets[2];
+      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
+      {
+        fail("socketpair failed while setting up framing header executor test");
+      }
+
+      FileDescriptorGuard client_socket(sockets[0]);
+      FileDescriptorGuard server_socket(sockets[1]);
+      suppress_sigpipe(client_socket.get());
+
+      const auto request_executor = std::make_shared<FramingHeadersRequestExecutor>();
+      const Vajra::request::RequestProcessor processor(
+          Vajra::request::kDefaultMaxRequestHeadBytes,
+          request_executor);
+      std::thread processor_thread = start_request_processor_thread(processor, server_socket);
+
+      try
+      {
+        if (!send_all(
+                client_socket.get(),
+                "GET /headers HTTP/1.1\r\n"
+                "Host: example.test\r\n"
+                "Connection: close\r\n"
+                "\r\n"))
+        {
+          fail("failed to send request for framing header executor test");
+        }
+
+        const std::string response = read_http_response(client_socket.get());
+        if (response.find("HTTP/1.1 200 OK\r\n") != 0)
+        {
+          fail("framing header executor response did not succeed");
+        }
+
+        if (response.find("Content-Length: 2\r\n") == std::string::npos)
+        {
+          fail("server did not restore correct content length framing");
+        }
+
+        if (response.find("Transfer-Encoding:") != std::string::npos)
+        {
+          fail("server leaked executor transfer-encoding framing");
+        }
+
+        if (response.find("Connection: keep-alive\r\n") != std::string::npos)
+        {
+          fail("server leaked executor connection framing");
+        }
+
+        client_socket.close_if_open();
+        processor_thread.join();
+      }
+      catch (...)
+      {
+        client_socket.close_if_open();
+        if (processor_thread.joinable())
+        {
+          processor_thread.join();
+        }
+        throw;
+      }
+    }
   }
 
   void run_response_tests()
@@ -705,5 +976,9 @@ namespace VajraSpecCpp
     test_request_processor_handles_pipelined_read_ahead_without_losing_the_next_request();
     test_request_processor_closes_after_parse_error_response();
     test_request_processor_closes_after_request_body_framing();
+    test_request_processor_returns_internal_server_error_when_executor_raises();
+    test_request_processor_returns_bad_request_when_executor_raises_head_error();
+    test_request_processor_returns_internal_server_error_when_executor_response_is_invalid();
+    test_request_processor_strips_executor_framing_headers_before_sending();
   }
 }

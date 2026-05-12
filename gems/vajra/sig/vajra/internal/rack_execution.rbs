@@ -1,0 +1,34 @@
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+module Vajra
+  module Internal
+    module RackExecution
+      interface _RackHeaderValue
+        def to_s: () -> String
+      end
+
+      interface _RackApp
+        def call: (Hash[String, String | bool | IO | StringIO | Array[Integer]]) -> [Integer | String, Hash[String | Symbol, _RackHeaderValue] | Array[[String | Symbol, _RackHeaderValue]] | _RackHeaders, Array[String] | _RackBody]
+      end
+
+      interface _RackHeaders
+        def each: () { (String | Symbol, _RackHeaderValue) -> void } -> void
+      end
+
+      interface _RackBody
+        def each: () { (String) -> void } -> void
+      end
+
+      RACK_VERSION: Array[Integer]
+
+      def self.install!: (_RackApp) -> _RackApp
+      def self.uninstall!: () -> nil
+      def self.installed?: () -> bool
+      def self.call: (Array[[String, String]]) -> [Integer, Array[[String, String]], String]?
+      def self.__native_set_callback__: (Proc | nil) -> (Proc | nil)
+    end
+  end
+end

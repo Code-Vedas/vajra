@@ -6,6 +6,32 @@
 # LICENSE file in the root directory of this source tree.
 
 module VajraE2EProcessHelpers
+  def read_available_output(output)
+    captured = +''
+
+    loop do
+      captured << output.read_nonblock(4096)
+    end
+  rescue IO::WaitReadable, IOError, Errno::EIO
+    captured
+  end
+
+  def process_diagnostics(wait_thread, output)
+    fragments = []
+    fragments << "pid=#{wait_thread.pid}"
+    fragments << "alive=#{wait_thread.alive?}"
+
+    unless wait_thread.alive?
+      status = wait_thread.value
+      fragments << "exitstatus=#{status.exitstatus.inspect}"
+      fragments << "termsig=#{status.termsig.inspect}"
+    end
+
+    captured_output = read_available_output(output)
+    fragments << "output=#{captured_output.inspect}" unless captured_output.empty?
+    fragments.join(' ')
+  end
+
   def wait_for_exit(wait_thread, timeout: 5)
     Timeout.timeout(timeout) { wait_thread.value }
   end
@@ -52,7 +78,10 @@ module VajraE2EProcessHelpers
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
       response, trailing_bytes = read_http_response(
-        socket.tap { |open_socket| open_socket.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n") }
+        socket.tap { |open_socket| open_socket.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n") },
+        wait_thread:,
+        output:,
+        request_label: 'idle_keep_alive_timeout_result'
       )
       connection_closed = Timeout.timeout(VajraE2EHelpers::IDLE_KEEP_ALIVE_CLOSE_TIMEOUT_SECONDS) { socket.read == '' }
       socket.close

@@ -52,6 +52,19 @@ Rack integrations define:
 - response translation guarantees
 - lifecycle expectations when the runtime preloads or supervises workers
 
+The Rack environment translation contract is explicit:
+
+- `REQUEST_METHOD`, `SCRIPT_NAME`, `PATH_INFO`, and `QUERY_STRING` are derived
+  from the native request line
+- `SERVER_NAME`, `SERVER_PORT`, and `REMOTE_ADDR` are derived from accepted
+  socket context
+- `rack.url_scheme` uses the supported baseline scheme for the connection
+- request headers are translated into Rack-compatible environment keys, with
+  `CONTENT_TYPE` and `CONTENT_LENGTH` preserved as CGI exceptions and all other
+  request headers surfaced as `HTTP_*`
+- the initial Rack bridge keeps `rack.input` present as an empty placeholder
+  object until request-body transport is introduced as its own contract
+
 ## Rails Integration
 
 The Rails path builds on the same ownership split:

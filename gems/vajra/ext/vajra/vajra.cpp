@@ -4,6 +4,7 @@
 // LICENSE file in the root directory of this source tree.
 
 #include "vajra.hpp"
+#include "rack/rack_request_executor.hpp"
 #include "ruby.h"
 #include "ruby/thread.h"
 
@@ -384,6 +385,13 @@ namespace
     }
     return Qnil;
   }
+
+  VALUE rb_rack_execution_native_set_callback(VALUE self, VALUE callback)
+  {
+    (void)self;
+    Vajra::rack::set_rack_execution_callback(callback);
+    return callback;
+  }
 }
 
 namespace VajraNative
@@ -410,7 +418,10 @@ namespace VajraNative
         }
 
         shutting_down = 0;
-        server_instance = std::make_unique<Vajra::Server>(port, max_request_head_bytes);
+        server_instance = std::make_unique<Vajra::Server>(
+            port,
+            max_request_head_bytes,
+            std::make_shared<Vajra::rack::RackRequestExecutor>());
         server = server_instance.get();
       }
 
@@ -448,7 +459,15 @@ extern "C" void Init_vajra()
 {
   id_port = rb_intern("port");
   id_max_request_head_bytes = rb_intern("max_request_head_bytes");
+  Vajra::rack::initialize_rack_execution_bridge();
   VALUE mVajra = rb_define_module("Vajra");
+  VALUE mInternal = rb_define_module_under(mVajra, "Internal");
+  VALUE mRackExecution = rb_define_module_under(mInternal, "RackExecution");
   rb_define_singleton_method(mVajra, "start", RUBY_METHOD_FUNC(rb_vajra_start), -1);
   rb_define_singleton_method(mVajra, "stop", RUBY_METHOD_FUNC(rb_vajra_stop), 0);
+  rb_define_singleton_method(
+      mRackExecution,
+      "__native_set_callback__",
+      RUBY_METHOD_FUNC(rb_rack_execution_native_set_callback),
+      1);
 }

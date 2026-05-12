@@ -23,6 +23,7 @@ int main()
   {
     VajraSpecCpp::run_ipc_contract_tests();
     VajraSpecCpp::run_lifecycle_controller_tests();
+    VajraSpecCpp::run_rack_env_tests();
     VajraSpecCpp::run_server_lifecycle_tests();
     VajraSpecCpp::run_request_head_tests();
     VajraSpecCpp::run_response_tests();

@@ -43,6 +43,15 @@ Vajra::response::Response Vajra::response::ResponseWriter::success_response(
       connection_behavior};
 }
 
+Vajra::response::Response Vajra::response::ResponseWriter::internal_server_error_response() const
+{
+  return Response{
+      Status{500, "Internal Server Error"},
+      {Header{"Content-Type", "text/plain"}},
+      "Internal Server Error",
+      ConnectionBehavior::close};
+}
+
 Vajra::response::Response Vajra::response::ResponseWriter::request_head_failure_response(
     Vajra::request::HeadFailureKind kind) const
 {

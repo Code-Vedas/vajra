@@ -135,7 +135,7 @@ module VajraE2EStartupHelpers
         "X-Oversized: #{'a' * payload_size}\r\n" \
         "Connection: close\r\n\r\n"
       )
-      response = read_raw_http_response(socket)
+      response = read_raw_http_response(socket, wait_thread:, output:, request_label: 'oversized_request_result')
       socket.close
 
       status = stop_process(wait_thread)
@@ -158,7 +158,7 @@ module VajraE2EStartupHelpers
         "Connection: close\r\n\r\n" \
         "#{body}"
       )
-      response = read_raw_http_response(socket)
+      response = read_raw_http_response(socket, wait_thread:, output:, request_label: 'request_with_body_result')
       socket.close
 
       status = stop_process(wait_thread)

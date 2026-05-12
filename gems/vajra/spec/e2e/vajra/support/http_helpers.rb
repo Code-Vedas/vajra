@@ -41,7 +41,10 @@ module VajraE2EHttpHelpers
 
       body << socket.readpartial(4096) while body.bytesize < content_length
 
-      complete_response = "#{headers}\r\n\r\n#{body.byteslice(0, content_length)}"
+      complete_response = String.new(encoding: Encoding::BINARY)
+      complete_response << headers
+      complete_response << "\r\n\r\n".b
+      complete_response << body.byteslice(0, content_length)
       trailing_bytes = body.byteslice(content_length..) || String.new(encoding: Encoding::BINARY)
 
       [parse_http_response(complete_response), trailing_bytes]
@@ -108,7 +111,7 @@ module VajraE2EHttpHelpers
       selected_port = wait_for_banner(output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
-      buffered_bytes = +''
+      buffered_bytes = String.new(encoding: Encoding::BINARY)
       socket.write("GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n")
       first_response, buffered_bytes = read_http_response(
         socket,
@@ -149,7 +152,7 @@ module VajraE2EHttpHelpers
       selected_port = wait_for_banner(output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
-      buffered_bytes = +''
+      buffered_bytes = String.new(encoding: Encoding::BINARY)
       socket.write(
         "GET /first HTTP/1.1\r\n" \
         "Host: localhost\r\n\r\n" \

@@ -48,4 +48,19 @@ RSpec.describe 'Vajra e2e HTTP helpers', :e2e, :integration do # rubocop:disable
     expect(response[:headers]).to include('content-length' => '2')
     expect(trailing_bytes).to eq('')
   end
+
+  it 'preserves the original backtrace when HTTP response reads fail' do
+    socket = instance_double(TCPSocket)
+
+    allow(socket).to receive(:readpartial) do
+      raise EOFError, 'socket closed'
+    rescue EOFError => e
+      raise e, e.message, ['/tmp/http_helpers_spec.rb:27']
+    end
+
+    expect { helper_host.read_http_response(socket) }.to raise_error(EOFError) do |error|
+      expect(error.message).to include('failed while reading HTTP response')
+      expect(error.backtrace.first).to eq('/tmp/http_helpers_spec.rb:27')
+    end
+  end
 end

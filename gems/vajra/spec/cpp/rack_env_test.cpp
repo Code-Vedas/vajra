@@ -196,6 +196,64 @@ namespace VajraSpecCpp
 
       fail("unsafe Rack header value bytes were accepted");
     }
+
+    void test_build_rejects_duplicate_content_length_headers()
+    {
+      Vajra::request::RackEnvBuilder builder;
+      const Vajra::request::RequestContext request_context{
+          Vajra::request::ParsedRequest{
+              Vajra::request::ParsedRequestLine{"POST", "/", "HTTP/1.1"},
+              {
+                  Vajra::request::ParsedHeader{"Content-Length", "0"},
+                  Vajra::request::ParsedHeader{"Content-Length", "0"},
+              }},
+          Vajra::request::SocketContext{"127.0.0.1", 10'000, "127.0.0.1", 3000, "http"}};
+
+      try
+      {
+        (void)builder.build(request_context);
+      }
+      catch (const Vajra::request::HeadError &error)
+      {
+        if (error.kind() != Vajra::request::HeadFailureKind::bad_request)
+        {
+          fail("duplicate Content-Length used the wrong failure kind");
+        }
+
+        return;
+      }
+
+      fail("duplicate Content-Length headers were accepted");
+    }
+
+    void test_build_rejects_duplicate_content_type_headers()
+    {
+      Vajra::request::RackEnvBuilder builder;
+      const Vajra::request::RequestContext request_context{
+          Vajra::request::ParsedRequest{
+              Vajra::request::ParsedRequestLine{"POST", "/", "HTTP/1.1"},
+              {
+                  Vajra::request::ParsedHeader{"Content-Type", "application/json"},
+                  Vajra::request::ParsedHeader{"Content-Type", "text/plain"},
+              }},
+          Vajra::request::SocketContext{"127.0.0.1", 10'000, "127.0.0.1", 3000, "http"}};
+
+      try
+      {
+        (void)builder.build(request_context);
+      }
+      catch (const Vajra::request::HeadError &error)
+      {
+        if (error.kind() != Vajra::request::HeadFailureKind::bad_request)
+        {
+          fail("duplicate Content-Type used the wrong failure kind");
+        }
+
+        return;
+      }
+
+      fail("duplicate Content-Type headers were accepted");
+    }
   }
 
   void run_rack_env_tests()
@@ -206,5 +264,7 @@ namespace VajraSpecCpp
     test_build_rejects_unsupported_header_name_characters();
     test_build_rejects_header_names_with_underscores();
     test_build_rejects_unsafe_header_value_bytes();
+    test_build_rejects_duplicate_content_length_headers();
+    test_build_rejects_duplicate_content_type_headers();
   }
 }

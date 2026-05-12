@@ -47,7 +47,7 @@ module VajraE2EHttpHelpers
       [parse_http_response(complete_response), trailing_bytes]
     end
   rescue EOFError, Errno::ECONNRESET => e
-    raise e.class, http_read_failure_message(e, request_label, wait_thread, output, buffered_bytes)
+    raise e.class, http_read_failure_message(e, request_label, wait_thread, output, buffered_bytes), e.backtrace
   end
 
   def read_raw_http_response(

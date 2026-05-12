@@ -45,11 +45,16 @@ module Vajra
 
         env = build_env(env_entries)
         status, headers, body = app.call(env)
-        [
+        body_collected = false
+        normalized_response = [
           Integer(status),
           normalize_headers(headers),
           collect_body(body)
         ]
+        body_collected = true
+        normalized_response
+      ensure
+        close_body(body) if defined?(body) && !body.nil? && !body_collected
       end
 
       def build_env(env_entries)

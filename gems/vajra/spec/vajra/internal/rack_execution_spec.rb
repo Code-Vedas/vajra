@@ -131,4 +131,25 @@ RSpec.describe Vajra::Internal::RackExecution do
 
     expect { described_class.call([%w[REQUEST_METHOD GET]]) }.to raise_error(NoMethodError)
   end
+
+  it 'closes the response body when status normalization raises' do
+    closing_body = Class.new do
+      def each
+        yield 'OK'
+      end
+
+      def close
+        @closed = true
+      end
+
+      def closed?
+        @closed == true
+      end
+    end.new
+
+    described_class.install!(->(_env) { ['bad-status', {}, closing_body] })
+
+    expect { described_class.call([%w[REQUEST_METHOD GET]]) }.to raise_error(ArgumentError)
+    expect(closing_body.closed?).to be(true)
+  end
 end

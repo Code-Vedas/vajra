@@ -116,6 +116,11 @@ namespace
     {
       if (entry.key == key)
       {
+        if (key == "CONTENT_LENGTH" || key == "CONTENT_TYPE")
+        {
+          throw Vajra::request::bad_request_error("duplicate Rack CGI header is not allowed");
+        }
+
         entry.value += (key == "HTTP_COOKIE" ? "; " : ",") + value;
         return;
       }

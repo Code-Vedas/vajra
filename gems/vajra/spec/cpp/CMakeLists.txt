@@ -23,6 +23,7 @@ add_executable(vajra_server_test
   ../../ext/vajra/lifecycle/lifecycle_controller.cpp
   ../../ext/vajra/ipc/frame_header.cpp
   ../../ext/vajra/listener/listener_socket.cpp
+  ../../ext/vajra/request/request_body_reader.cpp
   ../../ext/vajra/request/request_head_reader.cpp
   ../../ext/vajra/request/request_processor.cpp
   ../../ext/vajra/request/rack_env.cpp

@@ -68,6 +68,19 @@ namespace VajraSpecCpp
       }
     };
 
+    class EchoRequestBodyExecutor final : public Vajra::request::RequestExecutor
+    {
+    public:
+      std::optional<Vajra::response::Response> execute(const Vajra::request::RequestContext &request_context) const override
+      {
+        return Vajra::response::Response{
+            Vajra::response::Status{200, "OK"},
+            {Vajra::response::Header{"Content-Type", "application/octet-stream"}},
+            request_context.request_body,
+            Vajra::response::ConnectionBehavior::close};
+      }
+    };
+
     std::thread start_request_processor_thread(
         const Vajra::request::RequestProcessor &processor,
         FileDescriptorGuard &server_socket)
@@ -689,7 +702,10 @@ namespace VajraSpecCpp
       FileDescriptorGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
-      const Vajra::request::RequestProcessor processor(Vajra::request::kDefaultMaxRequestHeadBytes);
+      const auto request_executor = std::make_shared<EchoRequestBodyExecutor>();
+      const Vajra::request::RequestProcessor processor(
+          Vajra::request::kDefaultMaxRequestHeadBytes,
+          request_executor);
       std::thread processor_thread = start_request_processor_thread(processor, server_socket);
 
       try
@@ -711,14 +727,280 @@ namespace VajraSpecCpp
           fail("request with body framing did not receive the success response");
         }
 
+        if (response.substr(response.size() - 4) != "body")
+        {
+          fail("request processor did not transport the fixed-length request body");
+        }
+
         if (response.find("Connection: close\r\n") == std::string::npos)
         {
-          fail("request with unread body framing did not force connection close");
+          fail("request with body framing did not force connection close");
         }
 
         if (!peer_closed_within(client_socket.get(), 500))
         {
-          fail("request processor left the connection open after unread body framing");
+          fail("request processor left the connection open after request body framing");
+        }
+
+        client_socket.close_if_open();
+        processor_thread.join();
+      }
+      catch (...)
+      {
+        client_socket.close_if_open();
+        if (processor_thread.joinable())
+        {
+          processor_thread.join();
+        }
+        throw;
+      }
+    }
+
+    void test_request_processor_reads_fragmented_fixed_length_request_body()
+    {
+      int sockets[2];
+      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
+      {
+        fail("socketpair failed while setting up fragmented fixed-length body test");
+      }
+
+      FileDescriptorGuard client_socket(sockets[0]);
+      FileDescriptorGuard server_socket(sockets[1]);
+      suppress_sigpipe(client_socket.get());
+
+      const auto request_executor = std::make_shared<EchoRequestBodyExecutor>();
+      const Vajra::request::RequestProcessor processor(
+          Vajra::request::kDefaultMaxRequestHeadBytes,
+          request_executor);
+      std::thread processor_thread = start_request_processor_thread(processor, server_socket);
+
+      try
+      {
+        if (!send_all(
+                client_socket.get(),
+                "POST /fragmented HTTP/1.1\r\n"
+                "Host: example.test\r\n"
+                "Content-Length: 11\r\n"
+                "\r\n"
+                "hello"))
+        {
+          fail("failed to send fixed-length body prefix");
+        }
+
+        if (!send_all(client_socket.get(), " world"))
+        {
+          fail("failed to send fixed-length body suffix");
+        }
+
+        const std::string response = read_http_response(client_socket.get());
+        if (response.substr(response.size() - 11) != "hello world")
+        {
+          fail("fragmented fixed-length request body was not reassembled");
+        }
+
+        client_socket.close_if_open();
+        processor_thread.join();
+      }
+      catch (...)
+      {
+        client_socket.close_if_open();
+        if (processor_thread.joinable())
+        {
+          processor_thread.join();
+        }
+        throw;
+      }
+    }
+
+    void test_request_processor_decodes_chunked_request_body()
+    {
+      int sockets[2];
+      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
+      {
+        fail("socketpair failed while setting up chunked body test");
+      }
+
+      FileDescriptorGuard client_socket(sockets[0]);
+      FileDescriptorGuard server_socket(sockets[1]);
+      suppress_sigpipe(client_socket.get());
+
+      const auto request_executor = std::make_shared<EchoRequestBodyExecutor>();
+      const Vajra::request::RequestProcessor processor(
+          Vajra::request::kDefaultMaxRequestHeadBytes,
+          request_executor);
+      std::thread processor_thread = start_request_processor_thread(processor, server_socket);
+
+      try
+      {
+        if (!send_all(
+                client_socket.get(),
+                "POST /chunked HTTP/1.1\r\n"
+                "Host: example.test\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                "\r\n"
+                "3\r\nabc\r\n"
+                "6\r\n123456\r\n"
+                "0\r\n\r\n"))
+        {
+          fail("failed to send chunked request body");
+        }
+
+        const std::string response = read_http_response(client_socket.get());
+        if (response.substr(response.size() - 9) != "abc123456")
+        {
+          fail("chunked request body was not decoded correctly");
+        }
+
+        client_socket.close_if_open();
+        processor_thread.join();
+      }
+      catch (...)
+      {
+        client_socket.close_if_open();
+        if (processor_thread.joinable())
+        {
+          processor_thread.join();
+        }
+        throw;
+      }
+    }
+
+    void test_request_processor_decodes_chunked_request_body_with_extensions_and_trailers()
+    {
+      int sockets[2];
+      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
+      {
+        fail("socketpair failed while setting up chunked extension test");
+      }
+
+      FileDescriptorGuard client_socket(sockets[0]);
+      FileDescriptorGuard server_socket(sockets[1]);
+      suppress_sigpipe(client_socket.get());
+
+      const auto request_executor = std::make_shared<EchoRequestBodyExecutor>();
+      const Vajra::request::RequestProcessor processor(
+          Vajra::request::kDefaultMaxRequestHeadBytes,
+          request_executor);
+      std::thread processor_thread = start_request_processor_thread(processor, server_socket);
+
+      try
+      {
+        if (!send_all(
+                client_socket.get(),
+                "POST /chunked-extensions HTTP/1.1\r\n"
+                "Host: example.test\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                "\r\n"
+                "5;foo=bar\r\nhello\r\n"
+                "1\r\n \r\n"
+                "0\r\n"
+                "X-Trailer: kept-native-only\r\n"
+                "\r\n"))
+        {
+          fail("failed to send chunked request with extensions and trailers");
+        }
+
+        const std::string response = read_http_response(client_socket.get());
+        if (response.substr(response.size() - 6) != "hello ")
+        {
+          fail("chunked body extensions or trailers were not handled correctly");
+        }
+
+        client_socket.close_if_open();
+        processor_thread.join();
+      }
+      catch (...)
+      {
+        client_socket.close_if_open();
+        if (processor_thread.joinable())
+        {
+          processor_thread.join();
+        }
+        throw;
+      }
+    }
+
+    void test_request_processor_rejects_conflicting_request_body_framing()
+    {
+      int sockets[2];
+      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
+      {
+        fail("socketpair failed while setting up conflicting request body framing test");
+      }
+
+      FileDescriptorGuard client_socket(sockets[0]);
+      FileDescriptorGuard server_socket(sockets[1]);
+      suppress_sigpipe(client_socket.get());
+
+      const Vajra::request::RequestProcessor processor(Vajra::request::kDefaultMaxRequestHeadBytes);
+      std::thread processor_thread = start_request_processor_thread(processor, server_socket);
+
+      try
+      {
+        if (!send_all(
+                client_socket.get(),
+                "POST /conflict HTTP/1.1\r\n"
+                "Host: example.test\r\n"
+                "Content-Length: 3\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                "\r\n"
+                "3\r\nabc\r\n0\r\n\r\n"))
+        {
+          fail("failed to send conflicting request body framing");
+        }
+
+        const std::string response = read_http_response(client_socket.get());
+        if (response.find("HTTP/1.1 400 Bad Request\r\n") != 0)
+        {
+          fail("conflicting request body framing did not receive a 400 response");
+        }
+
+        client_socket.close_if_open();
+        processor_thread.join();
+      }
+      catch (...)
+      {
+        client_socket.close_if_open();
+        if (processor_thread.joinable())
+        {
+          processor_thread.join();
+        }
+        throw;
+      }
+    }
+
+    void test_request_processor_rejects_malformed_chunked_request_body()
+    {
+      int sockets[2];
+      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
+      {
+        fail("socketpair failed while setting up malformed chunked body test");
+      }
+
+      FileDescriptorGuard client_socket(sockets[0]);
+      FileDescriptorGuard server_socket(sockets[1]);
+      suppress_sigpipe(client_socket.get());
+
+      const Vajra::request::RequestProcessor processor(Vajra::request::kDefaultMaxRequestHeadBytes);
+      std::thread processor_thread = start_request_processor_thread(processor, server_socket);
+
+      try
+      {
+        if (!send_all(
+                client_socket.get(),
+                "POST /malformed-chunked HTTP/1.1\r\n"
+                "Host: example.test\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                "\r\n"
+                "Z\r\nabc\r\n0\r\n\r\n"))
+        {
+          fail("failed to send malformed chunked request body");
+        }
+
+        const std::string response = read_http_response(client_socket.get());
+        if (response.find("HTTP/1.1 400 Bad Request\r\n") != 0)
+        {
+          fail("malformed chunked request body did not receive a 400 response");
         }
 
         client_socket.close_if_open();
@@ -976,6 +1258,11 @@ namespace VajraSpecCpp
     test_request_processor_handles_pipelined_read_ahead_without_losing_the_next_request();
     test_request_processor_closes_after_parse_error_response();
     test_request_processor_closes_after_request_body_framing();
+    test_request_processor_reads_fragmented_fixed_length_request_body();
+    test_request_processor_decodes_chunked_request_body();
+    test_request_processor_decodes_chunked_request_body_with_extensions_and_trailers();
+    test_request_processor_rejects_conflicting_request_body_framing();
+    test_request_processor_rejects_malformed_chunked_request_body();
     test_request_processor_returns_internal_server_error_when_executor_raises();
     test_request_processor_returns_bad_request_when_executor_raises_head_error();
     test_request_processor_returns_internal_server_error_when_executor_response_is_invalid();

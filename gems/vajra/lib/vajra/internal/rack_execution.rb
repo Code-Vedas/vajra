@@ -25,7 +25,7 @@ module Vajra
         app.method(:call)
 
         APP_MUTEX.synchronize { APP_STATE.app = app }
-        __native_set_callback__(proc { |env_entries| Vajra::Internal::RackExecution.call(env_entries) })
+        __native_set_callback__(proc { |env_entries, request_body| Vajra::Internal::RackExecution.call(env_entries, request_body) })
         app
       rescue NameError
         raise TypeError, 'Rack app must respond to #call'
@@ -40,13 +40,13 @@ module Vajra
         !current_app.equal?(nil)
       end
 
-      def call(env_entries)
+      def call(env_entries, request_body)
         body = UNSET_BODY
         body_close_managed = false
         app = current_app
         return nil if app.equal?(nil)
 
-        env = build_env(env_entries)
+        env = build_env(env_entries, request_body)
         status, headers, body = app.call(env)
         normalized_response = [
           Integer(status),
@@ -61,7 +61,7 @@ module Vajra
         close_body(body) if !body_close_managed && !body.equal?(UNSET_BODY)
       end
 
-      def build_env(env_entries)
+      def build_env(env_entries, request_body)
         env = {}
         env_entries.each do |key, value|
           env[key] = value
@@ -71,7 +71,7 @@ module Vajra
         env['QUERY_STRING'] ||= ''
         env['rack.version'] = RACK_VERSION
         env['rack.url_scheme'] ||= 'http'
-        env['rack.input'] = StringIO.new(''.b)
+        env['rack.input'] = StringIO.new(String(request_body).b)
         env['rack.errors'] = $stderr
         env['rack.multithread'] = false
         env['rack.multiprocess'] = false

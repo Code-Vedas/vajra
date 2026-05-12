@@ -27,7 +27,7 @@ module Vajra
       def self.install!: (_RackApp) -> _RackApp
       def self.uninstall!: () -> nil
       def self.installed?: () -> bool
-      def self.call: (Array[[String, String]]) -> [Integer, Array[[String, String]], String]?
+      def self.call: (Array[[String, String]], String) -> [Integer, Array[[String, String]], String]?
       def self.__native_set_callback__: (Proc | nil) -> (Proc | nil)
     end
   end

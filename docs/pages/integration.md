@@ -62,8 +62,11 @@ The Rack environment translation contract is explicit:
 - request headers are translated into Rack-compatible environment keys, with
   `CONTENT_TYPE` and `CONTENT_LENGTH` preserved as CGI exceptions and all other
   request headers surfaced as `HTTP_*`
-- the initial Rack bridge keeps `rack.input` present as an empty placeholder
-  object until request-body transport is introduced as its own contract
+- `rack.input` is a buffered binary input object populated from supported
+  request bodies
+- the current request-body baseline accepts fixed-length bodies and HTTP/1.1
+  chunked transfer coding, consumes trailers without surfacing them into the
+  Rack env, and still closes the connection after body-bearing requests
 
 ## Rails Integration
 

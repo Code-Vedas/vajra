@@ -13,6 +13,7 @@
 #include "ruby/thread.h"
 
 #include <atomic>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -22,6 +23,7 @@
 namespace
 {
   std::atomic<bool> rack_execution_callback_installed_flag{false};
+  std::mutex rack_execution_callback_mutex;
   VALUE rack_execution_callback = Qnil;
   ID id_message_ivar;
 
@@ -72,14 +74,20 @@ namespace
   VALUE protected_execute_rack_request(VALUE data)
   {
     auto *context = reinterpret_cast<ExecutionCallContext *>(data);
-    if (NIL_P(rack_execution_callback))
+    VALUE callback = Qnil;
+    {
+      const std::lock_guard<std::mutex> callback_lock(rack_execution_callback_mutex);
+      callback = rack_execution_callback;
+    }
+
+    if (NIL_P(callback))
     {
       return Qnil;
     }
 
     VALUE env_entries = ruby_env_entries_from(*context->env_entries);
     VALUE arguments[] = {env_entries};
-    return rb_proc_call(rack_execution_callback, rb_ary_new_from_values(1, arguments));
+    return rb_proc_call(callback, rb_ary_new_from_values(1, arguments));
   }
 
   std::string exception_message(VALUE exception)
@@ -375,7 +383,10 @@ void Vajra::rack::initialize_rack_execution_bridge()
 
 void Vajra::rack::set_rack_execution_callback(VALUE callback)
 {
-  rack_execution_callback = callback;
+  {
+    const std::lock_guard<std::mutex> callback_lock(rack_execution_callback_mutex);
+    rack_execution_callback = callback;
+  }
   rack_execution_callback_installed_flag.store(!NIL_P(callback), std::memory_order_release);
 }
 

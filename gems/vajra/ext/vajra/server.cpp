@@ -22,12 +22,14 @@
 
 namespace
 {
+  constexpr const char *kUnknownSocketAddress = "0.0.0.0";
+
   std::string socket_address(sockaddr_in address)
   {
     char buffer[INET_ADDRSTRLEN] = {0};
     if (inet_ntop(AF_INET, &address.sin_addr, buffer, sizeof(buffer)) == nullptr)
     {
-      return "";
+      return kUnknownSocketAddress;
     }
 
     return buffer;

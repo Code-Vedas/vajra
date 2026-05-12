@@ -14,6 +14,7 @@ module Vajra
       module_function
 
       RACK_VERSION = [1, 6].freeze
+      UNSET_BODY = Object.new.freeze
 
       # Stores the currently installed Rack-compatible app.
       AppState = Struct.new(:app)
@@ -44,17 +45,20 @@ module Vajra
         return nil if app.equal?(nil)
 
         env = build_env(env_entries)
+        body = UNSET_BODY
         status, headers, body = app.call(env)
-        body_collected = false
+        body_close_managed = false
         normalized_response = [
           Integer(status),
           normalize_headers(headers),
-          collect_body(body)
+          begin
+            body_close_managed = true
+            collect_body(body)
+          end
         ]
-        body_collected = true
         normalized_response
       ensure
-        close_body(body) if defined?(body) && !body.nil? && !body_collected
+        close_body(body) if !body_close_managed && !body.equal?(UNSET_BODY)
       end
 
       def build_env(env_entries)

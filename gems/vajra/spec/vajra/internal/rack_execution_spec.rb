@@ -152,4 +152,27 @@ RSpec.describe Vajra::Internal::RackExecution do
     expect { described_class.call([%w[REQUEST_METHOD GET]]) }.to raise_error(ArgumentError)
     expect(closing_body.closed?).to be(true)
   end
+
+  it 'closes the response body exactly once when body collection raises' do
+    closing_body = Class.new do
+      def initialize
+        @close_calls = 0
+      end
+
+      attr_reader :close_calls
+
+      def each
+        raise 'body exploded'
+      end
+
+      def close
+        @close_calls += 1
+      end
+    end.new
+
+    described_class.install!(->(_env) { [200, {}, closing_body] })
+
+    expect { described_class.call([%w[REQUEST_METHOD GET]]) }.to raise_error(RuntimeError, 'body exploded')
+    expect(closing_body.close_calls).to eq(1)
+  end
 end

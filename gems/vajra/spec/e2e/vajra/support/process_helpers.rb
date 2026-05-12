@@ -12,7 +12,7 @@ module VajraE2EProcessHelpers
     loop do
       captured << output.read_nonblock(4096)
     end
-  rescue IO::WaitReadable, EOFError
+  rescue IO::WaitReadable, EOFError, IOError, Errno::EIO
     captured
   end
 

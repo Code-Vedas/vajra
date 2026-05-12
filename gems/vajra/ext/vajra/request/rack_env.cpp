@@ -17,32 +17,8 @@ namespace
 
   bool valid_header_name_character(unsigned char character)
   {
-    if ((character >= '0' && character <= '9') || (character >= 'A' && character <= 'Z') ||
-        (character >= 'a' && character <= 'z'))
-    {
-      return true;
-    }
-
-    switch (character)
-    {
-      case '!':
-      case '#':
-      case '$':
-      case '%':
-      case '&':
-      case '\'':
-      case '*':
-      case '+':
-      case '-':
-      case '.':
-      case '^':
-      case '`':
-      case '|':
-      case '~':
-        return true;
-      default:
-        return false;
-    }
+    return (character >= '0' && character <= '9') || (character >= 'A' && character <= 'Z') ||
+           (character >= 'a' && character <= 'z') || character == '-';
   }
 
   bool valid_header_value_character(unsigned char character)

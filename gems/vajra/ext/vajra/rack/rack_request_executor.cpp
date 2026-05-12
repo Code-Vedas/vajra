@@ -25,7 +25,7 @@ namespace
   std::atomic<bool> rack_execution_callback_installed_flag{false};
   std::mutex rack_execution_callback_mutex;
   VALUE rack_execution_callback = Qnil;
-  ID id_message_ivar;
+  ID id_exception_message;
 
   struct ExecutionCallContext
   {
@@ -42,6 +42,12 @@ namespace
   };
 
   std::string exception_message(VALUE exception);
+
+  VALUE protected_exception_message(VALUE data)
+  {
+    auto *exception = reinterpret_cast<VALUE *>(data);
+    return rb_funcall(*exception, id_exception_message, 0);
+  }
 
   std::string ruby_string_value(VALUE value)
   {
@@ -93,7 +99,14 @@ namespace
   std::string exception_message(VALUE exception)
   {
     const std::string class_name = rb_obj_classname(exception);
-    const VALUE message = rb_ivar_get(exception, id_message_ivar);
+    int state = 0;
+    VALUE message = rb_protect(protected_exception_message, reinterpret_cast<VALUE>(&exception), &state);
+    if (state != 0)
+    {
+      rb_set_errinfo(Qnil);
+      return class_name;
+    }
+
     if (RB_TYPE_P(message, T_STRING) == 0)
     {
       return class_name;
@@ -378,7 +391,7 @@ namespace
 void Vajra::rack::initialize_rack_execution_bridge()
 {
   rb_global_variable(&rack_execution_callback);
-  id_message_ivar = rb_intern("@mesg");
+  id_exception_message = rb_intern("message");
 }
 
 void Vajra::rack::set_rack_execution_callback(VALUE callback)

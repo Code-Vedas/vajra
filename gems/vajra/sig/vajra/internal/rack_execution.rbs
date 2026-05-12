@@ -6,12 +6,16 @@
 module Vajra
   module Internal
     module RackExecution
+      interface _RackHeaderValue
+        def to_s: () -> String
+      end
+
       interface _RackApp
-        def call: (Hash[String, String | bool | IO | StringIO | Array[Integer]]) -> [Integer, Hash[String | Symbol, String] | Array[[String | Symbol, String]] | _RackHeaders, Array[String] | _RackBody]
+        def call: (Hash[String, String | bool | IO | StringIO | Array[Integer]]) -> [Integer | String, Hash[String | Symbol, _RackHeaderValue] | Array[[String | Symbol, _RackHeaderValue]] | _RackHeaders, Array[String] | _RackBody]
       end
 
       interface _RackHeaders
-        def each: () { (String | Symbol, String) -> void } -> void
+        def each: () { (String | Symbol, _RackHeaderValue) -> void } -> void
       end
 
       interface _RackBody

@@ -13,7 +13,6 @@
 #include "ruby/thread.h"
 
 #include <atomic>
-#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -247,15 +246,15 @@ namespace
       throw std::runtime_error("Rack execution returned a non-integer HTTP status code");
     }
 
-    const long status_code = NUM2LONG(status);
+    if (RB_FIXNUM_P(status) == 0)
+    {
+      throw std::runtime_error("Rack execution returned an unrepresentable HTTP status code");
+    }
+
+    const long status_code = FIX2LONG(status);
     if (status_code < 100 || status_code > 599)
     {
       throw std::runtime_error("Rack execution returned an out-of-range HTTP status code");
-    }
-
-    if (status_code > std::numeric_limits<int>::max())
-    {
-      throw std::runtime_error("Rack execution returned an unrepresentable HTTP status code");
     }
 
     return static_cast<int>(status_code);

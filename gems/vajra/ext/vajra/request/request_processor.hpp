@@ -13,6 +13,7 @@
 #include "response/response_writer.hpp"
 
 #include <cstddef>
+#include <exception>
 #include <memory>
 
 namespace Vajra

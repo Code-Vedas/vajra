@@ -41,13 +41,13 @@ module Vajra
       end
 
       def call(env_entries)
+        body = UNSET_BODY
+        body_close_managed = false
         app = current_app
         return nil if app.equal?(nil)
 
         env = build_env(env_entries)
-        body = UNSET_BODY
         status, headers, body = app.call(env)
-        body_close_managed = false
         normalized_response = [
           Integer(status),
           normalize_headers(headers),

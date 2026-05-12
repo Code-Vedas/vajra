@@ -36,18 +36,11 @@ module VajraE2EHttpHelpers
       response << socket.readpartial(4096) until response.include?("\r\n\r\n")
 
       headers, body = response.split("\r\n\r\n", 2)
-      content_length_header = headers.lines.find { |line| line.match?(/\Acontent-length:/i) }
-      content_length = content_length_header ? Integer(content_length_header.split(':', 2).last.strip) : 0
+      content_length = http_content_length(headers)
 
       body << socket.readpartial(4096) while body.bytesize < content_length
 
-      complete_response = String.new(encoding: Encoding::BINARY)
-      complete_response << headers
-      complete_response << "\r\n\r\n".b
-      complete_response << body.byteslice(0, content_length)
-      trailing_bytes = body.byteslice(content_length..) || String.new(encoding: Encoding::BINARY)
-
-      [parse_http_response(complete_response), trailing_bytes]
+      [parse_http_response(http_complete_response(headers, body, content_length)), http_trailing_bytes(body, content_length)]
     end
   rescue EOFError, Errno::ECONNRESET => e
     raise e.class, http_read_failure_message(e, request_label, wait_thread, output, buffered_bytes, response), e.backtrace
@@ -70,6 +63,25 @@ module VajraE2EHttpHelpers
     message << " response_so_far=#{response.inspect}" if response.bytesize > buffered_bytes.bytesize
     message << " process=#{process_diagnostics(wait_thread, output)}" if wait_thread && output
     message
+  end
+
+  def http_content_length(headers)
+    content_length_header = headers.lines.find { |line| line.match?(/\Acontent-length:/i) }
+    return 0 unless content_length_header
+
+    Integer(content_length_header.split(':', 2).last.strip)
+  end
+
+  def http_complete_response(headers, body, content_length)
+    complete_response = String.new(encoding: Encoding::BINARY)
+    complete_response << headers
+    complete_response << "\r\n\r\n".b
+    complete_response << body.byteslice(0, content_length)
+    complete_response
+  end
+
+  def http_trailing_bytes(body, content_length)
+    body.byteslice(content_length..) || String.new(encoding: Encoding::BINARY)
   end
 
   def request_response(port: disposable_listener_port)

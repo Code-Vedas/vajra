@@ -71,7 +71,7 @@ module Vajra
         env['QUERY_STRING'] ||= ''
         env['rack.version'] = RACK_VERSION
         env['rack.url_scheme'] ||= 'http'
-        env['rack.input'] = StringIO.new(String(request_body).b)
+        env['rack.input'] = StringIO.new(binary_request_body(request_body))
         env['rack.errors'] = $stderr
         env['rack.multithread'] = false
         env['rack.multiprocess'] = false
@@ -79,6 +79,14 @@ module Vajra
         env
       end
       private_class_method :build_env
+
+      def binary_request_body(request_body)
+        body = String(request_body)
+        body = body.dup if body.frozen?
+        body.force_encoding(Encoding::BINARY) unless body.encoding == Encoding::BINARY
+        body
+      end
+      private_class_method :binary_request_body
 
       def normalize_headers(headers)
         normalized_headers = []

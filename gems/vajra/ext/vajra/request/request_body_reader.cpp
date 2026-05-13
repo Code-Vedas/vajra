@@ -40,6 +40,16 @@ namespace
     throw Vajra::request::bad_request_error(bad_request_message_for_body_read());
   }
 
+  [[noreturn]] void raise_request_body_too_large()
+  {
+    throw Vajra::request::bad_request_error("request body exceeds maximum size");
+  }
+
+  [[noreturn]] void raise_request_body_metadata_too_large()
+  {
+    throw Vajra::request::bad_request_error("request body metadata exceeds maximum size");
+  }
+
   std::size_t parse_decimal_content_length(const std::string &value)
   {
     const std::string normalized = Vajra::request::strip_http_whitespace(value);
@@ -152,6 +162,44 @@ namespace
     return BodyReadPlan{BodyFraming::content_length, content_length};
   }
 
+  std::size_t unread_bytes(const std::string &buffer, std::size_t cursor)
+  {
+    return buffer.size() - cursor;
+  }
+
+  void compact_consumed_prefix(std::string &buffer, std::size_t &cursor)
+  {
+    if (cursor == 0)
+    {
+      return;
+    }
+
+    if (cursor >= buffer.size())
+    {
+      buffer.clear();
+      cursor = 0;
+      return;
+    }
+
+    if (cursor < 4096 && cursor * 2 < buffer.size())
+    {
+      return;
+    }
+
+    buffer.erase(0, cursor);
+    cursor = 0;
+  }
+
+  std::string unread_suffix(std::string &buffer, std::size_t cursor)
+  {
+    if (cursor == 0)
+    {
+      return std::move(buffer);
+    }
+
+    return buffer.substr(cursor);
+  }
+
   void append_socket_bytes(std::string &buffer, int client_fd)
   {
     char chunk[4096];
@@ -179,24 +227,30 @@ namespace
     }
   }
 
-  void ensure_buffer_bytes(std::string &buffer, std::size_t expected_size, int client_fd)
+  void ensure_buffer_bytes(std::string &buffer, std::size_t cursor, std::size_t expected_size, int client_fd)
   {
-    while (buffer.size() < expected_size)
+    while (unread_bytes(buffer, cursor) < expected_size)
     {
       append_socket_bytes(buffer, client_fd);
     }
   }
 
-  std::string read_line(std::string &buffer, int client_fd)
+  std::string read_line(std::string &buffer, std::size_t &cursor, int client_fd, std::size_t max_line_bytes)
   {
     while (true)
     {
-      const std::size_t line_end = buffer.find("\r\n");
+      const std::size_t line_end = buffer.find("\r\n", cursor);
       if (line_end != std::string::npos)
       {
-        const std::string line = buffer.substr(0, line_end);
-        buffer.erase(0, line_end + 2);
+        const std::string line = buffer.substr(cursor, line_end - cursor);
+        cursor = line_end + 2;
+        compact_consumed_prefix(buffer, cursor);
         return line;
+      }
+
+      if (unread_bytes(buffer, cursor) > max_line_bytes)
+      {
+        raise_request_body_metadata_too_large();
       }
 
       append_socket_bytes(buffer, client_fd);
@@ -259,11 +313,11 @@ namespace
     }
   }
 
-  void consume_trailers(std::string &buffer, int client_fd)
+  void consume_trailers(std::string &buffer, std::size_t &cursor, int client_fd, std::size_t max_trailer_line_bytes)
   {
     while (true)
     {
-      const std::string trailer_line = read_line(buffer, client_fd);
+      const std::string trailer_line = read_line(buffer, cursor, client_fd, max_trailer_line_bytes);
       if (trailer_line.empty())
       {
         return;
@@ -276,35 +330,56 @@ namespace
   Vajra::request::BodyReadResult read_content_length_body(
       int client_fd,
       std::size_t content_length,
-      std::string buffered_bytes)
+      std::string buffered_bytes,
+      std::size_t max_request_body_bytes)
   {
-    ensure_buffer_bytes(buffered_bytes, content_length, client_fd);
+    if (content_length > max_request_body_bytes)
+    {
+      raise_request_body_too_large();
+    }
+
+    const std::size_t body_start = 0;
+    ensure_buffer_bytes(buffered_bytes, body_start, content_length, client_fd);
     return Vajra::request::BodyReadResult{
-        buffered_bytes.substr(0, content_length),
-        ""};
+        buffered_bytes.substr(body_start, content_length),
+        buffered_bytes.substr(body_start + content_length)};
   }
 
-  Vajra::request::BodyReadResult read_chunked_body(int client_fd, std::string buffered_bytes)
+  Vajra::request::BodyReadResult read_chunked_body(
+      int client_fd,
+      std::string buffered_bytes,
+      std::size_t max_request_body_bytes,
+      std::size_t max_chunk_line_bytes,
+      std::size_t max_trailer_line_bytes)
   {
     std::string body;
+    std::size_t cursor = 0;
 
     while (true)
     {
-      const std::size_t chunk_size = parse_chunk_size(read_line(buffered_bytes, client_fd));
+      const std::size_t chunk_size = parse_chunk_size(
+          read_line(buffered_bytes, cursor, client_fd, max_chunk_line_bytes));
       if (chunk_size == 0)
       {
-        consume_trailers(buffered_bytes, client_fd);
-        return Vajra::request::BodyReadResult{body, ""};
+        consume_trailers(buffered_bytes, cursor, client_fd, max_trailer_line_bytes);
+        return Vajra::request::BodyReadResult{body, unread_suffix(buffered_bytes, cursor)};
       }
 
-      ensure_buffer_bytes(buffered_bytes, chunk_size + 2, client_fd);
-      body.append(buffered_bytes.data(), chunk_size);
-      if (buffered_bytes[chunk_size] != '\r' || buffered_bytes[chunk_size + 1] != '\n')
+      if (chunk_size > max_request_body_bytes - body.size())
+      {
+        raise_request_body_too_large();
+      }
+
+      ensure_buffer_bytes(buffered_bytes, cursor, chunk_size + 2, client_fd);
+      body.append(buffered_bytes.data() + cursor, chunk_size);
+      cursor += chunk_size;
+      if (buffered_bytes[cursor] != '\r' || buffered_bytes[cursor + 1] != '\n')
       {
         raise_invalid_body_read();
       }
 
-      buffered_bytes.erase(0, chunk_size + 2);
+      cursor += 2;
+      compact_consumed_prefix(buffered_bytes, cursor);
     }
   }
 }
@@ -321,9 +396,18 @@ Vajra::request::BodyReadResult Vajra::request::RequestBodyReader::read(
     case BodyFraming::none:
       return BodyReadResult{"", std::move(buffered_bytes)};
     case BodyFraming::content_length:
-      return read_content_length_body(client_fd, plan.content_length, std::move(buffered_bytes));
+      return read_content_length_body(
+          client_fd,
+          plan.content_length,
+          std::move(buffered_bytes),
+          max_request_body_bytes_);
     case BodyFraming::chunked:
-      return read_chunked_body(client_fd, std::move(buffered_bytes));
+      return read_chunked_body(
+          client_fd,
+          std::move(buffered_bytes),
+          max_request_body_bytes_,
+          max_chunk_line_bytes_,
+          max_trailer_line_bytes_);
   }
 
   raise_invalid_body_read();

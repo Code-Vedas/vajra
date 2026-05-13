@@ -4,6 +4,7 @@
 // LICENSE file in the root directory of this source tree.
 
 #include "request/request_head_size_validator.hpp"
+#include "request/request_body_reader.hpp"
 #include "request/request_processor.hpp"
 #include "response/response_serializer.hpp"
 #include "response/response_writer.hpp"
@@ -756,6 +757,105 @@ namespace VajraSpecCpp
       }
     }
 
+    void test_request_body_reader_preserves_buffered_suffix_after_fixed_length_body()
+    {
+      Vajra::request::RequestBodyReader reader;
+      const Vajra::request::ParsedRequest request{
+          Vajra::request::ParsedRequestLine{"POST", "/", "HTTP/1.1"},
+          {Vajra::request::ParsedHeader{"Content-Length", "4"}}};
+
+      const Vajra::request::BodyReadResult result = reader.read(
+          -1,
+          request,
+          "bodyGET /next HTTP/1.1\r\nHost: example.test\r\n\r\n");
+
+      if (result.body != "body")
+      {
+        fail("fixed-length body reader did not preserve the request body");
+      }
+
+      if (result.remaining_buffered_bytes != "GET /next HTTP/1.1\r\nHost: example.test\r\n\r\n")
+      {
+        fail("fixed-length body reader did not preserve unread buffered bytes");
+      }
+    }
+
+    void test_request_body_reader_preserves_buffered_suffix_after_chunked_body()
+    {
+      Vajra::request::RequestBodyReader reader;
+      const Vajra::request::ParsedRequest request{
+          Vajra::request::ParsedRequestLine{"POST", "/", "HTTP/1.1"},
+          {Vajra::request::ParsedHeader{"Transfer-Encoding", "chunked"}}};
+
+      const Vajra::request::BodyReadResult result = reader.read(
+          -1,
+          request,
+          "3\r\nabc\r\n0\r\nX-Trailer: done\r\n\r\nGET /next HTTP/1.1\r\nHost: example.test\r\n\r\n");
+
+      if (result.body != "abc")
+      {
+        fail("chunked body reader did not decode the request body");
+      }
+
+      if (result.remaining_buffered_bytes != "GET /next HTTP/1.1\r\nHost: example.test\r\n\r\n")
+      {
+        fail("chunked body reader did not preserve unread buffered bytes");
+      }
+    }
+
+    void test_request_body_reader_rejects_oversized_content_length_body()
+    {
+      const Vajra::request::RequestBodyReader reader(4);
+      const Vajra::request::ParsedRequest request{
+          Vajra::request::ParsedRequestLine{"POST", "/", "HTTP/1.1"},
+          {Vajra::request::ParsedHeader{"Content-Length", "5"}}};
+
+      try
+      {
+        (void)reader.read(-1, request, "");
+      }
+      catch (const Vajra::request::HeadError &error)
+      {
+        if (error.kind() != Vajra::request::HeadFailureKind::bad_request ||
+            std::string(error.what()).find("request body exceeds maximum size") == std::string::npos)
+        {
+          fail("oversized content-length body raised the wrong error");
+        }
+
+        return;
+      }
+
+      fail("oversized content-length body was accepted");
+    }
+
+    void test_request_body_reader_rejects_overlong_chunk_metadata()
+    {
+      const Vajra::request::RequestBodyReader reader(
+          Vajra::request::kDefaultMaxRequestBodyBytes,
+          4,
+          Vajra::request::kDefaultMaxTrailerLineBytes);
+      const Vajra::request::ParsedRequest request{
+          Vajra::request::ParsedRequestLine{"POST", "/", "HTTP/1.1"},
+          {Vajra::request::ParsedHeader{"Transfer-Encoding", "chunked"}}};
+
+      try
+      {
+        (void)reader.read(-1, request, "12345");
+      }
+      catch (const Vajra::request::HeadError &error)
+      {
+        if (error.kind() != Vajra::request::HeadFailureKind::bad_request ||
+            std::string(error.what()).find("request body metadata exceeds maximum size") == std::string::npos)
+        {
+          fail("overlong chunk metadata raised the wrong error");
+        }
+
+        return;
+      }
+
+      fail("overlong chunk metadata was accepted");
+    }
+
     void test_request_processor_reads_fragmented_fixed_length_request_body()
     {
       int sockets[2];
@@ -1017,6 +1117,53 @@ namespace VajraSpecCpp
       }
     }
 
+    void test_request_processor_rejects_oversized_request_body()
+    {
+      int sockets[2];
+      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
+      {
+        fail("socketpair failed while setting up oversized request body test");
+      }
+
+      FileDescriptorGuard client_socket(sockets[0]);
+      FileDescriptorGuard server_socket(sockets[1]);
+      suppress_sigpipe(client_socket.get());
+
+      const Vajra::request::RequestProcessor processor(Vajra::request::kDefaultMaxRequestHeadBytes);
+      std::thread processor_thread = start_request_processor_thread(processor, server_socket);
+
+      try
+      {
+        if (!send_all(
+                client_socket.get(),
+                "POST /too-large HTTP/1.1\r\n"
+                "Host: example.test\r\n"
+                "Content-Length: 16777217\r\n"
+                "\r\n"))
+        {
+          fail("failed to send oversized request body framing");
+        }
+
+        const std::string response = read_http_response(client_socket.get());
+        if (response.find("HTTP/1.1 400 Bad Request\r\n") != 0)
+        {
+          fail("oversized request body did not receive a 400 response");
+        }
+
+        client_socket.close_if_open();
+        processor_thread.join();
+      }
+      catch (...)
+      {
+        client_socket.close_if_open();
+        if (processor_thread.joinable())
+        {
+          processor_thread.join();
+        }
+        throw;
+      }
+    }
+
     void test_request_processor_returns_internal_server_error_when_executor_raises()
     {
       int sockets[2];
@@ -1258,11 +1405,16 @@ namespace VajraSpecCpp
     test_request_processor_handles_pipelined_read_ahead_without_losing_the_next_request();
     test_request_processor_closes_after_parse_error_response();
     test_request_processor_closes_after_request_body_framing();
+    test_request_body_reader_preserves_buffered_suffix_after_fixed_length_body();
+    test_request_body_reader_preserves_buffered_suffix_after_chunked_body();
+    test_request_body_reader_rejects_oversized_content_length_body();
+    test_request_body_reader_rejects_overlong_chunk_metadata();
     test_request_processor_reads_fragmented_fixed_length_request_body();
     test_request_processor_decodes_chunked_request_body();
     test_request_processor_decodes_chunked_request_body_with_extensions_and_trailers();
     test_request_processor_rejects_conflicting_request_body_framing();
     test_request_processor_rejects_malformed_chunked_request_body();
+    test_request_processor_rejects_oversized_request_body();
     test_request_processor_returns_internal_server_error_when_executor_raises();
     test_request_processor_returns_bad_request_when_executor_raises_head_error();
     test_request_processor_returns_internal_server_error_when_executor_response_is_invalid();

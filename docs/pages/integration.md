@@ -66,7 +66,8 @@ The Rack environment translation contract is explicit:
   request bodies
 - the current request-body baseline accepts fixed-length bodies and HTTP/1.1
   chunked transfer coding, consumes trailers without surfacing them into the
-  Rack env, and still closes the connection after body-bearing requests
+  Rack env, enforces Vajra's native request-body size limits, and still closes
+  the connection after body-bearing requests
 
 ## Rails Integration
 

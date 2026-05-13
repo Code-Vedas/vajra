@@ -35,6 +35,7 @@ RSpec.describe Vajra::Internal::RackExecution do
 
   it 'builds the Rack env and normalizes the response body and headers' do
     captured_env = nil
+    request_body = "abc\x00".b
     headers = Class.new do
       def each
         yield :content_type, 'text/plain'
@@ -71,7 +72,7 @@ RSpec.describe Vajra::Internal::RackExecution do
         ['QUERY_STRING', 'filter=active'],
         ['rack.url_scheme', 'http']
       ],
-      "abc\x00".b
+      request_body
     )
 
     expect(status).to eq(200)
@@ -90,6 +91,7 @@ RSpec.describe Vajra::Internal::RackExecution do
       'rack.run_once' => false
     )
     expect(captured_env.fetch('rack.input').external_encoding).to eq(Encoding::BINARY)
+    expect(captured_env.fetch('rack.input').string).to equal(request_body)
     expect(captured_env.fetch('rack.input').read(2)).to eq('ab')
     expect(captured_env.fetch('rack.input').read).to eq("c\x00".b)
     captured_env.fetch('rack.input').rewind
@@ -118,6 +120,23 @@ RSpec.describe Vajra::Internal::RackExecution do
 
     expect(body.encoding).to eq(Encoding::BINARY)
     expect(body.bytes).to eq([255, 0, 128])
+  end
+
+  it 'coerces frozen non-binary request bodies into mutable binary rack.input strings' do
+    captured_env = nil
+    request_body = "snowman-\u2603"
+
+    described_class.install!(lambda { |env|
+      captured_env = env
+      [204, {}, []]
+    })
+
+    described_class.call([%w[REQUEST_METHOD POST]], request_body)
+
+    input = captured_env.fetch('rack.input')
+    expect(input.external_encoding).to eq(Encoding::BINARY)
+    expect(input.string).not_to equal(request_body)
+    expect(input.read).to eq(request_body.b)
   end
 
   it 'does not swallow close errors from the response body' do

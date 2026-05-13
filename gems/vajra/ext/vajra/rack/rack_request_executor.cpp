@@ -13,6 +13,7 @@
 #include "ruby/thread.h"
 
 #include <atomic>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -60,9 +61,19 @@ namespace
     return std::string(RSTRING_PTR(value), static_cast<std::size_t>(RSTRING_LEN(value)));
   }
 
+  long ruby_string_length_for(const std::string &value)
+  {
+    if (value.size() > static_cast<std::size_t>(std::numeric_limits<long>::max()))
+    {
+      throw std::runtime_error("native request payload exceeds Ruby string length limit");
+    }
+
+    return static_cast<long>(value.size());
+  }
+
   VALUE ruby_binary_string_from(const std::string &value)
   {
-    VALUE ruby_string = rb_str_new(value.empty() ? "" : value.data(), static_cast<long>(value.size()));
+    VALUE ruby_string = rb_str_new(value.empty() ? "" : value.data(), ruby_string_length_for(value));
     rb_enc_associate_index(ruby_string, rb_ascii8bit_encindex());
     return ruby_string;
   }

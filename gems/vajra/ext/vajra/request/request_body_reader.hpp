@@ -9,6 +9,7 @@
 #include "request_head_types.hpp"
 
 #include <cstddef>
+#include <stdexcept>
 #include <string>
 
 namespace Vajra
@@ -23,6 +24,14 @@ namespace Vajra
     {
       std::string body;
       std::string remaining_buffered_bytes;
+    };
+
+    class BodyReadIncompleteError : public std::runtime_error
+    {
+    public:
+      BodyReadIncompleteError() : std::runtime_error("request body read incomplete")
+      {
+      }
     };
 
     class RequestBodyReader

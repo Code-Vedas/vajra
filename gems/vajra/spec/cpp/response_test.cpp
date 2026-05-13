@@ -1192,6 +1192,67 @@ namespace VajraSpecCpp
       }
     }
 
+    void test_request_processor_closes_quietly_when_request_body_is_incomplete()
+    {
+      int sockets[2];
+      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
+      {
+        fail("socketpair failed while setting up incomplete request body test");
+      }
+
+      FileDescriptorGuard client_socket(sockets[0]);
+      FileDescriptorGuard server_socket(sockets[1]);
+      suppress_sigpipe(client_socket.get());
+
+      const auto request_executor = std::make_shared<EchoRequestBodyExecutor>();
+      const Vajra::request::RequestProcessor processor(
+          Vajra::request::kDefaultMaxRequestHeadBytes,
+          request_executor);
+      std::thread processor_thread = start_request_processor_thread(processor, server_socket);
+
+      try
+      {
+        if (!send_all(
+                client_socket.get(),
+                "POST /partial HTTP/1.1\r\n"
+                "Host: example.test\r\n"
+                "Content-Length: 8\r\n"
+                "\r\n"
+                "body"))
+        {
+          fail("failed to send partial request body");
+        }
+
+        if (shutdown(client_socket.get(), SHUT_WR) < 0)
+        {
+          fail("failed to half-close partial request body socket");
+        }
+
+        if (!peer_closed_within(client_socket.get(), 500))
+        {
+          fail("request processor did not close after an incomplete request body");
+        }
+
+        const std::string response = read_all(client_socket.get());
+        if (!response.empty())
+        {
+          fail("incomplete request body unexpectedly produced a response");
+        }
+
+        client_socket.close_if_open();
+        processor_thread.join();
+      }
+      catch (...)
+      {
+        client_socket.close_if_open();
+        if (processor_thread.joinable())
+        {
+          processor_thread.join();
+        }
+        throw;
+      }
+    }
+
     void test_request_processor_returns_internal_server_error_when_executor_raises()
     {
       int sockets[2];
@@ -1444,6 +1505,7 @@ namespace VajraSpecCpp
     test_request_processor_rejects_conflicting_request_body_framing();
     test_request_processor_rejects_malformed_chunked_request_body();
     test_request_processor_rejects_oversized_request_body();
+    test_request_processor_closes_quietly_when_request_body_is_incomplete();
     test_request_processor_returns_internal_server_error_when_executor_raises();
     test_request_processor_returns_bad_request_when_executor_raises_head_error();
     test_request_processor_returns_internal_server_error_when_executor_response_is_invalid();

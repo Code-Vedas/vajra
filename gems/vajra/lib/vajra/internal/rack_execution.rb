@@ -81,9 +81,12 @@ module Vajra
       private_class_method :build_env
 
       def binary_request_body(request_body)
-        body = String(request_body)
-        body = body.dup if body.frozen?
-        body.force_encoding(Encoding::BINARY) unless body.encoding == Encoding::BINARY
+        raise TypeError, 'request_body must be a String' unless request_body.is_a?(String)
+
+        body = request_body
+        body_encoding = body.encoding
+        body = body.dup if body.frozen? || body_encoding != Encoding::BINARY
+        body.force_encoding(Encoding::BINARY) unless body_encoding == Encoding::BINARY
         body
       end
       private_class_method :binary_request_body

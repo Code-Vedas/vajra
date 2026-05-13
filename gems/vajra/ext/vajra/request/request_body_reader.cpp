@@ -50,6 +50,11 @@ namespace
     throw Vajra::request::bad_request_error("request body metadata exceeds maximum size");
   }
 
+  [[noreturn]] void raise_incomplete_body_read()
+  {
+    throw Vajra::request::BodyReadIncompleteError();
+  }
+
   std::size_t parse_decimal_content_length(const std::string &value)
   {
     const std::string normalized = Vajra::request::strip_http_whitespace(value);
@@ -214,12 +219,17 @@ namespace
           continue;
         }
 
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+        {
+          raise_incomplete_body_read();
+        }
+
         raise_invalid_body_read();
       }
 
       if (bytes_read == 0)
       {
-        raise_invalid_body_read();
+        raise_incomplete_body_read();
       }
 
       buffer.append(chunk, static_cast<std::size_t>(bytes_read));

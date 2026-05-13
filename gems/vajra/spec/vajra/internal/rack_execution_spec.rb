@@ -137,6 +137,14 @@ RSpec.describe Vajra::Internal::RackExecution do
     expect(input.external_encoding).to eq(Encoding::BINARY)
     expect(input.string).not_to equal(request_body)
     expect(input.read).to eq(request_body.b)
+    expect(request_body.encoding).not_to eq(Encoding::BINARY)
+  end
+
+  it 'rejects non-string request bodies' do
+    described_class.install!(->(_env) { [204, {}, []] })
+
+    expect { described_class.call([%w[REQUEST_METHOD POST]], nil) }
+      .to raise_error(TypeError, 'request_body must be a String')
   end
 
   it 'does not swallow close errors from the response body' do

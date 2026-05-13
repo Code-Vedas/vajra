@@ -856,6 +856,34 @@ namespace VajraSpecCpp
       fail("overlong chunk metadata was accepted");
     }
 
+    void test_request_body_reader_rejects_chunk_metadata_at_limit_without_crlf()
+    {
+      const Vajra::request::RequestBodyReader reader(
+          Vajra::request::kDefaultMaxRequestBodyBytes,
+          4,
+          Vajra::request::kDefaultMaxTrailerLineBytes);
+      const Vajra::request::ParsedRequest request{
+          Vajra::request::ParsedRequestLine{"POST", "/", "HTTP/1.1"},
+          {Vajra::request::ParsedHeader{"Transfer-Encoding", "chunked"}}};
+
+      try
+      {
+        (void)reader.read(-1, request, "1234");
+      }
+      catch (const Vajra::request::HeadError &error)
+      {
+        if (error.kind() != Vajra::request::HeadFailureKind::bad_request ||
+            std::string(error.what()).find("request body metadata exceeds maximum size") == std::string::npos)
+        {
+          fail("chunk metadata at the limit raised the wrong error");
+        }
+
+        return;
+      }
+
+      fail("chunk metadata at the limit was accepted without a terminating CRLF");
+    }
+
     void test_request_processor_reads_fragmented_fixed_length_request_body()
     {
       int sockets[2];
@@ -1409,6 +1437,7 @@ namespace VajraSpecCpp
     test_request_body_reader_preserves_buffered_suffix_after_chunked_body();
     test_request_body_reader_rejects_oversized_content_length_body();
     test_request_body_reader_rejects_overlong_chunk_metadata();
+    test_request_body_reader_rejects_chunk_metadata_at_limit_without_crlf();
     test_request_processor_reads_fragmented_fixed_length_request_body();
     test_request_processor_decodes_chunked_request_body();
     test_request_processor_decodes_chunked_request_body_with_extensions_and_trailers();

@@ -248,7 +248,7 @@ namespace
         return line;
       }
 
-      if (unread_bytes(buffer, cursor) > max_line_bytes)
+      if (unread_bytes(buffer, cursor) >= max_line_bytes)
       {
         raise_request_body_metadata_too_large();
       }

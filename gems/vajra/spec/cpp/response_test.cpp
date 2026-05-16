@@ -884,6 +884,29 @@ namespace VajraSpecCpp
       fail("chunk metadata at the limit was accepted without a terminating CRLF");
     }
 
+    void test_request_body_reader_treats_transport_failures_as_incomplete_reads()
+    {
+      Vajra::request::RequestBodyReader reader;
+      const Vajra::request::ParsedRequest request{
+          Vajra::request::ParsedRequestLine{"POST", "/", "HTTP/1.1"},
+          {Vajra::request::ParsedHeader{"Content-Length", "4"}}};
+
+      try
+      {
+        (void)reader.read(-1, request, "");
+      }
+      catch (const Vajra::request::BodyReadIncompleteError &)
+      {
+        return;
+      }
+      catch (const Vajra::request::HeadError &)
+      {
+        fail("transport failure was misclassified as invalid request body framing");
+      }
+
+      fail("transport failure did not raise an incomplete body read");
+    }
+
     void test_request_processor_reads_fragmented_fixed_length_request_body()
     {
       int sockets[2];
@@ -1499,6 +1522,7 @@ namespace VajraSpecCpp
     test_request_body_reader_rejects_oversized_content_length_body();
     test_request_body_reader_rejects_overlong_chunk_metadata();
     test_request_body_reader_rejects_chunk_metadata_at_limit_without_crlf();
+    test_request_body_reader_treats_transport_failures_as_incomplete_reads();
     test_request_processor_reads_fragmented_fixed_length_request_body();
     test_request_processor_decodes_chunked_request_body();
     test_request_processor_decodes_chunked_request_body_with_extensions_and_trailers();

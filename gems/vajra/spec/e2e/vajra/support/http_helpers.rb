@@ -275,13 +275,16 @@ module VajraE2EHttpHelpers
       selected_port = wait_for_banner(output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
-      chunks.each do |chunk|
-        socket.write(chunk)
-        sleep pause if pause
+      begin
+        chunks.each do |chunk|
+          socket.write(chunk)
+          sleep pause if pause
+        end
+        socket.close_write
+        response = read_raw_http_response(socket, wait_thread:, output:, request_label: 'rack_app_request_chunks_result')
+      ensure
+        socket.close unless socket.closed?
       end
-      socket.close_write
-      response = read_raw_http_response(socket, wait_thread:, output:, request_label: 'rack_app_request_chunks_result')
-      socket.close
 
       status = stop_process(wait_thread)
 

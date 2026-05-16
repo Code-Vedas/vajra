@@ -224,7 +224,7 @@ namespace
           raise_incomplete_body_read();
         }
 
-        raise_invalid_body_read();
+        raise_incomplete_body_read();
       }
 
       if (bytes_read == 0)

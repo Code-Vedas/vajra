@@ -97,21 +97,32 @@ namespace
   VALUE protected_execute_rack_request(VALUE data)
   {
     auto *context = reinterpret_cast<ExecutionCallContext *>(data);
-    VALUE callback = Qnil;
+    try
     {
-      const std::lock_guard<std::mutex> callback_lock(rack_execution_callback_mutex);
-      callback = rack_execution_callback;
-    }
+      VALUE callback = Qnil;
+      {
+        const std::lock_guard<std::mutex> callback_lock(rack_execution_callback_mutex);
+        callback = rack_execution_callback;
+      }
 
-    if (NIL_P(callback))
+      if (NIL_P(callback))
+      {
+        return Qnil;
+      }
+
+      VALUE env_entries = ruby_env_entries_from(*context->env_entries);
+      VALUE request_body = ruby_binary_string_from(*context->request_body);
+      VALUE arguments[] = {env_entries, request_body};
+      return rb_proc_call(callback, rb_ary_new_from_values(2, arguments));
+    }
+    catch (const std::exception &error)
     {
-      return Qnil;
+      rb_raise(rb_eRuntimeError, "%s", error.what());
     }
-
-    VALUE env_entries = ruby_env_entries_from(*context->env_entries);
-    VALUE request_body = ruby_binary_string_from(*context->request_body);
-    VALUE arguments[] = {env_entries, request_body};
-    return rb_proc_call(callback, rb_ary_new_from_values(2, arguments));
+    catch (...)
+    {
+      rb_raise(rb_eRuntimeError, "Rack request execution failed with an unknown native error");
+    }
   }
 
   std::string exception_message(VALUE exception)

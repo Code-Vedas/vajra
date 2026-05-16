@@ -728,7 +728,7 @@ namespace VajraSpecCpp
           fail("request with body framing did not receive the success response");
         }
 
-        if (response.substr(response.size() - 4) != "body")
+        if (response.size() < 4 || response.compare(response.size() - 4, 4, "body") != 0)
         {
           fail("request processor did not transport the fixed-length request body");
         }

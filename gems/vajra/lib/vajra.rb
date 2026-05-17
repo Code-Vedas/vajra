@@ -6,6 +6,7 @@
 # LICENSE file in the root directory of this source tree.
 
 require_relative 'vajra/version'
+require_relative 'vajra/internal/boot'
 require_relative 'vajra/internal/rack_execution'
 
 # Ruby entrypoint for booting the native Vajra HTTP listener.
@@ -29,6 +30,7 @@ module Vajra
   end
 
   NativeExtension.load!
+  Vajra::Internal::Boot.install!
 
   class << self
     def header

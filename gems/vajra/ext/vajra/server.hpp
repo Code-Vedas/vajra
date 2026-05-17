@@ -10,6 +10,7 @@
 #include <functional>
 #include <atomic>
 #include <memory>
+#include <string>
 
 #include "lifecycle/lifecycle_controller.hpp"
 #include "listener/listener_socket.hpp"
@@ -24,7 +25,8 @@ namespace Vajra
     explicit Server(
         int port,
         std::size_t max_request_head_bytes = request::kDefaultMaxRequestHeadBytes,
-        std::shared_ptr<const request::RequestExecutor> request_executor = nullptr);
+        std::shared_ptr<const request::RequestExecutor> request_executor = nullptr,
+        std::string runtime_role = "single_process_bootstrap");
     ~Server();
 
     void start();
@@ -38,6 +40,7 @@ namespace Vajra
     listener::Socket listener_socket_;
     request::RequestProcessor request_processor_;
     lifecycle::Controller lifecycle_;
+    std::string runtime_role_;
 
     void close_listener_fd(bool interrupt_accept);
   };

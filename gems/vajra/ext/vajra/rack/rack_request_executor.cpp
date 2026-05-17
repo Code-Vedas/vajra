@@ -13,6 +13,7 @@
 #include "ruby/thread.h"
 
 #include <atomic>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -30,6 +31,7 @@ namespace
   struct ExecutionCallContext
   {
     const std::vector<Vajra::request::RackEnvEntry> *env_entries;
+    const std::string *request_body;
     std::optional<Vajra::response::Response> response;
     std::string error_message;
   };
@@ -59,16 +61,31 @@ namespace
     return std::string(RSTRING_PTR(value), static_cast<std::size_t>(RSTRING_LEN(value)));
   }
 
+  long ruby_string_length_for(const std::string &value)
+  {
+    if (value.size() > static_cast<std::size_t>(std::numeric_limits<long>::max()))
+    {
+      throw std::runtime_error("native request payload exceeds Ruby string length limit");
+    }
+
+    return static_cast<long>(value.size());
+  }
+
+  VALUE ruby_binary_string_from(const std::string &value)
+  {
+    VALUE ruby_string = rb_str_new(value.empty() ? "" : value.data(), ruby_string_length_for(value));
+    rb_enc_associate_index(ruby_string, rb_ascii8bit_encindex());
+    return ruby_string;
+  }
+
   VALUE ruby_env_entries_from(const std::vector<Vajra::request::RackEnvEntry> &env_entries)
   {
     VALUE ruby_entries = rb_ary_new_capa(static_cast<long>(env_entries.size()));
     for (const Vajra::request::RackEnvEntry &entry : env_entries)
     {
       VALUE pair = rb_ary_new_capa(2);
-      VALUE key = rb_str_new(entry.key.data(), static_cast<long>(entry.key.size()));
-      VALUE value = rb_str_new(entry.value.data(), static_cast<long>(entry.value.size()));
-      rb_enc_associate_index(key, rb_ascii8bit_encindex());
-      rb_enc_associate_index(value, rb_ascii8bit_encindex());
+      VALUE key = ruby_binary_string_from(entry.key);
+      VALUE value = ruby_binary_string_from(entry.value);
       rb_ary_push(pair, key);
       rb_ary_push(pair, value);
       rb_ary_push(ruby_entries, pair);
@@ -80,20 +97,32 @@ namespace
   VALUE protected_execute_rack_request(VALUE data)
   {
     auto *context = reinterpret_cast<ExecutionCallContext *>(data);
-    VALUE callback = Qnil;
+    try
     {
-      const std::lock_guard<std::mutex> callback_lock(rack_execution_callback_mutex);
-      callback = rack_execution_callback;
-    }
+      VALUE callback = Qnil;
+      {
+        const std::lock_guard<std::mutex> callback_lock(rack_execution_callback_mutex);
+        callback = rack_execution_callback;
+      }
 
-    if (NIL_P(callback))
+      if (NIL_P(callback))
+      {
+        return Qnil;
+      }
+
+      VALUE env_entries = ruby_env_entries_from(*context->env_entries);
+      VALUE request_body = ruby_binary_string_from(*context->request_body);
+      VALUE arguments[] = {env_entries, request_body};
+      return rb_proc_call(callback, rb_ary_new_from_values(2, arguments));
+    }
+    catch (const std::exception &error)
     {
-      return Qnil;
+      rb_raise(rb_eRuntimeError, "%s", error.what());
     }
-
-    VALUE env_entries = ruby_env_entries_from(*context->env_entries);
-    VALUE arguments[] = {env_entries};
-    return rb_proc_call(callback, rb_ary_new_from_values(1, arguments));
+    catch (...)
+    {
+      rb_raise(rb_eRuntimeError, "Rack request execution failed with an unknown native error");
+    }
   }
 
   std::string exception_message(VALUE exception)
@@ -362,30 +391,6 @@ namespace
 
     return nullptr;
   }
-  void ensure_bodyless_rack_request(const Vajra::request::RequestContext &request_context)
-  {
-    for (const Vajra::request::ParsedHeader &header : request_context.request.headers)
-    {
-      if (Vajra::request::ascii_case_insensitive_equal(header.name, "Transfer-Encoding"))
-      {
-        throw Vajra::request::bad_request_error(
-            "Rack request execution does not support request bodies until body transport is implemented");
-      }
-
-      if (!Vajra::request::ascii_case_insensitive_equal(header.name, "Content-Length"))
-      {
-        continue;
-      }
-
-      if (Vajra::request::content_length_is_zero(header.value))
-      {
-        continue;
-      }
-
-      throw Vajra::request::bad_request_error(
-          "Rack request execution does not support request bodies until body transport is implemented");
-    }
-  }
 }
 
 void Vajra::rack::initialize_rack_execution_bridge()
@@ -411,10 +416,9 @@ std::optional<Vajra::response::Response> Vajra::rack::RackRequestExecutor::execu
     return std::nullopt;
   }
 
-  ensure_bodyless_rack_request(request_context);
   request::RackEnvBuilder builder;
   const std::vector<request::RackEnvEntry> env_entries = builder.build(request_context);
-  ExecutionCallContext context{&env_entries, std::nullopt, ""};
+  ExecutionCallContext context{&env_entries, &request_context.request_body, std::nullopt, ""};
   rb_thread_call_with_gvl(execute_rack_request_with_gvl, &context);
 
   if (!context.error_message.empty())

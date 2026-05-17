@@ -35,6 +35,7 @@ RSpec.describe Vajra::Internal::RackExecution do
 
   it 'builds the Rack env and normalizes the response body and headers' do
     captured_env = nil
+    request_body = "abc\x00".b
     headers = Class.new do
       def each
         yield :content_type, 'text/plain'
@@ -70,7 +71,8 @@ RSpec.describe Vajra::Internal::RackExecution do
         ['PATH_INFO', '/projects'],
         ['QUERY_STRING', 'filter=active'],
         ['rack.url_scheme', 'http']
-      ]
+      ],
+      request_body
     )
 
     expect(status).to eq(200)
@@ -89,18 +91,22 @@ RSpec.describe Vajra::Internal::RackExecution do
       'rack.run_once' => false
     )
     expect(captured_env.fetch('rack.input').external_encoding).to eq(Encoding::BINARY)
-    expect(captured_env.fetch('rack.input').read).to eq('')
+    expect(captured_env.fetch('rack.input').string).to equal(request_body)
+    expect(captured_env.fetch('rack.input').read(2)).to eq('ab')
+    expect(captured_env.fetch('rack.input').read).to eq("c\x00".b)
+    captured_env.fetch('rack.input').rewind
+    expect(captured_env.fetch('rack.input').read).to eq("abc\x00".b)
     expect(captured_env.fetch('rack.errors')).to equal($stderr)
   end
 
   it 'returns nil when no Rack app is installed' do
-    expect(described_class.call([%w[REQUEST_METHOD GET]])).to be_nil
+    expect(described_class.call([%w[REQUEST_METHOD GET]], ''.b)).to be_nil
   end
 
   it 'collects a body that does not implement close' do
     described_class.install!(->(_env) { [204, {}, []] })
 
-    status, headers, body = described_class.call([%w[REQUEST_METHOD HEAD]])
+    status, headers, body = described_class.call([%w[REQUEST_METHOD HEAD]], ''.b)
 
     expect(status).to eq(204)
     expect(headers).to eq([])
@@ -110,10 +116,35 @@ RSpec.describe Vajra::Internal::RackExecution do
   it 'preserves binary body bytes' do
     described_class.install!(->(_env) { [200, {}, ["\xFF\0\x80".b]] })
 
-    _status, _headers, body = described_class.call([%w[REQUEST_METHOD GET]])
+    _status, _headers, body = described_class.call([%w[REQUEST_METHOD GET]], ''.b)
 
     expect(body.encoding).to eq(Encoding::BINARY)
     expect(body.bytes).to eq([255, 0, 128])
+  end
+
+  it 'coerces frozen non-binary request bodies into mutable binary rack.input strings' do
+    captured_env = nil
+    request_body = "snowman-\u2603"
+
+    described_class.install!(lambda { |env|
+      captured_env = env
+      [204, {}, []]
+    })
+
+    described_class.call([%w[REQUEST_METHOD POST]], request_body)
+
+    input = captured_env.fetch('rack.input')
+    expect(input.external_encoding).to eq(Encoding::BINARY)
+    expect(input.string).not_to equal(request_body)
+    expect(input.read).to eq(request_body.b)
+    expect(request_body.encoding).not_to eq(Encoding::BINARY)
+  end
+
+  it 'rejects non-string request bodies' do
+    described_class.install!(->(_env) { [204, {}, []] })
+
+    expect { described_class.call([%w[REQUEST_METHOD POST]], nil) }
+      .to raise_error(TypeError, 'request_body must be a String')
   end
 
   it 'does not swallow close errors from the response body' do
@@ -129,7 +160,7 @@ RSpec.describe Vajra::Internal::RackExecution do
 
     described_class.install!(->(_env) { [200, {}, closing_body] })
 
-    expect { described_class.call([%w[REQUEST_METHOD GET]]) }.to raise_error(NoMethodError)
+    expect { described_class.call([%w[REQUEST_METHOD GET]], ''.b) }.to raise_error(NoMethodError)
   end
 
   it 'closes the response body when status normalization raises' do
@@ -149,7 +180,7 @@ RSpec.describe Vajra::Internal::RackExecution do
 
     described_class.install!(->(_env) { ['bad-status', {}, closing_body] })
 
-    expect { described_class.call([%w[REQUEST_METHOD GET]]) }.to raise_error(ArgumentError)
+    expect { described_class.call([%w[REQUEST_METHOD GET]], ''.b) }.to raise_error(ArgumentError)
     expect(closing_body.closed?).to be(true)
   end
 
@@ -172,7 +203,7 @@ RSpec.describe Vajra::Internal::RackExecution do
 
     described_class.install!(->(_env) { [200, {}, closing_body] })
 
-    expect { described_class.call([%w[REQUEST_METHOD GET]]) }.to raise_error(RuntimeError, 'body exploded')
+    expect { described_class.call([%w[REQUEST_METHOD GET]], ''.b) }.to raise_error(RuntimeError, 'body exploded')
     expect(closing_body.close_calls).to eq(1)
   end
 end

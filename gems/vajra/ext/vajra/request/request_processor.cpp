@@ -128,7 +128,25 @@ void Vajra::request::RequestProcessor::handle(int client_fd, const SocketContext
     {
       request_context = RequestContext{
           request_head_parser_.parse(read_result.request_head),
-          socket_context};
+          socket_context,
+          ""};
+    }
+    catch (const HeadError &error)
+    {
+      reject_request_head(client_fd, error);
+      return;
+    }
+
+    try
+    {
+      BodyReadResult body_read_result =
+          request_body_reader_.read(client_fd, request_context.request, std::move(buffered_bytes));
+      request_context.request_body = std::move(body_read_result.body);
+      buffered_bytes = std::move(body_read_result.remaining_buffered_bytes);
+    }
+    catch (const BodyReadIncompleteError &)
+    {
+      return;
     }
     catch (const HeadError &error)
     {

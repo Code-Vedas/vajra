@@ -269,4 +269,28 @@ module VajraE2EHttpHelpers
       cleanup_process(wait_thread, output)
     end
   end
+
+  def rack_app_request_chunks_result(script:, chunks:, port: disposable_listener_port, env: {}, pause: nil)
+    Open3.popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      selected_port = wait_for_banner(output)
+
+      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+      begin
+        chunks.each do |chunk|
+          socket.write(chunk)
+          sleep pause if pause
+        end
+        socket.close_write
+        response = read_raw_http_response(socket, wait_thread:, output:, request_label: 'rack_app_request_chunks_result')
+      ensure
+        socket.close unless socket.closed?
+      end
+
+      status = stop_process(wait_thread)
+
+      { exitstatus: status.exitstatus, response:, output: output.read, port: selected_port }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
 end

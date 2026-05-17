@@ -7,6 +7,7 @@
 #define VAJRA_REQUEST_PROCESSOR_HPP
 
 #include "request_context.hpp"
+#include "request_body_reader.hpp"
 #include "request_executor.hpp"
 #include "request_head_parser.hpp"
 #include "request_head_reader.hpp"
@@ -39,6 +40,7 @@ namespace Vajra
 
       HeadReader request_head_reader_;
       RequestHeadParser request_head_parser_;
+      RequestBodyReader request_body_reader_;
       Vajra::response::ResponseWriter response_writer_;
       std::shared_ptr<const RequestExecutor> request_executor_;
     };

@@ -10,14 +10,22 @@ module Vajra
       type boot_diagnostic = [String, String, String]
       type boot_request = Hash[Symbol | String, String | Integer]
       type boot_result = [boot_status, String, boot_diagnostic?]
+      type raw_boot_status = boot_status | :ready | :failed | :pending
+      type raw_boot_diagnostic_hash = {
+        code: String | Symbol | Integer,
+        category: String | Symbol | Integer,
+        message: String | Symbol | Integer
+      }
+      type raw_boot_diagnostic = boot_diagnostic | raw_boot_diagnostic_hash
+      type raw_boot_result = [raw_boot_status, String | Symbol | Integer, raw_boot_diagnostic?]
       type boot_result_hash = {
-        status: boot_status,
-        role: String,
-        diagnostic: boot_diagnostic?
+        status: raw_boot_status,
+        role: String | Symbol | Integer,
+        ?diagnostic: raw_boot_diagnostic?
       }
 
       interface _BootCoordinator
-        def call: (boot_request) -> (boot_result_hash | boot_result | boot_status)
+        def call: (boot_request) -> (boot_result_hash | raw_boot_result | raw_boot_status)
       end
 
       STATUSES: Hash[Symbol, String]

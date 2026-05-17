@@ -856,7 +856,7 @@ namespace VajraSpecCpp
       fail("overlong chunk metadata was accepted");
     }
 
-    void test_request_body_reader_rejects_chunk_metadata_at_limit_without_crlf()
+    void test_request_body_reader_treats_chunk_metadata_at_limit_without_crlf_as_incomplete()
     {
       const Vajra::request::RequestBodyReader reader(
           Vajra::request::kDefaultMaxRequestBodyBytes,
@@ -870,18 +870,12 @@ namespace VajraSpecCpp
       {
         (void)reader.read(-1, request, "1234");
       }
-      catch (const Vajra::request::HeadError &error)
+      catch (const Vajra::request::BodyReadIncompleteError &)
       {
-        if (error.kind() != Vajra::request::HeadFailureKind::bad_request ||
-            std::string(error.what()).find("request body metadata exceeds maximum size") == std::string::npos)
-        {
-          fail("chunk metadata at the limit raised the wrong error");
-        }
-
         return;
       }
 
-      fail("chunk metadata at the limit was accepted without a terminating CRLF");
+      fail("chunk metadata at the limit was not treated as an incomplete read");
     }
 
     void test_request_body_reader_treats_transport_failures_as_incomplete_reads()
@@ -1521,7 +1515,7 @@ namespace VajraSpecCpp
     test_request_body_reader_preserves_buffered_suffix_after_chunked_body();
     test_request_body_reader_rejects_oversized_content_length_body();
     test_request_body_reader_rejects_overlong_chunk_metadata();
-    test_request_body_reader_rejects_chunk_metadata_at_limit_without_crlf();
+    test_request_body_reader_treats_chunk_metadata_at_limit_without_crlf_as_incomplete();
     test_request_body_reader_treats_transport_failures_as_incomplete_reads();
     test_request_processor_reads_fragmented_fixed_length_request_body();
     test_request_processor_decodes_chunked_request_body();

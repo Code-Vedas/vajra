@@ -252,13 +252,20 @@ namespace
       const std::size_t line_end = buffer.find("\r\n", cursor);
       if (line_end != std::string::npos)
       {
+        if (line_end - cursor > max_line_bytes)
+        {
+          raise_request_body_metadata_too_large();
+        }
+
         const std::string line = buffer.substr(cursor, line_end - cursor);
         cursor = line_end + 2;
         compact_consumed_prefix(buffer, cursor);
         return line;
       }
 
-      if (unread_bytes(buffer, cursor) >= max_line_bytes)
+      const std::size_t buffered_line_bytes = unread_bytes(buffer, cursor);
+      if (buffered_line_bytes > max_line_bytes + 1 ||
+          (buffered_line_bytes == max_line_bytes + 1 && buffer[cursor + buffered_line_bytes - 1] != '\r'))
       {
         raise_request_body_metadata_too_large();
       }

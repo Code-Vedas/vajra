@@ -25,7 +25,10 @@ module Vajra
         app.method(:call)
 
         APP_MUTEX.synchronize { APP_STATE.app = app }
-        __native_set_callback__(proc { |env_entries, request_body| Vajra::Internal::RackExecution.call(env_entries, request_body) })
+        # This callback is bootstrap transport only. Later worker IPC routing
+        # must preserve the normalized Rack execution contract without relying
+        # on same-process callback execution as the supported hot path.
+        __native_set_callback__(bootstrap_callback)
         app
       rescue NameError
         raise TypeError, 'Rack app must respond to #call'
@@ -48,15 +51,9 @@ module Vajra
 
         env = build_env(env_entries, request_body)
         status, headers, body = app.call(env)
-        normalized_response = [
-          Integer(status),
-          normalize_headers(headers),
-          begin
-            body_close_managed = true
-            collect_body(body)
-          end
-        ]
-        normalized_response
+        normalize_response(status, headers, body) do
+          body_close_managed = true
+        end
       ensure
         close_body(body) if !body_close_managed && !body.equal?(UNSET_BODY)
       end
@@ -114,6 +111,23 @@ module Vajra
         APP_MUTEX.synchronize { APP_STATE.app }
       end
       private_class_method :current_app
+
+      def bootstrap_callback
+        proc { |env_entries, request_body| Vajra::Internal::RackExecution.call(env_entries, request_body) }
+      end
+      private_class_method :bootstrap_callback
+
+      def normalize_response(status, headers, body)
+        [
+          Integer(status),
+          normalize_headers(headers),
+          begin
+            yield
+            collect_body(body)
+          end
+        ]
+      end
+      private_class_method :normalize_response
 
       def collect_body(body)
         collected_body = String.new(encoding: Encoding::BINARY)

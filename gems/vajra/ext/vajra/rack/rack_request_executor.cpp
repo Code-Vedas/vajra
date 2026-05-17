@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -391,6 +392,30 @@ namespace
 
     return nullptr;
   }
+
+  class SameProcessRackExecutionTransport final : public Vajra::rack::RackExecutionTransport
+  {
+  public:
+    std::optional<Vajra::response::Response> execute(
+        const std::vector<Vajra::request::RackEnvEntry> &env_entries,
+        const std::string &request_body) const override
+    {
+      if (!rack_execution_callback_installed_flag.load(std::memory_order_acquire))
+      {
+        return std::nullopt;
+      }
+
+      ExecutionCallContext context{&env_entries, &request_body, std::nullopt, ""};
+      rb_thread_call_with_gvl(execute_rack_request_with_gvl, &context);
+
+      if (!context.error_message.empty())
+      {
+        throw std::runtime_error("Rack request execution failed: " + context.error_message);
+      }
+
+      return context.response;
+    }
+  };
 }
 
 void Vajra::rack::initialize_rack_execution_bridge()
@@ -408,23 +433,25 @@ void Vajra::rack::set_rack_execution_callback(VALUE callback)
   rack_execution_callback_installed_flag.store(!NIL_P(callback), std::memory_order_release);
 }
 
+Vajra::rack::RackRequestExecutor::RackRequestExecutor()
+    : transport_(std::make_shared<SameProcessRackExecutionTransport>())
+{
+}
+
+Vajra::rack::RackRequestExecutor::RackRequestExecutor(
+    std::shared_ptr<const RackExecutionTransport> transport)
+    : transport_(std::move(transport))
+{
+  if (!transport_)
+  {
+    throw std::invalid_argument("rack execution transport must not be null");
+  }
+}
+
 std::optional<Vajra::response::Response> Vajra::rack::RackRequestExecutor::execute(
     const request::RequestContext &request_context) const
 {
-  if (!rack_execution_callback_installed_flag.load(std::memory_order_acquire))
-  {
-    return std::nullopt;
-  }
-
   request::RackEnvBuilder builder;
   const std::vector<request::RackEnvEntry> env_entries = builder.build(request_context);
-  ExecutionCallContext context{&env_entries, &request_context.request_body, std::nullopt, ""};
-  rb_thread_call_with_gvl(execute_rack_request_with_gvl, &context);
-
-  if (!context.error_message.empty())
-  {
-    throw std::runtime_error("Rack request execution failed: " + context.error_message);
-  }
-
-  return context.response;
+  return transport_->execute(env_entries, request_context.request_body);
 }

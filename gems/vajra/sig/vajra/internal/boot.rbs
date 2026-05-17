@@ -8,15 +8,16 @@ module Vajra
     module Boot
       type boot_status = "ready" | "failed" | "pending"
       type boot_diagnostic = [String, String, String]
+      type boot_request = Hash[Symbol | String, String | Integer]
       type boot_result = [boot_status, String, boot_diagnostic?]
-
-      interface _BootRequest
-        def key?: (Symbol | String) -> bool
-        def fetch: (Symbol | String) -> (String | Integer)
-      end
+      type boot_result_hash = {
+        status: boot_status,
+        role: String,
+        diagnostic: boot_diagnostic?
+      }
 
       interface _BootCoordinator
-        def call: (_BootRequest) -> (boot_result | boot_status)
+        def call: (boot_request) -> (boot_result_hash | boot_result | boot_status)
       end
 
       STATUSES: Hash[Symbol, String]
@@ -28,7 +29,7 @@ module Vajra
       def self.install!: (?_BootCoordinator) -> _BootCoordinator
       def self.uninstall!: () -> nil
       def self.installed?: () -> bool
-      def self.call: (_BootRequest) -> boot_result
+      def self.call: (boot_request) -> boot_result
       def self.__native_set_boot_callback__: (Proc | nil) -> (Proc | nil)
     end
   end

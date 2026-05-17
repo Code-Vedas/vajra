@@ -235,7 +235,9 @@ namespace
 
     if (NIL_P(callback))
     {
-      rb_raise(rb_eRuntimeError, "Ruby boot contract callback is not installed");
+      rb_raise(
+          rb_eRuntimeError,
+          "Ruby boot contract callback is not installed. Require \"vajra\" or call Vajra::Internal::Boot.install! before starting Vajra.");
     }
 
     VALUE boot_request = ruby_boot_request_from(*config);

@@ -213,6 +213,22 @@ RSpec.describe Vajra::Internal::Boot do
     )
   end
 
+  it 'returns a contract failure when a failed boot result omits diagnostics' do
+    described_class.install!(->(_boot_request) { { status: 'failed', role: 'custom_bootstrap' } })
+
+    status, role, diagnostic = described_class.call(
+      port: 3000,
+      max_request_head_bytes: 16_384,
+      runtime_role: 'single_process_bootstrap'
+    )
+
+    expect(status).to eq('failed')
+    expect(role).to eq('single_process_bootstrap')
+    expect(diagnostic).to eq(
+      ['invalid_boot_contract', 'contract', 'Vajra::Internal::Boot::BootContractError: failed boot results must include diagnostic details']
+    )
+  end
+
   it 'returns a contract failure when the coordinator returns an empty role' do
     described_class.install!(->(_boot_request) { { status: 'ready', role: '' } })
 

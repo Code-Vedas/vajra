@@ -107,7 +107,12 @@ module Vajra
         normalized_role = String(role)
         raise BootContractError, 'boot role must not be empty' if normalized_role.empty?
 
-        [normalized_status, normalized_role, normalize_diagnostic(diagnostic)]
+        normalized_diagnostic = normalize_diagnostic(diagnostic)
+        if [normalized_status, normalized_diagnostic] == [STATUSES.fetch(:failed), nil]
+          raise BootContractError, 'failed boot results must include diagnostic details'
+        end
+
+        [normalized_status, normalized_role, normalized_diagnostic]
       end
       private_class_method :normalize_boot_result
 

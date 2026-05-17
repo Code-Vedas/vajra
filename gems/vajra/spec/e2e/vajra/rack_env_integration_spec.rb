@@ -60,7 +60,7 @@ RSpec.describe 'Vajra Rack environment integration', :e2e, :integration do # rub
       request:
         "GET / HTTP/1.1\r\n" \
         "Host: example.test\r\n" \
-        "X_Foo: kept\r\n" \
+        "X-Foo: kept\r\n" \
         "Connection: close\r\n\r\n"
     )
 

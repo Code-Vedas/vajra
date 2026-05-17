@@ -56,6 +56,31 @@ RSpec.describe Vajra::Internal::Boot do
     )
   end
 
+  it 'accepts string-keyed boot requests without symbolizing arbitrary keys' do
+    captured_request = nil
+    described_class.install!(lambda { |boot_request|
+      captured_request = boot_request
+      { status: :ready, role: 'single_process_bootstrap' }
+    })
+
+    status, role, diagnostic = described_class.call(
+      'port' => 3000,
+      'max_request_head_bytes' => 16_384,
+      'runtime_role' => 'single_process_bootstrap',
+      'unexpected_user_key' => 'ignored'
+    )
+
+    expect(status).to eq('ready')
+    expect(role).to eq('single_process_bootstrap')
+    expect(diagnostic).to be_nil
+    expect(captured_request).to include(
+      port: 3000,
+      max_request_head_bytes: 16_384,
+      runtime_role: 'single_process_bootstrap'
+    )
+    expect(captured_request).not_to have_key(:unexpected_user_key)
+  end
+
   it 'returns a structured failed result when the coordinator raises' do
     described_class.install!(->(_boot_request) { raise 'boot exploded' })
 

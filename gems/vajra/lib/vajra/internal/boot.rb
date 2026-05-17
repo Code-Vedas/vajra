@@ -82,11 +82,10 @@ module Vajra
       def normalize_boot_request(boot_request)
         raise BootContractError, 'boot request must be a Hash' unless boot_request.is_a?(Hash)
 
-        request = boot_request.transform_keys(&:to_sym)
         {
-          port: Integer(request.fetch(:port)),
-          max_request_head_bytes: Integer(request.fetch(:max_request_head_bytes)),
-          runtime_role: String(request.fetch(:runtime_role))
+          port: Integer(fetch_boot_request_value(boot_request, :port)),
+          max_request_head_bytes: Integer(fetch_boot_request_value(boot_request, :max_request_head_bytes)),
+          runtime_role: String(fetch_boot_request_value(boot_request, :runtime_role))
         }
       rescue KeyError => e
         raise BootContractError, "missing boot request field: #{e.key}"
@@ -94,6 +93,13 @@ module Vajra
         raise BootContractError, e.message
       end
       private_class_method :normalize_boot_request
+
+      def fetch_boot_request_value(boot_request, key)
+        return boot_request.fetch(key) if boot_request.key?(key)
+
+        boot_request.fetch(String(key))
+      end
+      private_class_method :fetch_boot_request_value
 
       def normalize_boot_result(result)
         status, role, diagnostic = unpack_result(result)

@@ -13,6 +13,7 @@
 #include <limits>
 #include <string>
 #include <sys/socket.h>
+#include <utility>
 #include <vector>
 
 namespace
@@ -410,21 +411,21 @@ Vajra::request::BodyReadResult Vajra::request::RequestBodyReader::read(
 
   switch (plan.framing)
   {
-    case BodyFraming::none:
-      return BodyReadResult{"", std::move(buffered_bytes)};
-    case BodyFraming::content_length:
-      return read_content_length_body(
-          client_fd,
-          plan.content_length,
-          std::move(buffered_bytes),
-          max_request_body_bytes_);
-    case BodyFraming::chunked:
-      return read_chunked_body(
-          client_fd,
-          std::move(buffered_bytes),
-          max_request_body_bytes_,
-          max_chunk_line_bytes_,
-          max_trailer_line_bytes_);
+  case BodyFraming::none:
+    return BodyReadResult{"", std::move(buffered_bytes)};
+  case BodyFraming::content_length:
+    return read_content_length_body(
+        client_fd,
+        plan.content_length,
+        std::move(buffered_bytes),
+        max_request_body_bytes_);
+  case BodyFraming::chunked:
+    return read_chunked_body(
+        client_fd,
+        std::move(buffered_bytes),
+        max_request_body_bytes_,
+        max_chunk_line_bytes_,
+        max_trailer_line_bytes_);
   }
 
   raise_invalid_body_read();

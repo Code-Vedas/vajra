@@ -852,18 +852,26 @@ namespace VajraNative
           stop_requested = true;
         }
       }
-      if (pid <= 0)
-      {
-        return false;
-      }
+  if (pid <= 0)
+  {
+    return false;
+  }
 
-      if (kill(pid, SIGINT) != 0 && errno != ESRCH)
-      {
-        throw std::runtime_error("failed to signal worker shutdown");
-      }
-
+  for (;;)
+  {
+    if (kill(pid, SIGINT) == 0 || errno == ESRCH)
+    {
       return true;
     }
+
+    if (errno == EINTR)
+    {
+      continue;
+    }
+
+    throw std::runtime_error("failed to signal worker shutdown");
+  }
+}
 
     void replay_pending_stop_if_needed()
     {

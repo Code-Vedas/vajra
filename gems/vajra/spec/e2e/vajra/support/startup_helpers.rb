@@ -79,14 +79,16 @@ module VajraE2EStartupHelpers
       Thread.report_on_exception = false
 
       def server_ready?(host, port)
-        socket = TCPSocket.new(host, port)
-        socket.write("GET / HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n")
-        response = socket.readpartial(1024)
-        response.include?("HTTP/1.1 200 OK")
-      rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH, Errno::ECONNRESET, EOFError
+        Timeout.timeout(0.1) do
+          socket = TCPSocket.new(host, port)
+          socket.write("GET / HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n")
+          response = socket.readpartial(1024)
+          response.include?("HTTP/1.1 200 OK")
+        ensure
+          socket&.close
+        end
+      rescue Timeout::Error, Errno::ECONNREFUSED, Errno::EHOSTUNREACH, Errno::ECONNRESET, EOFError
         false
-      ensure
-        socket&.close
       end
 
       Vajra.stop if #{stop_before_start ? 'true' : 'false'}

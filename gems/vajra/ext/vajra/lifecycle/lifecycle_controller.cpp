@@ -96,7 +96,7 @@ namespace Vajra
         }
         else
         {
-          throw std::logic_error("lifecycle can only enter boot-ready from listening or serving");
+          throw std::logic_error("lifecycle can only enter boot-ready from listening, serving, or draining with a bound listener");
         }
       }
 

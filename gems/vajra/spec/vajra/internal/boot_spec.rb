@@ -28,6 +28,13 @@ RSpec.describe Vajra::Internal::Boot do
     expect(described_class.install!(coordinator)).to equal(coordinator)
   end
 
+  it 'returns the default method coordinator when install! is called without arguments' do
+    coordinator = described_class.install!
+
+    expect(coordinator).to be_a(Method)
+    expect(coordinator.name).to eq(:default_coordinator)
+  end
+
   it 'rejects non-callable boot coordinators' do
     expect { described_class.install!(Object.new) }
       .to raise_error(TypeError, 'boot coordinator must respond to #call')

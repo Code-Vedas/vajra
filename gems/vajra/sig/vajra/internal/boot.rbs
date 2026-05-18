@@ -43,6 +43,7 @@ module Vajra
       interface _BootCoordinator
         def call: (coordinator_boot_request) -> (boot_result_hash | raw_boot_result | raw_boot_status)
       end
+      type boot_coordinator = _BootCoordinator | Method
 
       STATUSES: Hash[Symbol, String]
       SINGLE_PROCESS_BOOTSTRAP_ROLE: String
@@ -50,7 +51,7 @@ module Vajra
       class BootContractError < StandardError
       end
 
-      def self.install!: (?_BootCoordinator) -> _BootCoordinator
+      def self.install!: (?boot_coordinator) -> boot_coordinator
       def self.uninstall!: () -> nil
       def self.installed?: () -> bool
       def self.call: (boot_request) -> boot_result

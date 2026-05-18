@@ -44,6 +44,7 @@ namespace
   constexpr const char *kSingleProcessRuntimeRole = "single_process_bootstrap";
   constexpr const char *kSingleProcessMode = "single_process";
   constexpr int kWorkerProcessCount = 1;
+  constexpr std::size_t kMaxWorkerBootstrapStringPayloadBytes = 64 * 1024;
 
   struct RuntimeConfig
   {
@@ -475,6 +476,10 @@ namespace
     if (!read_exact_or_eof(fd, &length, sizeof(length)))
     {
       throw std::runtime_error("worker bootstrap pipe closed before string payload length");
+    }
+    if (length > kMaxWorkerBootstrapStringPayloadBytes)
+    {
+      throw std::runtime_error("worker bootstrap pipe string payload exceeds maximum size");
     }
     std::string value(length, '\0');
     if (length > 0)

@@ -111,7 +111,7 @@ module Vajra
       def normalize_boot_result(result)
         status, role, diagnostic = unpack_result(result)
         normalized_status = normalize_status(status)
-        normalized_role = String(role)
+        normalized_role = coerce_contract_string(role, 'boot role')
         raise BootContractError, 'boot role must not be empty' if normalized_role.empty?
 
         normalized_diagnostic = normalize_diagnostic(diagnostic)
@@ -136,7 +136,7 @@ module Vajra
       private_class_method :unpack_result
 
       def normalize_status(status)
-        normalized_status = String(status)
+        normalized_status = coerce_contract_string(status, 'boot status')
         return normalized_status if STATUSES.value?(normalized_status)
 
         raise BootContractError, "unsupported boot status: #{normalized_status}"
@@ -169,9 +169,16 @@ module Vajra
       private_class_method :diagnostic_values_from
 
       def stringify_diagnostic_values(diagnostic_values)
-        diagnostic_values.map { |value| String(value) }
+        diagnostic_values.map { |value| coerce_contract_string(value, 'boot diagnostic value') }
       end
       private_class_method :stringify_diagnostic_values
+
+      def coerce_contract_string(value, field_name)
+        String(value)
+      rescue TypeError, ArgumentError => e
+        raise BootContractError, "#{field_name} must be coercible to String: #{e.message}"
+      end
+      private_class_method :coerce_contract_string
 
       def invalid_boot_diagnostic!
         raise BootContractError, 'boot diagnostic must be a Hash or 3-item Array'

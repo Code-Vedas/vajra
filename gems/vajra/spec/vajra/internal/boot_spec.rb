@@ -268,6 +268,48 @@ RSpec.describe Vajra::Internal::Boot do
     )
   end
 
+  it 'returns a contract failure when boot status coercion raises' do
+    bad_status = Object.new
+    def bad_status.to_s
+      raise TypeError, 'status boom'
+    end
+
+    described_class.install!(->(_boot_request) { [bad_status, 'custom_bootstrap', nil] })
+
+    status, role, diagnostic = described_class.call(
+      port: 3000,
+      max_request_head_bytes: 16_384,
+      runtime_role: 'single_process_bootstrap'
+    )
+
+    expect(status).to eq('failed')
+    expect(role).to eq('single_process_bootstrap')
+    expect(diagnostic).to eq(
+      ['invalid_boot_contract', 'contract', 'Vajra::Internal::Boot::BootContractError: boot status must be coercible to String: status boom']
+    )
+  end
+
+  it 'returns a contract failure when boot role coercion raises' do
+    bad_role = Object.new
+    def bad_role.to_s
+      raise TypeError, 'role boom'
+    end
+
+    described_class.install!(->(_boot_request) { ['ready', bad_role, nil] })
+
+    status, role, diagnostic = described_class.call(
+      port: 3000,
+      max_request_head_bytes: 16_384,
+      runtime_role: 'single_process_bootstrap'
+    )
+
+    expect(status).to eq('failed')
+    expect(role).to eq('single_process_bootstrap')
+    expect(diagnostic).to eq(
+      ['invalid_boot_contract', 'contract', 'Vajra::Internal::Boot::BootContractError: boot role must be coercible to String: role boom']
+    )
+  end
+
   it 'returns a contract failure when the coordinator returns an invalid diagnostic shape' do
     described_class.install!(lambda do |_boot_request|
       { status: 'failed', role: 'custom_bootstrap', diagnostic: 'bad diagnostic' }
@@ -283,6 +325,29 @@ RSpec.describe Vajra::Internal::Boot do
     expect(role).to eq('single_process_bootstrap')
     expect(diagnostic).to eq(
       ['invalid_boot_contract', 'contract', 'Vajra::Internal::Boot::BootContractError: boot diagnostic must be a Hash or 3-item Array']
+    )
+  end
+
+  it 'returns a contract failure when diagnostic value coercion raises' do
+    bad_value = Object.new
+    def bad_value.to_s
+      raise TypeError, 'diagnostic boom'
+    end
+
+    described_class.install!(lambda do |_boot_request|
+      { status: 'failed', role: 'custom_bootstrap', diagnostic: [:boot_failed, :boot, bad_value] }
+    end)
+
+    status, role, diagnostic = described_class.call(
+      port: 3000,
+      max_request_head_bytes: 16_384,
+      runtime_role: 'single_process_bootstrap'
+    )
+
+    expect(status).to eq('failed')
+    expect(role).to eq('single_process_bootstrap')
+    expect(diagnostic).to eq(
+      ['invalid_boot_contract', 'contract', 'Vajra::Internal::Boot::BootContractError: boot diagnostic value must be coercible to String: diagnostic boom']
     )
   end
 

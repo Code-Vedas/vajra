@@ -82,10 +82,11 @@ module VajraE2EStartupHelpers
         socket = TCPSocket.new(host, port)
         socket.write("GET / HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n")
         response = socket.readpartial(1024)
-        socket.close
         response.include?("HTTP/1.1 200 OK")
       rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH, EOFError
         false
+      ensure
+        socket&.close
       end
 
       server_thread = Thread.new { Vajra.start }

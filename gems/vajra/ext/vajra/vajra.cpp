@@ -10,6 +10,7 @@
 #include "ruby/thread.h"
 
 #include <csignal>
+#include <signal.h>
 #include <cstdlib>
 #include <cerrno>
 #include <exception>
@@ -23,6 +24,7 @@
 #include <cstdint>
 #include <string>
 #include <sys/wait.h>
+#include <unistd.h>
 
 namespace
 {
@@ -104,6 +106,12 @@ namespace
   struct ServerRunContext
   {
     Vajra::Server *server;
+    std::string error_message;
+  };
+
+  struct WorkerWaitContext
+  {
+    pid_t pid;
     std::string error_message;
   };
 
@@ -284,7 +292,7 @@ namespace
     }
     catch (...)
     {
-      context->error_message = "single-process server failed with an unknown native error";
+      context->error_message = "server failed with an unknown native error";
     }
 
     return nullptr;
@@ -464,11 +472,17 @@ namespace
   std::string read_string_payload(int fd)
   {
     std::uint32_t length = 0;
-    read_exact_or_eof(fd, &length, sizeof(length));
+    if (!read_exact_or_eof(fd, &length, sizeof(length)))
+    {
+      throw std::runtime_error("worker bootstrap pipe closed before string payload length");
+    }
     std::string value(length, '\0');
     if (length > 0)
     {
-      read_exact_or_eof(fd, value.data(), length);
+      if (!read_exact_or_eof(fd, value.data(), length))
+      {
+        throw std::runtime_error("worker bootstrap pipe closed before string payload body");
+      }
     }
     return value;
   }
@@ -851,33 +865,37 @@ namespace VajraNative
       }
     }
 
-    void wait_for_worker_exit(pid_t pid)
+    void *wait_for_worker_exit_without_gvl(void *data)
     {
+      auto *context = static_cast<WorkerWaitContext *>(data);
       bool forwarded_shutdown = false;
       for (;;)
       {
         int status = 0;
-        const pid_t wait_result = waitpid(pid, &status, 0);
-        if (wait_result == pid)
+        const pid_t wait_result = waitpid(context->pid, &status, 0);
+        if (wait_result == context->pid)
         {
           if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
           {
-            return;
+            return nullptr;
           }
 
           if (WIFEXITED(status))
           {
-            throw std::runtime_error(
-                "worker process exited unexpectedly with status " + std::to_string(WEXITSTATUS(status)));
+            context->error_message =
+                "worker process exited unexpectedly with status " + std::to_string(WEXITSTATUS(status));
+            return nullptr;
           }
 
           if (WIFSIGNALED(status))
           {
-            throw std::runtime_error(
-                "worker process exited unexpectedly due to signal " + std::to_string(WTERMSIG(status)));
+            context->error_message =
+                "worker process exited unexpectedly due to signal " + std::to_string(WTERMSIG(status));
+            return nullptr;
           }
 
-          throw std::runtime_error("worker process exited unexpectedly");
+          context->error_message = "worker process exited unexpectedly";
+          return nullptr;
         }
 
         if (wait_result < 0 && errno == EINTR)
@@ -890,7 +908,22 @@ namespace VajraNative
           continue;
         }
 
-        throw std::runtime_error("failed to wait for worker process");
+        context->error_message = "failed to wait for worker process";
+        return nullptr;
+      }
+    }
+
+    void wait_for_worker_exit(pid_t pid)
+    {
+      WorkerWaitContext context{pid, ""};
+      rb_thread_call_without_gvl(
+          wait_for_worker_exit_without_gvl,
+          &context,
+          RUBY_UBF_IO,
+          nullptr);
+      if (!context.error_message.empty())
+      {
+        throw std::runtime_error(context.error_message);
       }
     }
 

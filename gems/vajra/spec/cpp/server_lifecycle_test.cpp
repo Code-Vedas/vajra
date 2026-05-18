@@ -9,7 +9,6 @@
 #include "test_support.hpp"
 
 #include <exception>
-#include <unistd.h>
 #include <sstream>
 #include <thread>
 

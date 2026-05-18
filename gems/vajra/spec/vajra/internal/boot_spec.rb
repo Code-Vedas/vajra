@@ -162,11 +162,11 @@ RSpec.describe Vajra::Internal::Boot do
     status, role, diagnostic = described_class.call(
       port: 3000,
       max_request_head_bytes: 16_384,
-      runtime_role: 'single_process_bootstrap'
+      runtime_role: 'ruby_worker_bootstrap'
     )
 
     expect(status).to eq('pending')
-    expect(role).to eq('single_process_bootstrap')
+    expect(role).to eq('ruby_worker_bootstrap')
     expect(diagnostic).to be_nil
   end
 

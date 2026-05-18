@@ -30,8 +30,8 @@ module Vajra
       def install!(coordinator = method(:default_coordinator))
         validate_coordinator!(coordinator)
 
-        BOOT_MUTEX.synchronize { BOOT_STATE.coordinator = coordinator }
         __native_set_boot_callback__(bootstrap_callback)
+        BOOT_MUTEX.synchronize { BOOT_STATE.coordinator = coordinator }
         coordinator
       end
 
@@ -92,7 +92,7 @@ module Vajra
         {
           port: Integer(fetch_boot_request_value(boot_request, :port)),
           max_request_head_bytes: Integer(fetch_boot_request_value(boot_request, :max_request_head_bytes)),
-          runtime_role: String(fetch_boot_request_value(boot_request, :runtime_role))
+          runtime_role: normalize_runtime_role(fetch_boot_request_value(boot_request, :runtime_role))
         }
       rescue KeyError => e
         raise BootContractError, "missing boot request field: #{e.key}"
@@ -107,6 +107,14 @@ module Vajra
         boot_request.fetch(String(key))
       end
       private_class_method :fetch_boot_request_value
+
+      def normalize_runtime_role(runtime_role)
+        normalized_runtime_role = coerce_contract_string(runtime_role, 'runtime role')
+        raise BootContractError, 'runtime role must not be empty' if normalized_runtime_role.empty?
+
+        normalized_runtime_role
+      end
+      private_class_method :normalize_runtime_role
 
       def normalize_boot_result(result)
         status, role, diagnostic = unpack_result(result)

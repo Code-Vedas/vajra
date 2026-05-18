@@ -63,6 +63,21 @@ RSpec.describe Vajra::Internal::Boot do
     allow(described_class).to receive(:__native_set_boot_callback__).and_call_original
   end
 
+  it 'does not mark the boot coordinator installed when native callback registration fails' do
+    previous_coordinator = described_class.send(:configured_coordinator)
+
+    allow(described_class).to receive(:__native_set_boot_callback__).and_raise(
+      RuntimeError,
+      'native callback registration failed'
+    )
+
+    expect { described_class.install!(->(_boot_request) { 'ready' }) }
+      .to raise_error(RuntimeError, /native callback registration failed/)
+
+    expect(described_class.send(:configured_coordinator)).to equal(previous_coordinator)
+    allow(described_class).to receive(:__native_set_boot_callback__).and_call_original
+  end
+
   it 'normalizes a successful boot result and boot request' do
     captured_request = nil
     described_class.install!(lambda { |boot_request|
@@ -425,6 +440,39 @@ RSpec.describe Vajra::Internal::Boot do
     expect(invalid_role).to eq('single_process_bootstrap')
     expect(invalid_diagnostic).to eq(
       ['invalid_boot_contract', 'contract', 'Vajra::Internal::Boot::BootContractError: invalid value for Integer(): "invalid"']
+    )
+  end
+
+  it 'returns a contract failure for boot requests with an empty runtime role' do
+    status, role, diagnostic = described_class.call(
+      port: 3000,
+      max_request_head_bytes: 16_384,
+      runtime_role: ''
+    )
+
+    expect(status).to eq('failed')
+    expect(role).to eq('single_process_bootstrap')
+    expect(diagnostic).to eq(
+      ['invalid_boot_contract', 'contract', 'Vajra::Internal::Boot::BootContractError: runtime role must not be empty']
+    )
+  end
+
+  it 'returns a contract failure for boot requests when runtime role coercion raises' do
+    bad_runtime_role = Object.new
+    def bad_runtime_role.to_s
+      raise TypeError, 'runtime role boom'
+    end
+
+    status, role, diagnostic = described_class.call(
+      port: 3000,
+      max_request_head_bytes: 16_384,
+      runtime_role: bad_runtime_role
+    )
+
+    expect(status).to eq('failed')
+    expect(role).to eq('single_process_bootstrap')
+    expect(diagnostic).to eq(
+      ['invalid_boot_contract', 'contract', 'Vajra::Internal::Boot::BootContractError: runtime role must be coercible to String: runtime role boom']
     )
   end
 end

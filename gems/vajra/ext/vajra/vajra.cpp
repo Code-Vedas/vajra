@@ -261,7 +261,7 @@ namespace
       return BootStatus::failed;
     }
 
-    throw std::runtime_error("Ruby boot contract returned an unsupported status");
+    throw std::runtime_error("Ruby boot contract returned an unsupported status: " + status_value);
   }
 
   std::optional<BootDiagnostic> boot_diagnostic_from_ruby(VALUE diagnostic)

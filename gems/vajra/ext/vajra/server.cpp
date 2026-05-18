@@ -266,8 +266,8 @@ void Vajra::Server::start()
     lifecycle_.finish_stop();
     return;
   }
-  log_listening_banner(port_);
   lifecycle_.mark_boot_ready();
+  log_listening_banner(port_);
 
   for (;;)
   {

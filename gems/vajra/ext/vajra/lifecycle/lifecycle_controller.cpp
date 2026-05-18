@@ -78,18 +78,26 @@ namespace Vajra
       Snapshot snapshot_value;
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (boot_readiness_ == BootReadiness::ready || state_ == State::draining)
+        if (boot_readiness_ == BootReadiness::ready)
         {
           return;
         }
 
-        if (state_ != State::listening && state_ != State::serving)
+        const bool listener_bound = listener_owned_ && listener_fd_ >= 0;
+        if (state_ == State::draining && listener_bound)
+        {
+          boot_readiness_ = BootReadiness::ready;
+          snapshot_value = snapshot_unlocked();
+        }
+        else if (state_ == State::listening || state_ == State::serving)
+        {
+          boot_readiness_ = BootReadiness::ready;
+          snapshot_value = snapshot_unlocked();
+        }
+        else
         {
           throw std::logic_error("lifecycle can only enter boot-ready from listening or serving");
         }
-
-        boot_readiness_ = BootReadiness::ready;
-        snapshot_value = snapshot_unlocked();
       }
 
       notify(HookPoint::boot_complete, snapshot_value);

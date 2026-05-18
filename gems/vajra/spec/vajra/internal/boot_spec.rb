@@ -33,6 +33,29 @@ RSpec.describe Vajra::Internal::Boot do
       .to raise_error(TypeError, 'boot coordinator must respond to #call')
   end
 
+  it 'reraises unrelated NameError values from coordinator validation' do
+    coordinator = Class.new do
+      def method(_name)
+        raise NameError.new('unexpected missing method', :unexpected_method)
+      end
+    end.new
+
+    expect { described_class.install!(coordinator) }
+      .to raise_error(NameError, /unexpected missing method/)
+  end
+
+  it 'does not rewrite unrelated NameError failures as coordinator type errors' do
+    allow(described_class).to receive(:__native_set_boot_callback__).and_raise(
+      NoMethodError,
+      "undefined method `__native_set_boot_callback__'"
+    )
+
+    expect { described_class.install!(->(_boot_request) { 'ready' }) }
+      .to raise_error(NoMethodError, /__native_set_boot_callback__/)
+
+    allow(described_class).to receive(:__native_set_boot_callback__).and_call_original
+  end
+
   it 'normalizes a successful boot result and boot request' do
     captured_request = nil
     described_class.install!(lambda { |boot_request|

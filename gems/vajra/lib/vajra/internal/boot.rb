@@ -28,13 +28,11 @@ module Vajra
       BOOT_STATE = BootState.new(nil)
 
       def install!(coordinator = method(:default_coordinator))
-        coordinator.method(:call)
+        validate_coordinator!(coordinator)
 
         BOOT_MUTEX.synchronize { BOOT_STATE.coordinator = coordinator }
         __native_set_boot_callback__(bootstrap_callback)
         coordinator
-      rescue NameError
-        raise TypeError, 'boot coordinator must respond to #call'
       end
 
       def uninstall!
@@ -68,6 +66,15 @@ module Vajra
         proc { |boot_request| Vajra::Internal::Boot.call(boot_request) }
       end
       private_class_method :bootstrap_callback
+
+      def validate_coordinator!(coordinator)
+        coordinator.method(:call)
+      rescue NameError => e
+        raise unless e.name == :call
+
+        raise TypeError, 'boot coordinator must respond to #call'
+      end
+      private_class_method :validate_coordinator!
 
       def configured_coordinator
         BOOT_MUTEX.synchronize { BOOT_STATE.coordinator }

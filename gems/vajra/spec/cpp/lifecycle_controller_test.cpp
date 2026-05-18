@@ -210,6 +210,41 @@ namespace VajraSpecCpp
       }
     }
 
+    void test_lifecycle_controller_allows_boot_ready_after_drain_when_listener_is_bound()
+    {
+      Vajra::lifecycle::Controller controller;
+      std::vector<Vajra::lifecycle::HookPoint> hook_points;
+      controller.set_observer([&](Vajra::lifecycle::HookPoint hook_point, const Vajra::lifecycle::Snapshot &) {
+        hook_points.push_back(hook_point);
+      });
+
+      if (!controller.begin_startup() || !controller.mark_listening(7, 3000))
+      {
+        fail("lifecycle controller failed to reach listening before drain");
+      }
+
+      controller.request_stop(Vajra::lifecycle::StopReason::programmatic_stop);
+      controller.mark_boot_ready();
+
+      const Vajra::lifecycle::Snapshot snapshot = controller.snapshot();
+      if (snapshot.state != Vajra::lifecycle::State::draining ||
+          snapshot.boot_readiness != Vajra::lifecycle::BootReadiness::ready ||
+          snapshot.last_stop_reason != Vajra::lifecycle::StopReason::programmatic_stop ||
+          !snapshot.listener_owned)
+      {
+        fail("lifecycle controller did not preserve boot readiness during drain after listener bind");
+      }
+
+      const std::vector<Vajra::lifecycle::HookPoint> expected_hooks = {
+          Vajra::lifecycle::HookPoint::drain_requested,
+          Vajra::lifecycle::HookPoint::boot_complete,
+      };
+      if (hook_points != expected_hooks)
+      {
+        fail("lifecycle controller did not emit boot_complete after drain when listener was already bound");
+      }
+    }
+
     void test_lifecycle_controller_tracks_stop_before_start_separately_from_stopped_state()
     {
       Vajra::lifecycle::Controller controller;
@@ -250,6 +285,7 @@ namespace VajraSpecCpp
     test_lifecycle_controller_stop_requests_are_idempotent();
     test_lifecycle_controller_ignores_serving_transition_after_drain_begins();
     test_lifecycle_controller_rejects_listening_completion_after_drain_begins();
+    test_lifecycle_controller_allows_boot_ready_after_drain_when_listener_is_bound();
     test_lifecycle_controller_tracks_stop_before_start_separately_from_stopped_state();
   }
 }

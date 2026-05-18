@@ -20,13 +20,16 @@ The runtime lifecycle is:
 
 1. Ruby boots the package entrypoint
 2. the native extension is loaded through the canonical require path
-3. the native server instance binds the listener
-4. requests are accepted and handled in the native path
-5. signals initiate shutdown
+3. Ruby preload boot runs in the main process
+4. the main process forks one Ruby worker
+5. the worker reports boot readiness through the control path
+6. the native server instance in the main process binds the listener
+7. requests are accepted in the native path and executed in the worker
+8. signals or programmatic stop initiate shutdown
 
 ## Runtime State Model
 
-The intended runtime state model is explicit and readable:
+The runtime state model is explicit and readable:
 
 - booting
 - listening
@@ -35,25 +38,24 @@ The intended runtime state model is explicit and readable:
 - stopped
 - failed
 
-Supervision preserves those explicit transitions rather than burying lifecycle
-state in incidental flags or incidental file-descriptor ownership.
+The runtime preserves those explicit transitions rather than burying lifecycle
+state in incidental flags or file-descriptor ownership.
 
 ## Supervision Direction
 
-The runtime is single-process and foreground-oriented. Supervision and worker
-lifecycle work extend this documented lifecycle rather than replacing the
-package and load contract underneath it.
+The runtime is foreground-oriented with one controlling process and one Ruby
+worker. The listener, request parsing, and response transport stay in the
+native runtime process; application request execution stays in the Ruby worker.
 
 ## Supervision Expectations
 
 Contributors and operators can reason about:
 
 - preloaded master-versus-worker ownership
-- worker fork/spawn lifecycle
-- task queue and thread lifecycle within a worker
-- how shutdown and replacement flow across the runtime
-- which signals are diagnostics, which are lifecycle transitions, and which are
-  recovery triggers
+- worker fork lifecycle
+- request-channel versus control-channel responsibilities
+- how shutdown flows across the runtime
+- which signals are diagnostics and which are lifecycle transitions
 
 ## Engineering Boundaries
 
@@ -62,8 +64,8 @@ The repo shape answers these questions:
 - where runtime boot begins
 - where listener state lives
 - where diagnostics are emitted
-- where shutdown ownership transitions from Ruby to native code
-- where later supervision can observe lifecycle state without inferring it from listener flags
+- where shutdown ownership transitions from request serving to worker teardown
+- where lifecycle state stays explicit without being inferred from listener flags
 
 The runtime also preserves a hard split between:
 

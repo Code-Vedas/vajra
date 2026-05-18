@@ -5,6 +5,7 @@
 
 #include "rack_request_executor.hpp"
 
+#include "ipc/frame_header.hpp"
 #include "request/http_field_utils.hpp"
 #include "request/rack_env.hpp"
 #include "request/request_head_error.hpp"
@@ -12,13 +13,17 @@
 #include "ruby/encoding.h"
 #include "ruby/thread.h"
 
+#include <array>
 #include <atomic>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -43,6 +48,188 @@ namespace
     std::optional<Vajra::response::Response> response;
     std::string error_message;
   };
+
+  enum class RequestBodyEvent : std::uint8_t
+  {
+    chunk = 1,
+    complete = 2,
+    cancel = 3,
+  };
+
+  enum class ResponseMetadataKind : std::uint8_t
+  {
+    no_response = 0,
+    response = 1,
+    head_error = 2,
+    execution_error = 3,
+  };
+
+  enum class ResponseBodyEvent : std::uint8_t
+  {
+    chunk = 1,
+    complete = 2,
+  };
+
+  constexpr std::size_t kInlineBodyChunkBytes =
+      static_cast<std::size_t>(Vajra::ipc::kMaxFramePayloadLength) - 1;
+
+  struct DecodedResponseMetadata
+  {
+    ResponseMetadataKind kind = ResponseMetadataKind::no_response;
+    std::optional<Vajra::response::Response> response;
+    std::string error_message;
+  };
+
+  void write_all_or_throw(int fd, const void *buffer, std::size_t length)
+  {
+    const auto *bytes = static_cast<const std::uint8_t *>(buffer);
+    std::size_t written = 0;
+    while (written < length)
+    {
+      const ssize_t result = write(fd, bytes + written, length - written);
+      if (result < 0)
+      {
+        if (errno == EINTR)
+        {
+          continue;
+        }
+
+        throw std::runtime_error("request channel write failed");
+      }
+
+      written += static_cast<std::size_t>(result);
+    }
+  }
+
+  bool read_exact_or_eof(int fd, void *buffer, std::size_t length)
+  {
+    auto *bytes = static_cast<std::uint8_t *>(buffer);
+    std::size_t read_bytes = 0;
+    while (read_bytes < length)
+    {
+      const ssize_t result = read(fd, bytes + read_bytes, length - read_bytes);
+      if (result == 0)
+      {
+        if (read_bytes == 0)
+        {
+          return false;
+        }
+
+        throw std::runtime_error("request channel closed unexpectedly");
+      }
+
+      if (result < 0)
+      {
+        if (errno == EINTR)
+        {
+          continue;
+        }
+
+        throw std::runtime_error("request channel read failed");
+      }
+
+      read_bytes += static_cast<std::size_t>(result);
+    }
+
+    return true;
+  }
+
+  void append_u32(std::string &buffer, std::uint32_t value)
+  {
+    buffer.push_back(static_cast<char>((value >> 24) & 0xFF));
+    buffer.push_back(static_cast<char>((value >> 16) & 0xFF));
+    buffer.push_back(static_cast<char>((value >> 8) & 0xFF));
+    buffer.push_back(static_cast<char>(value & 0xFF));
+  }
+
+  std::uint32_t read_u32(const std::string &buffer, std::size_t &cursor, const char *error_message)
+  {
+    if (buffer.size() - cursor < 4)
+    {
+      throw std::runtime_error(error_message);
+    }
+
+    const std::uint32_t value =
+        (static_cast<std::uint32_t>(static_cast<unsigned char>(buffer[cursor])) << 24) |
+        (static_cast<std::uint32_t>(static_cast<unsigned char>(buffer[cursor + 1])) << 16) |
+        (static_cast<std::uint32_t>(static_cast<unsigned char>(buffer[cursor + 2])) << 8) |
+        static_cast<std::uint32_t>(static_cast<unsigned char>(buffer[cursor + 3]));
+    cursor += 4;
+    return value;
+  }
+
+  void append_string(std::string &buffer, const std::string &value)
+  {
+    if (value.size() > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
+    {
+      throw std::runtime_error("request channel payload string exceeds maximum size");
+    }
+
+    append_u32(buffer, static_cast<std::uint32_t>(value.size()));
+    buffer.append(value);
+  }
+
+  std::string read_string(const std::string &buffer, std::size_t &cursor, const char *error_message)
+  {
+    const std::uint32_t length = read_u32(buffer, cursor, error_message);
+    if (buffer.size() - cursor < length)
+    {
+      throw std::runtime_error(error_message);
+    }
+
+    std::string value = buffer.substr(cursor, length);
+    cursor += length;
+    return value;
+  }
+
+  void write_frame(int fd, Vajra::ipc::FrameFamily family, const std::string &payload)
+  {
+    Vajra::ipc::FrameHeader header{
+        Vajra::ipc::ChannelKind::request,
+        family,
+        Vajra::ipc::kProtocolVersion1_0,
+        static_cast<std::uint32_t>(payload.size())};
+    const std::array<std::uint8_t, Vajra::ipc::kFrameHeaderSize> encoded_header =
+        Vajra::ipc::encode_frame_header(header);
+    write_all_or_throw(fd, encoded_header.data(), encoded_header.size());
+    if (!payload.empty())
+    {
+      write_all_or_throw(fd, payload.data(), payload.size());
+    }
+  }
+
+  bool read_frame(int fd, Vajra::ipc::FrameHeader &header, std::string &payload)
+  {
+    std::array<std::uint8_t, Vajra::ipc::kFrameHeaderSize> encoded_header{};
+    if (!read_exact_or_eof(fd, encoded_header.data(), encoded_header.size()))
+    {
+      return false;
+    }
+
+    Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::none;
+    Vajra::ipc::HeaderDecodeWarning warning = Vajra::ipc::HeaderDecodeWarning::none;
+    const std::optional<Vajra::ipc::FrameHeader> decoded_header =
+        Vajra::ipc::decode_frame_header(encoded_header, error, warning);
+    if (!decoded_header.has_value())
+    {
+      throw std::runtime_error("request channel received an invalid frame header");
+    }
+
+    if (warning != Vajra::ipc::HeaderDecodeWarning::none)
+    {
+      throw std::runtime_error("request channel received an unsupported frame header");
+    }
+
+    payload.assign(decoded_header->payload_length, '\0');
+    if (decoded_header->payload_length > 0 &&
+        !read_exact_or_eof(fd, payload.data(), decoded_header->payload_length))
+    {
+      throw std::runtime_error("request channel closed before payload body");
+    }
+
+    header = *decoded_header;
+    return true;
+  }
 
   std::string exception_message(VALUE exception);
 
@@ -393,6 +580,224 @@ namespace
     return nullptr;
   }
 
+  std::string encode_request_execution_input(const std::vector<Vajra::request::RackEnvEntry> &env_entries)
+  {
+    std::string payload;
+    append_u32(payload, static_cast<std::uint32_t>(env_entries.size()));
+    for (const Vajra::request::RackEnvEntry &entry : env_entries)
+    {
+      append_string(payload, entry.key);
+      append_string(payload, entry.value);
+    }
+
+    return payload;
+  }
+
+  std::vector<Vajra::request::RackEnvEntry> decode_request_execution_input(const std::string &payload)
+  {
+    std::size_t cursor = 0;
+    const std::uint32_t entry_count = read_u32(payload, cursor, "request execution input payload is truncated");
+    std::vector<Vajra::request::RackEnvEntry> env_entries;
+    env_entries.reserve(entry_count);
+    for (std::uint32_t index = 0; index < entry_count; ++index)
+    {
+      env_entries.push_back(Vajra::request::RackEnvEntry{
+          read_string(payload, cursor, "request execution input key is truncated"),
+          read_string(payload, cursor, "request execution input value is truncated")});
+    }
+
+    if (cursor != payload.size())
+    {
+      throw std::runtime_error("request execution input payload contains trailing bytes");
+    }
+
+    return env_entries;
+  }
+
+  std::string encode_request_body_chunk(RequestBodyEvent event, const std::string &chunk)
+  {
+    std::string payload;
+    payload.push_back(static_cast<char>(event));
+    if (event == RequestBodyEvent::chunk)
+    {
+      payload.append(chunk);
+    }
+    return payload;
+  }
+
+  RequestBodyEvent decode_request_body_event(const std::string &payload, std::string &chunk)
+  {
+    if (payload.empty())
+    {
+      throw std::runtime_error("request body continuation payload is empty");
+    }
+
+    const auto event = static_cast<RequestBodyEvent>(static_cast<unsigned char>(payload[0]));
+    switch (event)
+    {
+      case RequestBodyEvent::chunk:
+        chunk.assign(payload.data() + 1, payload.size() - 1);
+        return event;
+      case RequestBodyEvent::complete:
+        chunk.clear();
+        return event;
+      case RequestBodyEvent::cancel:
+        chunk.clear();
+        return event;
+    }
+
+    throw std::runtime_error("request body continuation payload has an unknown event");
+  }
+
+  std::string encode_response_metadata(const std::optional<Vajra::response::Response> &response)
+  {
+    std::string payload;
+    if (!response)
+    {
+      payload.push_back(static_cast<char>(ResponseMetadataKind::no_response));
+      return payload;
+    }
+
+    payload.push_back(static_cast<char>(ResponseMetadataKind::response));
+    append_u32(payload, static_cast<std::uint32_t>(response->status.code));
+    append_string(payload, response->status.reason_phrase);
+    append_u32(payload, static_cast<std::uint32_t>(response->headers.size()));
+    for (const Vajra::response::Header &header : response->headers)
+    {
+      append_string(payload, header.name);
+      append_string(payload, header.value);
+    }
+    return payload;
+  }
+
+  std::string encode_response_error(ResponseMetadataKind kind, const std::string &message)
+  {
+    std::string payload;
+    payload.push_back(static_cast<char>(kind));
+    append_string(payload, message);
+    return payload;
+  }
+
+  DecodedResponseMetadata decode_response_metadata(const std::string &payload)
+  {
+    if (payload.empty())
+    {
+      throw std::runtime_error("response metadata payload is empty");
+    }
+
+    std::size_t cursor = 1;
+    const auto kind = static_cast<ResponseMetadataKind>(static_cast<unsigned char>(payload[0]));
+    switch (kind)
+    {
+      case ResponseMetadataKind::no_response:
+        if (cursor != payload.size())
+        {
+          throw std::runtime_error("no-response metadata payload contains trailing bytes");
+        }
+        return DecodedResponseMetadata{kind, std::nullopt, ""};
+      case ResponseMetadataKind::response:
+      {
+        const int status_code = static_cast<int>(read_u32(payload, cursor, "response metadata status is truncated"));
+        const std::string reason_phrase = read_string(payload, cursor, "response metadata reason phrase is truncated");
+        const std::uint32_t header_count = read_u32(payload, cursor, "response metadata header count is truncated");
+        std::vector<Vajra::response::Header> headers;
+        headers.reserve(header_count);
+        for (std::uint32_t index = 0; index < header_count; ++index)
+        {
+          headers.push_back(Vajra::response::Header{
+              read_string(payload, cursor, "response header name is truncated"),
+              read_string(payload, cursor, "response header value is truncated")});
+        }
+
+        if (cursor != payload.size())
+        {
+          throw std::runtime_error("response metadata payload contains trailing bytes");
+        }
+
+        return DecodedResponseMetadata{
+            kind,
+            Vajra::response::Response{
+                Vajra::response::Status{status_code, reason_phrase},
+                std::move(headers),
+                "",
+                Vajra::response::ConnectionBehavior::close},
+            ""};
+      }
+      case ResponseMetadataKind::head_error:
+      case ResponseMetadataKind::execution_error:
+      {
+        const std::string error_message = read_string(payload, cursor, "response error payload is truncated");
+        if (cursor != payload.size())
+        {
+          throw std::runtime_error("response error payload contains trailing bytes");
+        }
+
+        return DecodedResponseMetadata{kind, std::nullopt, error_message};
+      }
+    }
+
+    throw std::runtime_error("response metadata payload has an unknown kind");
+  }
+
+  std::string encode_response_body_event(ResponseBodyEvent event, const std::string &chunk)
+  {
+    std::string payload;
+    payload.push_back(static_cast<char>(event));
+    if (event == ResponseBodyEvent::chunk)
+    {
+      payload.append(chunk);
+    }
+    return payload;
+  }
+
+  ResponseBodyEvent decode_response_body_event(const std::string &payload, std::string &chunk)
+  {
+    if (payload.empty())
+    {
+      throw std::runtime_error("response body continuation payload is empty");
+    }
+
+    const auto event = static_cast<ResponseBodyEvent>(static_cast<unsigned char>(payload[0]));
+    switch (event)
+    {
+      case ResponseBodyEvent::chunk:
+        chunk.assign(payload.data() + 1, payload.size() - 1);
+        return event;
+      case ResponseBodyEvent::complete:
+        chunk.clear();
+        return event;
+    }
+
+    throw std::runtime_error("response body continuation payload has an unknown event");
+  }
+
+  class BufferedRackExecutionSession final : public Vajra::rack::RackExecutionSession
+  {
+  public:
+    BufferedRackExecutionSession(
+        const Vajra::rack::RackExecutionTransport &transport,
+        std::vector<Vajra::request::RackEnvEntry> env_entries)
+        : transport_(transport),
+          env_entries_(std::move(env_entries))
+    {
+    }
+
+    void append_request_body_chunk(const std::string &chunk) override
+    {
+      request_body_.append(chunk);
+    }
+
+    std::optional<Vajra::response::Response> finish() override
+    {
+      return transport_.execute(env_entries_, request_body_);
+    }
+
+  private:
+    const Vajra::rack::RackExecutionTransport &transport_;
+    std::vector<Vajra::request::RackEnvEntry> env_entries_;
+    std::string request_body_;
+  };
+
   class SameProcessRackExecutionTransport final : public Vajra::rack::RackExecutionTransport
   {
   public:
@@ -416,6 +821,186 @@ namespace
       return context.response;
     }
   };
+
+  class CurrentThreadRackExecutionTransport final : public Vajra::rack::RackExecutionTransport
+  {
+  public:
+    std::optional<Vajra::response::Response> execute(
+        const std::vector<Vajra::request::RackEnvEntry> &env_entries,
+        const std::string &request_body) const override
+    {
+      if (!rack_execution_callback_installed_flag.load(std::memory_order_acquire))
+      {
+        return std::nullopt;
+      }
+
+      ExecutionCallContext context{&env_entries, &request_body, std::nullopt, ""};
+      execute_rack_request_with_gvl(&context);
+
+      if (!context.error_message.empty())
+      {
+        throw std::runtime_error("Rack request execution failed: " + context.error_message);
+      }
+
+      return context.response;
+    }
+  };
+
+  class WorkerProcessRackExecutionSession final : public Vajra::rack::RackExecutionSession
+  {
+  public:
+    WorkerProcessRackExecutionSession(int channel_fd, std::mutex &channel_mutex)
+        : channel_fd_(channel_fd),
+          channel_lock_(channel_mutex)
+    {
+    }
+
+    ~WorkerProcessRackExecutionSession() override
+    {
+      if (!finished_)
+      {
+        try
+        {
+          write_frame(
+              channel_fd_,
+              Vajra::ipc::FrameFamily::request_body_continuation,
+              encode_request_body_chunk(RequestBodyEvent::cancel, ""));
+        }
+        catch (...)
+        {
+        }
+      }
+    }
+
+    void send_request_start(const std::vector<Vajra::request::RackEnvEntry> &env_entries)
+    {
+      write_frame(channel_fd_, Vajra::ipc::FrameFamily::request_execution_input, encode_request_execution_input(env_entries));
+    }
+
+    void append_request_body_chunk(const std::string &chunk) override
+    {
+      std::size_t cursor = 0;
+      while (cursor < chunk.size())
+      {
+        const std::size_t length = std::min(kInlineBodyChunkBytes, chunk.size() - cursor);
+        write_frame(
+            channel_fd_,
+            Vajra::ipc::FrameFamily::request_body_continuation,
+            encode_request_body_chunk(RequestBodyEvent::chunk, chunk.substr(cursor, length)));
+        cursor += length;
+      }
+    }
+
+    std::optional<Vajra::response::Response> finish() override
+    {
+      write_frame(
+          channel_fd_,
+          Vajra::ipc::FrameFamily::request_body_continuation,
+          encode_request_body_chunk(RequestBodyEvent::complete, ""));
+      finished_ = true;
+
+      Vajra::ipc::FrameHeader header{};
+      std::string payload;
+      if (!read_frame(channel_fd_, header, payload))
+      {
+        throw std::runtime_error("worker request channel closed before response metadata");
+      }
+      if (header.family != Vajra::ipc::FrameFamily::response_metadata_result)
+      {
+        throw std::runtime_error("worker request channel returned an unexpected response frame");
+      }
+
+      DecodedResponseMetadata metadata = decode_response_metadata(payload);
+      switch (metadata.kind)
+      {
+        case ResponseMetadataKind::no_response:
+          return std::nullopt;
+        case ResponseMetadataKind::head_error:
+          throw Vajra::request::bad_request_error(metadata.error_message);
+        case ResponseMetadataKind::execution_error:
+          throw std::runtime_error(metadata.error_message);
+        case ResponseMetadataKind::response:
+          break;
+      }
+
+      std::optional<Vajra::response::Response> response = std::move(metadata.response);
+      for (;;)
+      {
+        if (!read_frame(channel_fd_, header, payload))
+        {
+          throw std::runtime_error("worker request channel closed before response body completion");
+        }
+        if (header.family != Vajra::ipc::FrameFamily::response_body_continuation)
+        {
+          throw std::runtime_error("worker request channel returned an unexpected response body frame");
+        }
+
+        std::string chunk;
+        const ResponseBodyEvent event = decode_response_body_event(payload, chunk);
+        if (event == ResponseBodyEvent::complete)
+        {
+          return response;
+        }
+
+        response->body.append(chunk);
+      }
+    }
+
+  private:
+    int channel_fd_;
+    std::unique_lock<std::mutex> channel_lock_;
+    bool finished_ = false;
+  };
+
+  class WorkerProcessRackExecutionTransport final : public Vajra::rack::RackExecutionTransport
+  {
+  public:
+    explicit WorkerProcessRackExecutionTransport(int channel_fd)
+        : channel_fd_(channel_fd)
+    {
+    }
+
+    std::unique_ptr<Vajra::rack::RackExecutionSession> start(
+        const std::vector<Vajra::request::RackEnvEntry> &env_entries) const override
+    {
+      auto session = std::make_unique<WorkerProcessRackExecutionSession>(channel_fd_, channel_mutex_);
+      session->send_request_start(env_entries);
+      return session;
+    }
+
+    std::optional<Vajra::response::Response> execute(
+        const std::vector<Vajra::request::RackEnvEntry> &,
+        const std::string &) const override
+    {
+      throw std::logic_error("worker request transport must use streaming start()");
+    }
+
+  private:
+    int channel_fd_;
+    mutable std::mutex channel_mutex_;
+  };
+
+  class RequestExecutionBridgeSession final : public Vajra::request::RequestExecutionSession
+  {
+  public:
+    explicit RequestExecutionBridgeSession(std::unique_ptr<Vajra::rack::RackExecutionSession> session)
+        : session_(std::move(session))
+    {
+    }
+
+    void append_request_body_chunk(const std::string &chunk) override
+    {
+      session_->append_request_body_chunk(chunk);
+    }
+
+    std::optional<Vajra::response::Response> finish() override
+    {
+      return session_->finish();
+    }
+
+  private:
+    std::unique_ptr<Vajra::rack::RackExecutionSession> session_;
+  };
 }
 
 void Vajra::rack::initialize_rack_execution_bridge()
@@ -433,6 +1018,17 @@ void Vajra::rack::set_rack_execution_callback(VALUE callback)
   rack_execution_callback_installed_flag.store(!NIL_P(callback), std::memory_order_release);
 }
 
+std::shared_ptr<const Vajra::rack::RackExecutionTransport> Vajra::rack::request_channel_transport(int channel_fd)
+{
+  return std::make_shared<WorkerProcessRackExecutionTransport>(channel_fd);
+}
+
+std::unique_ptr<Vajra::rack::RackExecutionSession> Vajra::rack::RackExecutionTransport::start(
+    const std::vector<request::RackEnvEntry> &env_entries) const
+{
+  return std::make_unique<BufferedRackExecutionSession>(*this, env_entries);
+}
+
 Vajra::rack::RackRequestExecutor::RackRequestExecutor()
     : transport_(std::make_shared<SameProcessRackExecutionTransport>())
 {
@@ -448,10 +1044,116 @@ Vajra::rack::RackRequestExecutor::RackRequestExecutor(
   }
 }
 
+std::unique_ptr<Vajra::request::RequestExecutionSession> Vajra::rack::RackRequestExecutor::start(
+    const request::RequestContext &request_context) const
+{
+  request::RackEnvBuilder builder;
+  const std::vector<request::RackEnvEntry> env_entries = builder.build(request_context);
+  return std::make_unique<RequestExecutionBridgeSession>(transport_->start(env_entries));
+}
+
 std::optional<Vajra::response::Response> Vajra::rack::RackRequestExecutor::execute(
     const request::RequestContext &request_context) const
 {
   request::RackEnvBuilder builder;
   const std::vector<request::RackEnvEntry> env_entries = builder.build(request_context);
   return transport_->execute(env_entries, request_context.request_body);
+}
+
+void Vajra::rack::run_worker_request_execution_loop(int channel_fd)
+{
+  CurrentThreadRackExecutionTransport transport;
+
+  for (;;)
+  {
+    Vajra::ipc::FrameHeader header{};
+    std::string payload;
+    if (!read_frame(channel_fd, header, payload))
+    {
+      return;
+    }
+
+    if (header.family != Vajra::ipc::FrameFamily::request_execution_input)
+    {
+      throw std::runtime_error("worker request loop expected request execution input");
+    }
+
+    std::vector<request::RackEnvEntry> env_entries = decode_request_execution_input(payload);
+    std::string request_body;
+    bool request_canceled = false;
+
+    for (;;)
+    {
+      if (!read_frame(channel_fd, header, payload))
+      {
+        throw std::runtime_error("worker request loop closed before request body completion");
+      }
+
+      if (header.family != Vajra::ipc::FrameFamily::request_body_continuation)
+      {
+        throw std::runtime_error("worker request loop expected request body continuation");
+      }
+
+      std::string chunk;
+      const RequestBodyEvent event = decode_request_body_event(payload, chunk);
+      if (event == RequestBodyEvent::cancel)
+      {
+        request_canceled = true;
+        break;
+      }
+      if (event == RequestBodyEvent::complete)
+      {
+        break;
+      }
+
+      request_body.append(chunk);
+    }
+
+    if (request_canceled)
+    {
+      continue;
+    }
+
+    try
+    {
+      const std::optional<Vajra::response::Response> response = transport.execute(env_entries, request_body);
+      write_frame(
+          channel_fd,
+          Vajra::ipc::FrameFamily::response_metadata_result,
+          encode_response_metadata(response));
+      if (!response)
+      {
+        continue;
+      }
+
+      std::size_t cursor = 0;
+      while (cursor < response->body.size())
+      {
+        const std::size_t length = std::min(kInlineBodyChunkBytes, response->body.size() - cursor);
+        write_frame(
+            channel_fd,
+            Vajra::ipc::FrameFamily::response_body_continuation,
+            encode_response_body_event(ResponseBodyEvent::chunk, response->body.substr(cursor, length)));
+        cursor += length;
+      }
+      write_frame(
+          channel_fd,
+          Vajra::ipc::FrameFamily::response_body_continuation,
+          encode_response_body_event(ResponseBodyEvent::complete, ""));
+    }
+    catch (const Vajra::request::HeadError &error)
+    {
+      write_frame(
+          channel_fd,
+          Vajra::ipc::FrameFamily::response_metadata_result,
+          encode_response_error(ResponseMetadataKind::head_error, error.what()));
+    }
+    catch (const std::exception &error)
+    {
+      write_frame(
+          channel_fd,
+          Vajra::ipc::FrameFamily::response_metadata_result,
+          encode_response_error(ResponseMetadataKind::execution_error, error.what()));
+    }
+  }
 }

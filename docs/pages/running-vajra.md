@@ -18,9 +18,11 @@ Vajra binds to port `3000` and serves a basic serialized HTTP/1.1 response path.
 ## Runtime Expectations
 
 - runs in the foreground
+- starts from the Ruby main thread
 - logs to stdout and stderr
 - exits on interrupt
 - uses the compiled native extension as the runtime entrypoint
+- uses one Ruby worker for application execution
 
 ## Boot Chain
 
@@ -29,8 +31,10 @@ The runtime boot path is direct:
 1. Ruby starts the `exe/vajra` entrypoint.
 2. `require "vajra"` loads the gem and validates the native extension contract.
 3. The package transfers control to `Vajra.start`.
-4. The native runtime opens the listener, accepts connections, and writes the
-   response.
+4. Ruby preload boot runs in the main process.
+5. The main process forks one Ruby worker and waits for worker readiness.
+6. The native runtime opens the listener, accepts connections, and writes the
+   response while the worker executes Rack requests.
 
 That narrow chain matters because build verification, executable smoke tests,
 and runtime troubleshooting all point back to the same load boundary.
@@ -54,8 +58,9 @@ next request and closes the connection when that timeout expires.
 The runtime is designed for direct operation:
 
 - `Ctrl+C` stops the process cleanly
-- the listener stays attached to the foreground process
-- request handling remains in the native runtime, not in a Ruby request loop
+- the listener stays attached to the foreground runtime process
+- request transport remains in the native runtime
+- Rack application execution remains in the Ruby worker
 
 If the executable exits before the startup banner or fails to bind the port,
 use [Troubleshooting](/troubleshooting/) next.

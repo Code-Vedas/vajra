@@ -22,10 +22,9 @@ repository.
 
 The observability surface includes:
 
-- structured logs for boot, shutdown, request lifecycle, and failures
-- metrics for runtime lifecycle, latency, overload, scheduling, and recovery
-- tracing hooks for request execution and runtime state transitions
-- internal events suitable for telemetry pipelines and operator tooling
+- structured logs for boot, worker readiness, shutdown, and failures
+- startup and bind diagnostics
+- request-path visibility through e2e-verifiable HTTP behavior
 
 ## Why These Signals Matter
 
@@ -47,12 +46,12 @@ Good local observability for Vajra means:
 
 ## Integrations
 
-The supported observability integrations are explicit:
+The supported observability contract is log-first:
 
-- OpenTelemetry-style trace integration
-- Prometheus/OpenMetrics-style metrics exposure
-- structured logs suitable for aggregation pipelines
-- runtime events that can feed operator and recovery tooling
+- stdout and stderr carry lifecycle and failure signals
+- startup and shutdown emit explicit lifecycle events
+- load, boot, bind, and request-execution failures stay diagnosable without
+  attaching a debugger
 
 ## Related Reading
 

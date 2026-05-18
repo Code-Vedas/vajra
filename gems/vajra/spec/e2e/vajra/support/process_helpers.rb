@@ -112,13 +112,13 @@ module VajraE2EProcessHelpers
       require "vajra"
       Thread.report_on_exception = false
 
-      server_thread = Thread.new { Vajra.start }
-      begin
+      stopper_thread = Thread.new do
         STDIN.read
-      ensure
         Vajra.stop
-        Timeout.timeout(5) { server_thread.join }
       end
+
+      Vajra.start
+      Timeout.timeout(5) { stopper_thread.join }
     RUBY
 
     Open3.popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |stdin, output, wait_thread|

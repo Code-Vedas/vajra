@@ -61,7 +61,7 @@ Vajra is organized as one gem with one clear runtime boundary.
 
 ## Explore The Docs
 
-- [Getting Started](/getting-started/): repository bootstrap, first validation,
+- [Getting Started](/getting-started/): repository setup, first validation,
   and the fastest reading path through the project
 - [Installation](/installation/): toolchain requirements, native build path,
   artifact expectations, and clean rebuild workflow

@@ -11,7 +11,7 @@ behavior.
 
 ## Early Failure Boundaries
 
-Today the most important failure boundaries are:
+The most important failure boundaries are:
 
 - native extension missing or stale at load time
 - listener bind failure during startup
@@ -36,16 +36,14 @@ Failure and degradation are visible through:
 - boot diagnostics
 - lifecycle transition events
 - structured runtime logs
-- metrics and telemetry hooks as those observability layers land
-- operator-facing visibility into worker, scheduling, and recovery state
+- operator-facing visibility into worker boot and shutdown behavior
 
-## Future Recovery Direction
+## Recovery Direction
 
 This page documents:
 
-- restart semantics
-- worker lifecycle recovery
 - failure isolation boundaries
+- worker boot and worker-exit failure handling
 - control-path timeouts and escalation behavior
 
 ## Known Risks And Unresolved Areas

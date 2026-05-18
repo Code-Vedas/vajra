@@ -24,9 +24,8 @@ clear ownership boundaries.
 - Ruby toolchain and Bundler environment
 - native compilation toolchain
 - executable startup from `gems/vajra`
-- the default listener port owned by the runtime
-- platform-specific settings within the supported platform surface
-- protocol and transport settings within the supported runtime surface
+- listener port
+- maximum request-head size
 
 ## Build-Time Configuration
 
@@ -43,11 +42,9 @@ compiled artifact lives.
 
 The supported configuration story is organized around these families:
 
-- boot and application entrypoint selection
 - listener and socket behavior
-- worker and scheduling controls as those runtime layers land
-- observability and telemetry outputs
-- protocol- and transport-specific settings only after those milestones ship
+- request parsing limits
+- documented environment overrides for runtime-owned values
 
 ## Runtime Configuration Posture
 
@@ -60,12 +57,12 @@ Framework integration follows an explicit-config-first model:
 
 - application entrypoint and adapter selection should be explicit
 - `VAJRA_`-prefixed environment overrides are part of the supported config path
-- transport, protocol, and platform-specific toggles belong to documented
-  supported surfaces
+- application-owned behavior stays in the application, not in hidden server
+  toggles
 
 ## Precedence Model
 
-The intended precedence model is:
+The precedence model is:
 
 1. explicit server/application configuration
 2. documented `VAJRA_` environment overrides
@@ -74,13 +71,13 @@ The intended precedence model is:
 Operators can reason about effective configuration without reverse-engineering
 source.
 
-## Core Tuning Surfaces
+## Supported Runtime Settings
 
-The core supported tuning surfaces include:
+The supported runtime-owned settings are:
 
-- concurrency/process settings such as `WEB_CONCURRENCY` and `MAX_THREADS`
-- scheduling and admission-control settings
-- observability exporter and verbosity settings
-- protocol and transport settings
+- `port` via `Vajra.start(port: ...)`
+- `max_request_head_bytes` via `Vajra.start(max_request_head_bytes: ...)`
+- `VAJRA_PORT`
+- `VAJRA_MAX_REQUEST_HEAD_BYTES`
 
-These surfaces are documented as part of the supported runtime contract.
+The environment variables override the corresponding Ruby startup options.

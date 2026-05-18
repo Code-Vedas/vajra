@@ -9,6 +9,7 @@
 #include "request_head_types.hpp"
 
 #include <cstddef>
+#include <functional>
 #include <stdexcept>
 #include <string>
 
@@ -46,6 +47,12 @@ namespace Vajra
             max_trailer_line_bytes_(max_trailer_line_bytes)
       {
       }
+
+      BodyReadResult stream_read(
+          int client_fd,
+          const ParsedRequest &request,
+          const std::function<void(const std::string &chunk)> &on_body_chunk,
+          std::string buffered_bytes = "") const;
 
       BodyReadResult read(
           int client_fd,

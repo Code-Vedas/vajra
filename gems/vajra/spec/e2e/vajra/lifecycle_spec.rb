@@ -54,6 +54,18 @@ RSpec.describe 'Vajra lifecycle', :e2e, :integration do # rubocop:disable RSpec/
     )
   end
 
+  it 'does not let Vajra.stop before startup poison the next start' do
+    shutdown = programmatic_shutdown(stop_before_start: true)
+
+    expect(shutdown[:exitstatus]).to eq(0), shutdown[:output]
+    expect(shutdown[:output]).not_to include('Vajra already running')
+    expect(shutdown[:output]).to include(
+      '[Vajra][lifecycle]',
+      'event=drain_requested',
+      'stop_reason=programmatic_stop'
+    )
+  end
+
   it 'survives repeated process start stop thrashing and releases the listener every time' do
     current_port = disposable_listener_port
 

@@ -33,6 +33,7 @@ namespace
   std::unique_ptr<Vajra::Server> server_instance;
   pid_t worker_pid = -1;
   bool stop_requested = false;
+  bool worker_startup_in_progress = false;
   ID id_port;
   ID id_max_request_head_bytes;
   ID id_runtime_role;
@@ -462,11 +463,12 @@ namespace
 
   void write_string_payload(int fd, const std::string &value)
   {
-    const std::uint32_t length = static_cast<std::uint32_t>(value.size());
+    const std::string payload = value.substr(0, kMaxWorkerBootstrapStringPayloadBytes);
+    const std::uint32_t length = static_cast<std::uint32_t>(payload.size());
     write_all_or_throw(fd, &length, sizeof(length));
     if (length > 0)
     {
-      write_all_or_throw(fd, value.data(), length);
+      write_all_or_throw(fd, payload.data(), length);
     }
   }
 
@@ -802,6 +804,7 @@ namespace VajraNative
     {
       const std::lock_guard<std::mutex> lock(server_mutex);
       worker_pid = pid;
+      worker_startup_in_progress = false;
     }
 
     void clear_worker_pid()
@@ -809,6 +812,7 @@ namespace VajraNative
       const std::lock_guard<std::mutex> lock(server_mutex);
       worker_pid = -1;
       stop_requested = false;
+      worker_startup_in_progress = false;
     }
 
     pid_t current_worker_pid()
@@ -838,10 +842,15 @@ namespace VajraNative
     bool stop_worker_process()
     {
       pid_t pid = -1;
+      bool startup_in_progress = false;
       {
         const std::lock_guard<std::mutex> lock(server_mutex);
-        stop_requested = true;
         pid = worker_pid;
+        startup_in_progress = worker_startup_in_progress;
+        if (pid > 0 || startup_in_progress)
+        {
+          stop_requested = true;
+        }
       }
       if (pid <= 0)
       {
@@ -1078,6 +1087,10 @@ namespace VajraNative
         return;
       }
 
+      {
+        const std::lock_guard<std::mutex> lock(server_mutex);
+        worker_startup_in_progress = true;
+      }
       const BootContractResult master_boot_result = run_boot_contract(
           BootContractConfig{port, max_request_head_bytes, kMasterPreloadRuntimeRole});
       ensure_ready_boot_result(master_boot_result);

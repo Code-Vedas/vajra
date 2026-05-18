@@ -4,11 +4,13 @@
 // LICENSE file in the root directory of this source tree.
 
 #include "vajra.hpp"
+#include "listener/listener_socket.hpp"
 #include "rack/rack_request_executor.hpp"
 #include "ruby.h"
 #include "ruby/thread.h"
 
 #include <csignal>
+#include <signal.h>
 #include <cstdlib>
 #include <cerrno>
 #include <exception>
@@ -19,18 +21,31 @@
 #include <optional>
 #include <stdexcept>
 #include <cstring>
+#include <cstdint>
 #include <string>
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace
 {
   volatile std::sig_atomic_t shutting_down = 0;
   std::mutex server_mutex;
   std::unique_ptr<Vajra::Server> server_instance;
+  pid_t worker_pid = -1;
+  bool stop_requested = false;
+  bool worker_startup_in_progress = false;
   ID id_port;
   ID id_max_request_head_bytes;
   ID id_runtime_role;
   std::mutex boot_callback_mutex;
   VALUE boot_callback = Qnil;
+  constexpr const char *kMasterPreloadRuntimeRole = "ruby_master_preload";
+  constexpr const char *kWorkerBootstrapRuntimeRole = "ruby_worker_bootstrap";
+  constexpr const char *kMasterWorkerMode = "master_worker";
+  constexpr const char *kSingleProcessRuntimeRole = "single_process_bootstrap";
+  constexpr const char *kSingleProcessMode = "single_process";
+  constexpr int kWorkerProcessCount = 1;
+  constexpr std::size_t kMaxWorkerBootstrapStringPayloadBytes = 64 * 1024;
 
   struct RuntimeConfig
   {
@@ -66,6 +81,18 @@ namespace
     std::optional<BootDiagnostic> diagnostic;
   };
 
+  enum class WorkerBootstrapStatus : std::uint8_t
+  {
+    ready = 1,
+    failed = 2,
+  };
+
+  struct WorkerBootstrapReport
+  {
+    WorkerBootstrapStatus status;
+    std::optional<BootDiagnostic> diagnostic;
+  };
+
   struct ProtectedIntegerConversion
   {
     VALUE value;
@@ -76,6 +103,18 @@ namespace
   {
     VALUE value;
     VALUE result;
+  };
+
+  struct ServerRunContext
+  {
+    Vajra::Server *server;
+    std::string error_message;
+  };
+
+  struct WorkerWaitContext
+  {
+    pid_t pid;
+    std::string error_message;
   };
 
   struct OptionValidationContext
@@ -135,28 +174,6 @@ namespace
     struct sigaction previous_term_action_;
     bool installed_ = false;
   };
-
-  struct ServerStartContext
-  {
-    Vajra::Server *server;
-    std::exception_ptr error;
-  };
-
-  void *run_server_without_gvl(void *data)
-  {
-    auto *context = static_cast<ServerStartContext *>(data);
-
-    try
-    {
-      context->server->start();
-    }
-    catch (...)
-    {
-      context->error = std::current_exception();
-    }
-
-    return nullptr;
-  }
 
   [[noreturn]] void raise_ruby_runtime_error(const char *prefix, const std::exception &error)
   {
@@ -264,6 +281,25 @@ namespace
     throw std::runtime_error("Ruby boot contract returned an unsupported status: " + status_value);
   }
 
+  void *run_server_without_gvl(void *data)
+  {
+    auto *context = static_cast<ServerRunContext *>(data);
+    try
+    {
+      context->server->start();
+    }
+    catch (const std::exception &error)
+    {
+      context->error_message = error.what();
+    }
+    catch (...)
+    {
+      context->error_message = "server failed with an unknown native error";
+    }
+
+    return nullptr;
+  }
+
   std::optional<BootDiagnostic> boot_diagnostic_from_ruby(VALUE diagnostic)
   {
     if (NIL_P(diagnostic))
@@ -340,6 +376,177 @@ namespace
     }
 
     throw std::runtime_error("Ruby boot contract returned an unknown state");
+  }
+
+  BootDiagnostic diagnostic_for_boot_result_failure(const BootContractResult &result)
+  {
+    switch (result.status)
+    {
+      case BootStatus::failed:
+        if (result.diagnostic.has_value())
+        {
+          return *result.diagnostic;
+        }
+        return BootDiagnostic{
+            "missing_boot_diagnostic",
+            "contract",
+            "Ruby boot failed without diagnostic details"};
+      case BootStatus::pending:
+        return BootDiagnostic{
+            "boot_not_ready",
+            "contract",
+            "Ruby boot contract did not reach ready state"};
+      case BootStatus::ready:
+        return BootDiagnostic{
+            "unexpected_ready_state",
+            "contract",
+            "Ruby worker bootstrap reported ready when a failure diagnostic was requested"};
+    }
+
+    return BootDiagnostic{
+        "unknown_boot_state",
+        "contract",
+        "Ruby boot contract returned an unknown state"};
+  }
+
+  void write_all_or_throw(int fd, const void *buffer, std::size_t length)
+  {
+    const auto *bytes = static_cast<const std::uint8_t *>(buffer);
+    std::size_t written = 0;
+    while (written < length)
+    {
+      const ssize_t result = write(fd, bytes + written, length - written);
+      if (result < 0)
+      {
+        if (errno == EINTR)
+        {
+          continue;
+        }
+        throw std::runtime_error("worker bootstrap pipe write failed");
+      }
+
+      written += static_cast<std::size_t>(result);
+    }
+  }
+
+  bool read_exact_or_eof(int fd, void *buffer, std::size_t length)
+  {
+    auto *bytes = static_cast<std::uint8_t *>(buffer);
+    std::size_t read_bytes = 0;
+    while (read_bytes < length)
+    {
+      const ssize_t result = read(fd, bytes + read_bytes, length - read_bytes);
+      if (result == 0)
+      {
+        if (read_bytes == 0)
+        {
+          return false;
+        }
+
+        throw std::runtime_error("worker bootstrap pipe closed unexpectedly");
+      }
+
+      if (result < 0)
+      {
+        if (errno == EINTR)
+        {
+          continue;
+        }
+        throw std::runtime_error("worker bootstrap pipe read failed");
+      }
+
+      read_bytes += static_cast<std::size_t>(result);
+    }
+
+    return true;
+  }
+
+  void write_string_payload(int fd, const std::string &value)
+  {
+    const std::string payload = value.substr(0, kMaxWorkerBootstrapStringPayloadBytes);
+    const std::uint32_t length = static_cast<std::uint32_t>(payload.size());
+    write_all_or_throw(fd, &length, sizeof(length));
+    if (length > 0)
+    {
+      write_all_or_throw(fd, payload.data(), length);
+    }
+  }
+
+  std::string read_string_payload(int fd)
+  {
+    std::uint32_t length = 0;
+    if (!read_exact_or_eof(fd, &length, sizeof(length)))
+    {
+      throw std::runtime_error("worker bootstrap pipe closed before string payload length");
+    }
+    if (length > kMaxWorkerBootstrapStringPayloadBytes)
+    {
+      throw std::runtime_error("worker bootstrap pipe string payload exceeds maximum size");
+    }
+    std::string value(length, '\0');
+    if (length > 0)
+    {
+      if (!read_exact_or_eof(fd, value.data(), length))
+      {
+        throw std::runtime_error("worker bootstrap pipe closed before string payload body");
+      }
+    }
+    return value;
+  }
+
+  void report_worker_boot_ready(int write_fd)
+  {
+    const auto status = static_cast<std::uint8_t>(WorkerBootstrapStatus::ready);
+    write_all_or_throw(write_fd, &status, sizeof(status));
+  }
+
+  void report_worker_boot_failed(int write_fd, const BootDiagnostic &diagnostic)
+  {
+    const auto status = static_cast<std::uint8_t>(WorkerBootstrapStatus::failed);
+    write_all_or_throw(write_fd, &status, sizeof(status));
+    write_string_payload(write_fd, diagnostic.code);
+    write_string_payload(write_fd, diagnostic.category);
+    write_string_payload(write_fd, diagnostic.message);
+  }
+
+  WorkerBootstrapReport read_worker_bootstrap_report(int read_fd)
+  {
+    std::uint8_t status = 0;
+    if (!read_exact_or_eof(read_fd, &status, sizeof(status)))
+    {
+      throw std::runtime_error("worker exited before reporting readiness");
+    }
+
+    if (status == static_cast<std::uint8_t>(WorkerBootstrapStatus::ready))
+    {
+      return WorkerBootstrapReport{WorkerBootstrapStatus::ready, std::nullopt};
+    }
+
+    if (status == static_cast<std::uint8_t>(WorkerBootstrapStatus::failed))
+    {
+      return WorkerBootstrapReport{
+          WorkerBootstrapStatus::failed,
+          BootDiagnostic{
+              read_string_payload(read_fd),
+              read_string_payload(read_fd),
+              read_string_payload(read_fd)}};
+    }
+
+    throw std::runtime_error("worker reported an unknown bootstrap state");
+  }
+
+  [[noreturn]] void exit_worker_bootstrap_failure(int write_fd, const BootDiagnostic &diagnostic, int exit_code)
+  {
+    try
+    {
+      report_worker_boot_failed(write_fd, diagnostic);
+    }
+    catch (...)
+    {
+    }
+
+    close(write_fd);
+    _exit(exit_code);
   }
 
   int validate_start_option_key(VALUE key, VALUE, VALUE data)
@@ -535,10 +742,7 @@ namespace
       VALUE options = Qnil;
       rb_scan_args(argc, argv, "0:", &options);
       const RuntimeConfig config = configured_runtime(options);
-      const BootContractResult boot_result = run_boot_contract(
-          BootContractConfig{config.port, config.max_request_head_bytes, "single_process_bootstrap"});
-      ensure_ready_boot_result(boot_result);
-      VajraNative::start(config.port, config.max_request_head_bytes, boot_result.runtime_role);
+      VajraNative::start(config.port, config.max_request_head_bytes);
     }
     catch (const std::exception &error)
     {
@@ -581,63 +785,410 @@ namespace
 
 namespace VajraNative
 {
+  namespace
+  {
+    bool start_called_from_ruby_main_thread()
+    {
+      return rb_equal(rb_thread_current(), rb_thread_main()) == Qtrue;
+    }
+
+    void close_fd_if_open(int fd)
+    {
+      if (fd >= 0)
+      {
+        close(fd);
+      }
+    }
+
+    void set_worker_pid(pid_t pid)
+    {
+      const std::lock_guard<std::mutex> lock(server_mutex);
+      worker_pid = pid;
+      worker_startup_in_progress = false;
+    }
+
+    void clear_worker_pid()
+    {
+      const std::lock_guard<std::mutex> lock(server_mutex);
+      worker_pid = -1;
+      stop_requested = false;
+      worker_startup_in_progress = false;
+    }
+
+    void install_single_process_server(std::unique_ptr<Vajra::Server> server)
+    {
+      const std::lock_guard<std::mutex> lock(server_mutex);
+      server_instance = std::move(server);
+      worker_startup_in_progress = false;
+    }
+
+    std::unique_ptr<Vajra::Server> take_single_process_server()
+    {
+      const std::lock_guard<std::mutex> lock(server_mutex);
+      return std::move(server_instance);
+    }
+
+    bool try_begin_startup()
+    {
+      const std::lock_guard<std::mutex> lock(server_mutex);
+      if (worker_pid > 0 || server_instance || worker_startup_in_progress)
+      {
+        return false;
+      }
+
+      worker_startup_in_progress = true;
+      return true;
+    }
+
+    bool stop_worker_process()
+    {
+      pid_t pid = -1;
+      bool startup_in_progress = false;
+      {
+        const std::lock_guard<std::mutex> lock(server_mutex);
+        pid = worker_pid;
+        startup_in_progress = worker_startup_in_progress;
+        if (pid > 0 || startup_in_progress)
+        {
+          stop_requested = true;
+        }
+      }
+      if (pid <= 0)
+      {
+        return false;
+      }
+
+      for (;;)
+      {
+        if (kill(pid, SIGINT) == 0 || errno == ESRCH)
+        {
+          return true;
+        }
+
+        if (errno == EINTR)
+        {
+          continue;
+        }
+
+        throw std::runtime_error("failed to signal worker shutdown");
+      }
+    }
+
+    void replay_pending_stop_if_needed()
+    {
+      bool should_stop = false;
+      {
+        const std::lock_guard<std::mutex> lock(server_mutex);
+        should_stop = stop_requested || shutting_down != 0;
+      }
+
+      if (should_stop)
+      {
+        stop_worker_process();
+      }
+    }
+
+    void *wait_for_worker_exit_without_gvl(void *data)
+    {
+      auto *context = static_cast<WorkerWaitContext *>(data);
+      bool forwarded_shutdown = false;
+      for (;;)
+      {
+        int status = 0;
+        const pid_t wait_result = waitpid(context->pid, &status, 0);
+        if (wait_result == context->pid)
+        {
+          if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+          {
+            return nullptr;
+          }
+
+          if (WIFEXITED(status))
+          {
+            context->error_message =
+                "worker process exited unexpectedly with status " + std::to_string(WEXITSTATUS(status));
+            return nullptr;
+          }
+
+          if (WIFSIGNALED(status))
+          {
+            context->error_message =
+                "worker process exited unexpectedly due to signal " + std::to_string(WTERMSIG(status));
+            return nullptr;
+          }
+
+          context->error_message = "worker process exited unexpectedly";
+          return nullptr;
+        }
+
+        if (wait_result < 0 && errno == EINTR)
+        {
+          if (shutdown_requested() && !forwarded_shutdown)
+          {
+            stop_worker_process();
+            forwarded_shutdown = true;
+          }
+          continue;
+        }
+
+        context->error_message = "failed to wait for worker process";
+        return nullptr;
+      }
+    }
+
+    void wait_for_worker_exit(pid_t pid)
+    {
+      WorkerWaitContext context{pid, ""};
+      rb_thread_call_without_gvl(
+          wait_for_worker_exit_without_gvl,
+          &context,
+          RUBY_UBF_IO,
+          nullptr);
+      if (!context.error_message.empty())
+      {
+        throw std::runtime_error(context.error_message);
+      }
+    }
+
+    void reap_worker_process(pid_t pid)
+    {
+      for (;;)
+      {
+        int status = 0;
+        const pid_t wait_result = waitpid(pid, &status, 0);
+        if (wait_result == pid)
+        {
+          return;
+        }
+
+        if (wait_result < 0 && errno == EINTR)
+        {
+          continue;
+        }
+
+        return;
+      }
+    }
+
+    void run_worker_process(
+        int listener_fd,
+        int port,
+        std::size_t max_request_head_bytes,
+        int readiness_write_fd)
+    {
+      try
+      {
+        const BootContractResult boot_result = run_boot_contract(
+            BootContractConfig{port, max_request_head_bytes, kWorkerBootstrapRuntimeRole});
+        if (boot_result.status != BootStatus::ready)
+        {
+          exit_worker_bootstrap_failure(
+              readiness_write_fd,
+              diagnostic_for_boot_result_failure(boot_result),
+              1);
+        }
+
+        report_worker_boot_ready(readiness_write_fd);
+        close(readiness_write_fd);
+
+        Vajra::Server server(
+            port,
+            max_request_head_bytes,
+            std::make_shared<Vajra::rack::RackRequestExecutor>(),
+            boot_result.runtime_role,
+            kMasterWorkerMode,
+            kWorkerProcessCount,
+            listener_fd);
+        ServerRunContext context{&server, ""};
+        rb_thread_call_without_gvl(
+            run_server_without_gvl,
+            &context,
+            RUBY_UBF_IO,
+            nullptr);
+        if (!context.error_message.empty())
+        {
+          throw std::runtime_error(context.error_message);
+        }
+        _exit(0);
+      }
+      catch (const std::exception &error)
+      {
+        exit_worker_bootstrap_failure(
+            readiness_write_fd,
+            BootDiagnostic{
+                "worker_bootstrap_error",
+                "boot",
+                error.what()},
+            1);
+      }
+    }
+
+    void run_single_process_server(int port, std::size_t max_request_head_bytes)
+    {
+      const BootContractResult boot_result = run_boot_contract(
+          BootContractConfig{port, max_request_head_bytes, kSingleProcessRuntimeRole});
+      ensure_ready_boot_result(boot_result);
+
+      auto server = std::make_unique<Vajra::Server>(
+          port,
+          max_request_head_bytes,
+          std::make_shared<Vajra::rack::RackRequestExecutor>(),
+          boot_result.runtime_role,
+          kSingleProcessMode,
+          0);
+      Vajra::Server *server_ptr = server.get();
+      install_single_process_server(std::move(server));
+      ServerRunContext context{server_ptr, ""};
+
+      try
+      {
+        rb_thread_call_without_gvl(
+            run_server_without_gvl,
+            &context,
+            RUBY_UBF_IO,
+            nullptr);
+        if (!context.error_message.empty())
+        {
+          throw std::runtime_error(context.error_message);
+        }
+      }
+      catch (...)
+      {
+        auto owned_server = take_single_process_server();
+        if (owned_server)
+        {
+          owned_server->stop();
+        }
+        throw;
+      }
+
+      auto owned_server = take_single_process_server();
+      if (owned_server)
+      {
+        owned_server->stop();
+      }
+    }
+  }
+
   bool shutdown_requested()
   {
     return shutting_down != 0;
   }
 
-  void start(int port, std::size_t max_request_head_bytes, const std::string &runtime_role)
+  void start(int port, std::size_t max_request_head_bytes)
   {
     SignalHandlerGuard signal_handler_guard;
     signal_handler_guard.install();
 
+    shutting_down = 0;
+
     try
     {
-      Vajra::Server *server = nullptr;
+      if (!try_begin_startup())
       {
-        std::lock_guard<std::mutex> lock(server_mutex);
-        if (server_instance)
-        {
-          std::cout << "Vajra already running" << std::endl;
-          return;
-        }
-
-        shutting_down = 0;
-        server_instance = std::make_unique<Vajra::Server>(
-            port,
-            max_request_head_bytes,
-            std::make_shared<Vajra::rack::RackRequestExecutor>(),
-            runtime_role);
-        server = server_instance.get();
+        std::cout << "Vajra already running" << std::endl;
+        return;
       }
 
-      ServerStartContext context{server, nullptr};
-      rb_thread_call_without_gvl(run_server_without_gvl, &context, RUBY_UBF_IO, nullptr);
-      if (context.error)
+      if (!start_called_from_ruby_main_thread())
       {
-        std::rethrow_exception(context.error);
+        run_single_process_server(port, max_request_head_bytes);
+        return;
       }
+      const BootContractResult master_boot_result = run_boot_contract(
+          BootContractConfig{port, max_request_head_bytes, kMasterPreloadRuntimeRole});
+      ensure_ready_boot_result(master_boot_result);
+
+      Vajra::listener::Socket listener_socket;
+      Vajra::listener::SocketBinding binding = listener_socket.open(port);
+
+      int readiness_pipe[2] = {-1, -1};
+      if (pipe(readiness_pipe) != 0)
+      {
+        const int error_number = errno;
+        close_fd_if_open(binding.fd);
+        throw std::runtime_error(
+            std::string("worker bootstrap pipe creation failed: ") + std::strerror(error_number));
+      }
+
+#if defined(__APPLE__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+      const pid_t pid = fork();
+#if defined(__APPLE__)
+#pragma clang diagnostic pop
+#endif
+      if (pid < 0)
+      {
+        const int error_number = errno;
+        close_fd_if_open(readiness_pipe[0]);
+        close_fd_if_open(readiness_pipe[1]);
+        close_fd_if_open(binding.fd);
+        throw std::runtime_error(
+            std::string("worker fork failed: ") + std::strerror(error_number));
+      }
+
+      if (pid == 0)
+      {
+        close_fd_if_open(readiness_pipe[0]);
+        run_worker_process(binding.fd, binding.port, max_request_head_bytes, readiness_pipe[1]);
+      }
+
+      set_worker_pid(pid);
+      replay_pending_stop_if_needed();
+      close_fd_if_open(readiness_pipe[1]);
+
+      WorkerBootstrapReport report;
+      try
+      {
+        report = read_worker_bootstrap_report(readiness_pipe[0]);
+      }
+      catch (...)
+      {
+        close_fd_if_open(readiness_pipe[0]);
+        close_fd_if_open(binding.fd);
+        stop_worker_process();
+        reap_worker_process(pid);
+        clear_worker_pid();
+        throw;
+      }
+      close_fd_if_open(readiness_pipe[0]);
+
+      if (report.status == WorkerBootstrapStatus::failed)
+      {
+        close_fd_if_open(binding.fd);
+        reap_worker_process(pid);
+        clear_worker_pid();
+        const auto &diagnostic = report.diagnostic.value();
+        throw std::runtime_error(
+            "Ruby worker boot failed (" + diagnostic.code + "/" + diagnostic.category + "): " +
+            diagnostic.message);
+      }
+
+      close_fd_if_open(binding.fd);
+      wait_for_worker_exit(pid);
+      clear_worker_pid();
     }
     catch (...)
     {
-      std::lock_guard<std::mutex> lock(server_mutex);
-      server_instance.reset();
+      clear_worker_pid();
       throw;
     }
-
-    std::lock_guard<std::mutex> lock(server_mutex);
-    server_instance.reset();
   }
 
   void stop()
   {
-    std::lock_guard<std::mutex> lock(server_mutex);
-    if (!server_instance)
+    if (stop_worker_process())
     {
       return;
     }
 
-    server_instance->stop();
+    std::lock_guard<std::mutex> lock(server_mutex);
+    if (server_instance)
+    {
+      server_instance->stop();
+    }
   }
 }
 

@@ -18,9 +18,9 @@ RSpec.describe 'Vajra lifecycle', :e2e, :integration do # rubocop:disable RSpec/
       'event=drain_requested',
       'event=stop_completed',
       'boot_status=ready',
-      'mode=single_process',
-      'runtime_role=single_process_bootstrap',
-      'worker_processes=0'
+      'mode=master_worker',
+      'runtime_role=ruby_worker_bootstrap',
+      'worker_processes=1'
     )
 
     rebound_server = bind_port(port: shutdown[:port])
@@ -47,6 +47,18 @@ RSpec.describe 'Vajra lifecycle', :e2e, :integration do # rubocop:disable RSpec/
 
     expect(shutdown[:exitstatus]).to eq(0), shutdown[:output]
     expect(shutdown[:output]).not_to include('accept failed')
+    expect(shutdown[:output]).to include(
+      '[Vajra][lifecycle]',
+      'event=drain_requested',
+      'stop_reason=programmatic_stop'
+    )
+  end
+
+  it 'does not let Vajra.stop before startup poison the next start' do
+    shutdown = programmatic_shutdown(stop_before_start: true)
+
+    expect(shutdown[:exitstatus]).to eq(0), shutdown[:output]
+    expect(shutdown[:output]).not_to include('Vajra already running')
     expect(shutdown[:output]).to include(
       '[Vajra][lifecycle]',
       'event=drain_requested',

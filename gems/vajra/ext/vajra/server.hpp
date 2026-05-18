@@ -26,7 +26,10 @@ namespace Vajra
         int port,
         std::size_t max_request_head_bytes = request::kDefaultMaxRequestHeadBytes,
         std::shared_ptr<const request::RequestExecutor> request_executor = nullptr,
-        std::string runtime_role = "single_process_bootstrap");
+        std::string runtime_role = "single_process_bootstrap",
+        std::string runtime_mode = "single_process",
+        int worker_processes = 0,
+        int inherited_listener_fd = -1);
     ~Server();
 
     void start();
@@ -41,6 +44,8 @@ namespace Vajra
     request::RequestProcessor request_processor_;
     lifecycle::Controller lifecycle_;
     std::string runtime_role_;
+    std::string runtime_mode_;
+    int worker_processes_;
 
     void close_listener_fd(bool interrupt_accept);
   };

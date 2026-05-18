@@ -67,7 +67,7 @@ module VajraE2EStartupHelpers
     RUBY
   end
 
-  def programmatic_shutdown(max_attempts: 3)
+  def programmatic_shutdown(max_attempts: 3, stop_before_start: false)
     script = <<~RUBY
       require "socket"
       require "timeout"
@@ -78,19 +78,26 @@ module VajraE2EStartupHelpers
       bind_host = "#{VajraE2EHelpers::LISTENER_BIND_HOST}"
       Thread.report_on_exception = false
 
-      def listener_ready?(host, port)
-        socket = TCPSocket.new(host, port)
-        socket.close
-        true
-      rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH
+      def server_ready?(host, port)
+        Timeout.timeout(0.1) do
+          socket = TCPSocket.new(host, port)
+          socket.write("GET / HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n")
+          response = socket.readpartial(1024)
+          response.include?("HTTP/1.1 200 OK")
+        ensure
+          socket&.close
+        end
+      rescue Timeout::Error, Errno::ECONNREFUSED, Errno::EHOSTUNREACH, Errno::ECONNRESET, EOFError
         false
       end
+
+      Vajra.stop if #{stop_before_start ? 'true' : 'false'}
 
       server_thread = Thread.new { Vajra.start }
 
       Timeout.timeout(5) do
         loop do
-          break if listener_ready?(host, port)
+          break if server_ready?(host, port)
           sleep 0.01
         end
       end

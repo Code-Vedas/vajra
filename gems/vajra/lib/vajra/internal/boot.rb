@@ -45,19 +45,23 @@ module Vajra
       end
 
       def call(boot_request)
-        normalize_boot_result(active_coordinator.call(normalize_boot_request(boot_request)))
+        normalized_request = normalize_boot_request(boot_request)
+        normalize_boot_result(active_coordinator.call(normalized_request), normalized_request)
       rescue StandardError => e
         failure_result(
-          code: normalized_failure_code(e),
-          category: failure_category_for(e),
-          message: "#{e.class}: #{e.message}"
+          role: normalized_request&.fetch(:runtime_role, SINGLE_PROCESS_BOOTSTRAP_ROLE) || SINGLE_PROCESS_BOOTSTRAP_ROLE,
+          diagnostic: [
+            normalized_failure_code(e),
+            failure_category_for(e),
+            "#{e.class}: #{e.message}"
+          ]
         )
       end
 
-      def default_coordinator(_boot_request)
+      def default_coordinator(boot_request)
         {
           status: STATUSES.fetch(:ready),
-          role: SINGLE_PROCESS_BOOTSTRAP_ROLE
+          role: boot_request.fetch(:runtime_role)
         }
       end
       private_class_method :default_coordinator
@@ -116,8 +120,8 @@ module Vajra
       end
       private_class_method :normalize_runtime_role
 
-      def normalize_boot_result(result)
-        status, role, diagnostic = unpack_result(result)
+      def normalize_boot_result(result, boot_request)
+        status, role, diagnostic = unpack_result(result, boot_request)
         normalized_status = normalize_status(status)
         normalized_role = coerce_contract_string(role, 'boot role')
         raise BootContractError, 'boot role must not be empty' if normalized_role.empty?
@@ -131,9 +135,9 @@ module Vajra
       end
       private_class_method :normalize_boot_result
 
-      def unpack_result(result)
+      def unpack_result(result, boot_request)
         return [result.fetch(:status), result.fetch(:role), result[:diagnostic]] if result.is_a?(Hash)
-        return [result, SINGLE_PROCESS_BOOTSTRAP_ROLE, nil] if result.is_a?(String) || result.is_a?(Symbol)
+        return [result, boot_request.fetch(:runtime_role), nil] if result.is_a?(String) || result.is_a?(Symbol)
 
         return result if result.is_a?(Array) && result.length == 3
 
@@ -193,11 +197,11 @@ module Vajra
       end
       private_class_method :invalid_boot_diagnostic!
 
-      def failure_result(code:, category:, message:)
+      def failure_result(role:, diagnostic:)
         [
           STATUSES.fetch(:failed),
-          SINGLE_PROCESS_BOOTSTRAP_ROLE,
-          [String(code), String(category), String(message)]
+          String(role),
+          diagnostic.map { |value| String(value) }
         ]
       end
       private_class_method :failure_result

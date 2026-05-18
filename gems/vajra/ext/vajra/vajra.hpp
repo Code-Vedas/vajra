@@ -16,8 +16,7 @@ namespace VajraNative
   bool shutdown_requested();
   void start(
       int port = 3000,
-      std::size_t max_request_head_bytes = Vajra::request::kDefaultMaxRequestHeadBytes,
-      const std::string &runtime_role = "single_process_bootstrap");
+      std::size_t max_request_head_bytes = Vajra::request::kDefaultMaxRequestHeadBytes);
   void stop();
 }
 

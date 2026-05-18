@@ -76,6 +76,22 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     )
   end
 
+  it 'fails startup when Vajra.start is invoked from a non-main Ruby thread' do
+    failure = startup_failure_with_inline_script(<<~RUBY)
+      require "vajra"
+
+      worker = Thread.new { Vajra.start }
+      worker.join
+    RUBY
+
+    expect(failure).to match(
+      exitstatus: be_positive,
+      output: a_string_including(
+        'Unable to start Vajra: worker-only Vajra.start must be invoked from the Ruby main thread'
+      )
+    )
+  end
+
   it 'fails startup with actionable Ruby boot diagnostics' do
     failure = startup_failure_with_inline_script(<<~RUBY)
       require "vajra"

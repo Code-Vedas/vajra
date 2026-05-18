@@ -29,6 +29,10 @@ Every supported integration preserves the same high-level contract:
 - the application remains responsible for application semantics
 - Vajra remains responsible for listener lifecycle, request execution entry, and
   runtime ownership
+- the native runtime owns accepted connections and response transport while Ruby
+  workers execute application requests
+- the Ruby master stays on boot and control responsibilities only; same-process
+  callback execution is bootstrap plumbing, not supported runtime architecture
 - boot failures identify whether the problem is application boot,
   adapter wiring, or server startup
 - configuration precedence is explicit and documented
@@ -64,7 +68,7 @@ The Rack environment translation contract is explicit:
   request headers surfaced as `HTTP_*`
 - `rack.input` is a buffered binary input object populated from supported
   request bodies
-- the current request-body baseline accepts fixed-length bodies and HTTP/1.1
+- the request-body baseline accepts fixed-length bodies and HTTP/1.1
   chunked transfer coding, consumes trailers without surfacing them into the
   Rack env, enforces Vajra's native request-body size limits, and still closes
   the connection after body-bearing requests

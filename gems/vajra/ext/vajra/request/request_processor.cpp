@@ -137,29 +137,47 @@ void Vajra::request::RequestProcessor::handle(int client_fd, const SocketContext
       return;
     }
 
+    const Vajra::response::ConnectionBehavior connection_behavior = connection_behavior_for(request_context.request);
+    Vajra::response::Response response;
     try
     {
-      BodyReadResult body_read_result =
-          request_body_reader_.read(client_fd, request_context.request, std::move(buffered_bytes));
-      request_context.request_body = std::move(body_read_result.body);
+      std::unique_ptr<RequestExecutionSession> execution_session;
+      if (request_executor_)
+      {
+        execution_session = request_executor_->start(request_context);
+      }
+      else
+      {
+        execution_session = nullptr;
+      }
+
+      BodyReadResult body_read_result = request_body_reader_.stream_read(
+          client_fd,
+          request_context.request,
+          [&request_context, &execution_session](const std::string &chunk) {
+            if (execution_session)
+            {
+              execution_session->append_request_body_chunk(chunk);
+              return;
+            }
+
+            request_context.request_body.append(chunk);
+          },
+          std::move(buffered_bytes));
       buffered_bytes = std::move(body_read_result.remaining_buffered_bytes);
+
+      if (execution_session)
+      {
+        response = response_for(*execution_session, connection_behavior);
+      }
+      else
+      {
+        response = response_for(request_context, connection_behavior);
+      }
     }
     catch (const BodyReadIncompleteError &)
     {
       return;
-    }
-    catch (const HeadError &error)
-    {
-      reject_request_head(client_fd, error);
-      return;
-    }
-
-    const Vajra::response::ConnectionBehavior connection_behavior = connection_behavior_for(request_context.request);
-
-    Vajra::response::Response response;
-    try
-    {
-      response = response_for(request_context, connection_behavior);
     }
     catch (const HeadError &error)
     {
@@ -182,6 +200,23 @@ void Vajra::request::RequestProcessor::handle(int client_fd, const SocketContext
       return;
     }
   }
+}
+
+Vajra::response::Response Vajra::request::RequestProcessor::response_for(
+    RequestExecutionSession &execution_session,
+    Vajra::response::ConnectionBehavior connection_behavior) const
+{
+  std::optional<Vajra::response::Response> response = execution_session.finish();
+  if (!response)
+  {
+    return response_writer_.success_response(connection_behavior);
+  }
+
+  response->headers = Vajra::response::strip_framing_headers(response->headers);
+  response->connection_behavior = connection_behavior;
+  Vajra::response::ResponseSerializer serializer;
+  serializer.validate(*response);
+  return *response;
 }
 
 Vajra::response::Response Vajra::request::RequestProcessor::response_for(

@@ -30,8 +30,8 @@ families:
 - protocol and transport extensions such as TLS and HTTP/2
 
 Within the supervision and IPC family, Vajra keeps request-execution framing
-separate from control and lifecycle framing so future Rack execution, worker
-coordination, and observability work do not collapse into one mixed protocol.
+separate from control and lifecycle framing so Rack execution, worker
+coordination, and observability do not collapse into one mixed protocol.
 
 ## Repository Boundaries
 

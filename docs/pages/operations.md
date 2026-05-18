@@ -37,24 +37,24 @@ Operators answer:
 - did the native extension load correctly?
 - did the listener bind correctly?
 - did the application boot path complete?
-- are runtime diagnostics consistent with the intended config?
+- are runtime diagnostics consistent with the configured runtime?
 
 ### Steady State
 
 Operators observe:
 
-- request throughput and latency
-- queueing and admission pressure
-- restart and replacement behavior
-- structured runtime events for boot, shutdown, failures, and recovery
+- request success and failure behavior
+- structured runtime events for boot, worker readiness, shutdown, and failures
+- whether the listener is reachable and the application responds correctly
 
 ### Shutdown
 
 Controlled shutdown is explicit:
 
 - stop accepting new work
-- allow in-flight work to finish when policy allows
-- expose escalation boundaries clearly if a forced stop is needed
+- close the request channel to the worker
+- wait for worker exit
+- release the listener cleanly
 
 ## Operating In Degraded States
 

@@ -78,7 +78,7 @@ The IPC contract keeps debugging work explicit instead of hiding protocol state:
 ## Request-Channel Frame Families
 
 The request channel is reserved for application-execution flow between the
-native runtime and later Ruby execution workers.
+native runtime and Ruby execution workers.
 
 | Frame family | Producers | Consumers | Allowed responsibility | Explicitly excluded |
 | --- | --- | --- | --- | --- |
@@ -97,10 +97,10 @@ separate from request execution throughput and request-data ownership.
 | Protocol version negotiation | native runtime, Ruby control peer | control peer, native runtime | protocol version markers, compatibility checks, and unsupported-version outcomes | request payloads, response bodies, application execution data |
 | Process registration and identity | Ruby master or worker, native runtime | control peer, native runtime | process identity, role declaration, registration, and channel attachment state | request execution, telemetry streams, response metadata |
 | Readiness and boot result | Ruby master or worker | native runtime | boot success, boot failure, readiness, and bounded startup diagnostics | request bodies, drain commands, overload reporting |
-| Lifecycle command | native runtime, operator-facing control peer | Ruby control peer, native runtime | drain, stop, shutdown orchestration, and later replacement or restart commands | request dispatch payloads, health snapshots, app response data |
+| Lifecycle command | native runtime, operator-facing control peer | Ruby control peer, native runtime | drain, stop, shutdown orchestration, and replacement or restart commands | request dispatch payloads, health snapshots, app response data |
 | Lifecycle state notification | Ruby control peer, native runtime | control peer, native runtime | state transitions such as booting, ready, draining, stopped, or failed | request or response transport data |
 | Diagnostics and error reporting | Ruby control peer, native runtime | control peer, native runtime | actionable control-path errors, malformed-control-message outcomes, and bounded failure context | request execution payloads, telemetry time series, response bodies |
-| Reserved telemetry and status | Ruby workers, native runtime | control peer, native runtime | future health, overload, queue pressure, and observability signals | request execution commands, lifecycle mutations, app response data |
+| Reserved telemetry and status | Ruby workers, native runtime | control peer, native runtime | health, overload, queue pressure, and observability signals when that family is activated | request execution commands, lifecycle mutations, app response data |
 
 ## Protocol Versioning And Compatibility
 
@@ -144,7 +144,7 @@ surface, not an implementation detail.
   compatibility rule defines how older peers behave
 - optional fields and reserved space are preferred for additive evolution that
   does not change the meaning of existing compatible frames
-- reserved telemetry or future-status families remain unavailable until a
+- reserved telemetry or reserved-status families remain unavailable until a
   versioned contract activates them explicitly
 
 ### Compatibility Ownership

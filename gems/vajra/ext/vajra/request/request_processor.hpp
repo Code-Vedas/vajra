@@ -33,6 +33,9 @@ namespace Vajra
     private:
       Vajra::response::ConnectionBehavior connection_behavior_for(const ParsedRequest &request) const;
       Vajra::response::Response response_for(
+          RequestExecutionSession &execution_session,
+          Vajra::response::ConnectionBehavior connection_behavior) const;
+      Vajra::response::Response response_for(
           const RequestContext &request_context,
           Vajra::response::ConnectionBehavior connection_behavior) const;
       void reject_request_head(int client_fd, const HeadError &error) const;

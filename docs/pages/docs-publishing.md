@@ -11,7 +11,7 @@ the docs site.
 
 ## Public Hostname
 
-The intended and supported public docs hostname is:
+The supported public docs hostname is:
 
 ```text
 vajra.codevedas.com

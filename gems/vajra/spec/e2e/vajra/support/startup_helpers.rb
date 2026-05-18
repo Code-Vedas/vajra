@@ -93,17 +93,19 @@ module VajraE2EStartupHelpers
 
       Vajra.stop if #{stop_before_start ? 'true' : 'false'}
 
-      server_thread = Thread.new { Vajra.start }
-
-      Timeout.timeout(5) do
-        loop do
-          break if server_ready?(host, port)
-          sleep 0.01
+      stopper_thread = Thread.new do
+        Timeout.timeout(5) do
+          loop do
+            break if server_ready?(host, port)
+            sleep 0.01
+          end
         end
+
+        Vajra.stop
       end
 
-      Vajra.stop
-      Timeout.timeout(5) { server_thread.join }
+      Vajra.start
+      Timeout.timeout(5) { stopper_thread.join }
 
       rebound_server = TCPServer.new(bind_host, port)
       rebound_server.close

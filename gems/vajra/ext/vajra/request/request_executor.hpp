@@ -9,17 +9,27 @@
 #include "request_context.hpp"
 #include "response/response.hpp"
 
+#include <memory>
 #include <optional>
 
 namespace Vajra
 {
   namespace request
   {
+    class RequestExecutionSession
+    {
+    public:
+      virtual ~RequestExecutionSession() = default;
+      virtual void append_request_body_chunk(const std::string &chunk) = 0;
+      virtual std::optional<Vajra::response::Response> finish() = 0;
+    };
+
     class RequestExecutor
     {
     public:
       virtual ~RequestExecutor() = default;
-      virtual std::optional<Vajra::response::Response> execute(const RequestContext &request_context) const = 0;
+      virtual std::unique_ptr<RequestExecutionSession> start(const RequestContext &request_context) const;
+      virtual std::optional<Vajra::response::Response> execute(const RequestContext &request_context) const;
     };
   }
 }

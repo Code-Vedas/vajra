@@ -10,6 +10,7 @@
 
 #include <cerrno>
 #include <cstdlib>
+#include <functional>
 #include <limits>
 #include <string>
 #include <sys/socket.h>
@@ -345,11 +346,25 @@ namespace
     }
   }
 
+  void emit_body_chunk(
+      const std::function<void(const std::string &chunk)> &on_body_chunk,
+      const char *data,
+      std::size_t length)
+  {
+    if (length == 0)
+    {
+      return;
+    }
+
+    on_body_chunk(std::string(data, length));
+  }
+
   Vajra::request::BodyReadResult read_content_length_body(
       int client_fd,
       std::size_t content_length,
       std::string buffered_bytes,
-      std::size_t max_request_body_bytes)
+      std::size_t max_request_body_bytes,
+      const std::function<void(const std::string &chunk)> &on_body_chunk)
   {
     if (content_length > max_request_body_bytes)
     {
@@ -358,9 +373,8 @@ namespace
 
     const std::size_t body_start = 0;
     ensure_buffer_bytes(buffered_bytes, body_start, content_length, client_fd);
-    return Vajra::request::BodyReadResult{
-        buffered_bytes.substr(body_start, content_length),
-        buffered_bytes.substr(body_start + content_length)};
+    emit_body_chunk(on_body_chunk, buffered_bytes.data() + body_start, content_length);
+    return Vajra::request::BodyReadResult{"", buffered_bytes.substr(body_start + content_length)};
   }
 
   Vajra::request::BodyReadResult read_chunked_body(
@@ -368,10 +382,11 @@ namespace
       std::string buffered_bytes,
       std::size_t max_request_body_bytes,
       std::size_t max_chunk_line_bytes,
-      std::size_t max_trailer_line_bytes)
+      std::size_t max_trailer_line_bytes,
+      const std::function<void(const std::string &chunk)> &on_body_chunk)
   {
-    std::string body;
     std::size_t cursor = 0;
+    std::size_t total_body_bytes = 0;
 
     while (true)
     {
@@ -380,17 +395,18 @@ namespace
       if (chunk_size == 0)
       {
         consume_trailers(buffered_bytes, cursor, client_fd, max_trailer_line_bytes);
-        return Vajra::request::BodyReadResult{body, unread_suffix(buffered_bytes, cursor)};
+        return Vajra::request::BodyReadResult{"", unread_suffix(buffered_bytes, cursor)};
       }
 
-      if (chunk_size > max_request_body_bytes - body.size())
+      if (chunk_size > max_request_body_bytes - total_body_bytes)
       {
         raise_request_body_too_large();
       }
 
       ensure_buffer_bytes(buffered_bytes, cursor, chunk_size + 2, client_fd);
-      body.append(buffered_bytes.data() + cursor, chunk_size);
+      emit_body_chunk(on_body_chunk, buffered_bytes.data() + cursor, chunk_size);
       cursor += chunk_size;
+      total_body_bytes += chunk_size;
       if (buffered_bytes[cursor] != '\r' || buffered_bytes[cursor + 1] != '\n')
       {
         raise_invalid_body_read();
@@ -402,9 +418,10 @@ namespace
   }
 }
 
-Vajra::request::BodyReadResult Vajra::request::RequestBodyReader::read(
+Vajra::request::BodyReadResult Vajra::request::RequestBodyReader::stream_read(
     int client_fd,
     const ParsedRequest &request,
+    const std::function<void(const std::string &chunk)> &on_body_chunk,
     std::string buffered_bytes) const
 {
   const BodyReadPlan plan = body_read_plan_for(request);
@@ -418,15 +435,34 @@ Vajra::request::BodyReadResult Vajra::request::RequestBodyReader::read(
         client_fd,
         plan.content_length,
         std::move(buffered_bytes),
-        max_request_body_bytes_);
+        max_request_body_bytes_,
+        on_body_chunk);
   case BodyFraming::chunked:
     return read_chunked_body(
         client_fd,
         std::move(buffered_bytes),
         max_request_body_bytes_,
         max_chunk_line_bytes_,
-        max_trailer_line_bytes_);
+        max_trailer_line_bytes_,
+        on_body_chunk);
   }
 
   raise_invalid_body_read();
+}
+
+Vajra::request::BodyReadResult Vajra::request::RequestBodyReader::read(
+    int client_fd,
+    const ParsedRequest &request,
+    std::string buffered_bytes) const
+{
+  std::string body;
+  BodyReadResult result = stream_read(
+      client_fd,
+      request,
+      [&body](const std::string &chunk) {
+        body.append(chunk);
+      },
+      std::move(buffered_bytes));
+  result.body = std::move(body);
+  return result;
 }

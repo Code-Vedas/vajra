@@ -13,16 +13,20 @@
 #include <signal.h>
 #include <cstdlib>
 #include <cerrno>
+#include <chrono>
 #include <exception>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <limits>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <cstring>
 #include <cstdint>
 #include <string>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -32,6 +36,7 @@ namespace
   std::mutex server_mutex;
   std::unique_ptr<Vajra::Server> server_instance;
   pid_t worker_pid = -1;
+  int worker_request_channel_fd = -1;
   bool stop_requested = false;
   bool worker_startup_in_progress = false;
   ID id_port;
@@ -40,10 +45,9 @@ namespace
   std::mutex boot_callback_mutex;
   VALUE boot_callback = Qnil;
   constexpr const char *kMasterPreloadRuntimeRole = "ruby_master_preload";
+  constexpr const char *kMasterControlRuntimeRole = "ruby_master_control";
   constexpr const char *kWorkerBootstrapRuntimeRole = "ruby_worker_bootstrap";
   constexpr const char *kMasterWorkerMode = "master_worker";
-  constexpr const char *kSingleProcessRuntimeRole = "single_process_bootstrap";
-  constexpr const char *kSingleProcessMode = "single_process";
   constexpr int kWorkerProcessCount = 1;
   constexpr std::size_t kMaxWorkerBootstrapStringPayloadBytes = 64 * 1024;
 
@@ -129,6 +133,18 @@ namespace
     {
       shutting_down = 1;
     }
+  }
+
+  std::string utc_timestamp()
+  {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+    std::tm utc_time{};
+    gmtime_r(&now_time, &utc_time);
+
+    std::ostringstream timestamp;
+    timestamp << std::put_time(&utc_time, "%Y-%m-%dT%H:%M:%SZ");
+    return timestamp.str();
   }
 
   class SignalHandlerGuard
@@ -800,29 +816,34 @@ namespace VajraNative
       }
     }
 
-    void set_worker_pid(pid_t pid)
+    void set_worker_runtime(pid_t pid, int request_channel_fd)
     {
       const std::lock_guard<std::mutex> lock(server_mutex);
       worker_pid = pid;
+      worker_request_channel_fd = request_channel_fd;
       worker_startup_in_progress = false;
     }
 
     void clear_worker_pid()
     {
+      int request_channel_fd = -1;
       const std::lock_guard<std::mutex> lock(server_mutex);
+      request_channel_fd = worker_request_channel_fd;
       worker_pid = -1;
+      worker_request_channel_fd = -1;
       stop_requested = false;
       worker_startup_in_progress = false;
+      close_fd_if_open(request_channel_fd);
     }
 
-    void install_single_process_server(std::unique_ptr<Vajra::Server> server)
+    void install_server_instance(std::unique_ptr<Vajra::Server> server)
     {
       const std::lock_guard<std::mutex> lock(server_mutex);
       server_instance = std::move(server);
       worker_startup_in_progress = false;
     }
 
-    std::unique_ptr<Vajra::Server> take_single_process_server()
+    std::unique_ptr<Vajra::Server> take_server_instance()
     {
       const std::lock_guard<std::mutex> lock(server_mutex);
       return std::move(server_instance);
@@ -844,18 +865,39 @@ namespace VajraNative
     {
       pid_t pid = -1;
       bool startup_in_progress = false;
+      int request_channel_fd = -1;
       {
         const std::lock_guard<std::mutex> lock(server_mutex);
         pid = worker_pid;
+        request_channel_fd = worker_request_channel_fd;
         startup_in_progress = worker_startup_in_progress;
         if (pid > 0 || startup_in_progress)
         {
           stop_requested = true;
         }
       }
+
+      if (request_channel_fd >= 0)
+      {
+        shutdown(request_channel_fd, SHUT_RDWR);
+        close_fd_if_open(request_channel_fd);
+        {
+          const std::lock_guard<std::mutex> lock(server_mutex);
+          if (worker_request_channel_fd == request_channel_fd)
+          {
+            worker_request_channel_fd = -1;
+          }
+        }
+      }
+
       if (pid <= 0)
       {
-        return false;
+        return startup_in_progress;
+      }
+
+      if (request_channel_fd >= 0)
+      {
+        return true;
       }
 
       for (;;)
@@ -971,7 +1013,7 @@ namespace VajraNative
     }
 
     void run_worker_process(
-        int listener_fd,
+        int request_channel_fd,
         int port,
         std::size_t max_request_head_bytes,
         int readiness_write_fd)
@@ -989,26 +1031,16 @@ namespace VajraNative
         }
 
         report_worker_boot_ready(readiness_write_fd);
+        std::cout << "[Vajra][lifecycle] " << utc_timestamp()
+                  << " event=worker_ready state=booting boot_status=ready stop_reason=none"
+                  << " port=" << port
+                  << " listener_owned=false listener_fd=-1"
+                  << " mode=" << kMasterWorkerMode
+                  << " runtime_role=" << boot_result.runtime_role
+                  << " worker_processes=" << kWorkerProcessCount
+                  << std::endl;
         close(readiness_write_fd);
-
-        Vajra::Server server(
-            port,
-            max_request_head_bytes,
-            std::make_shared<Vajra::rack::RackRequestExecutor>(),
-            boot_result.runtime_role,
-            kMasterWorkerMode,
-            kWorkerProcessCount,
-            listener_fd);
-        ServerRunContext context{&server, ""};
-        rb_thread_call_without_gvl(
-            run_server_without_gvl,
-            &context,
-            RUBY_UBF_IO,
-            nullptr);
-        if (!context.error_message.empty())
-        {
-          throw std::runtime_error(context.error_message);
-        }
+        Vajra::rack::run_worker_request_execution_loop(request_channel_fd);
         _exit(0);
       }
       catch (const std::exception &error)
@@ -1023,21 +1055,17 @@ namespace VajraNative
       }
     }
 
-    void run_single_process_server(int port, std::size_t max_request_head_bytes)
+    void run_master_runtime_server(int port, std::size_t max_request_head_bytes, int request_channel_fd)
     {
-      const BootContractResult boot_result = run_boot_contract(
-          BootContractConfig{port, max_request_head_bytes, kSingleProcessRuntimeRole});
-      ensure_ready_boot_result(boot_result);
-
       auto server = std::make_unique<Vajra::Server>(
           port,
           max_request_head_bytes,
-          std::make_shared<Vajra::rack::RackRequestExecutor>(),
-          boot_result.runtime_role,
-          kSingleProcessMode,
-          0);
+          std::make_shared<Vajra::rack::RackRequestExecutor>(Vajra::rack::request_channel_transport(request_channel_fd)),
+          kMasterControlRuntimeRole,
+          kMasterWorkerMode,
+          kWorkerProcessCount);
       Vajra::Server *server_ptr = server.get();
-      install_single_process_server(std::move(server));
+      install_server_instance(std::move(server));
       ServerRunContext context{server_ptr, ""};
 
       try
@@ -1054,7 +1082,7 @@ namespace VajraNative
       }
       catch (...)
       {
-        auto owned_server = take_single_process_server();
+        auto owned_server = take_server_instance();
         if (owned_server)
         {
           owned_server->stop();
@@ -1062,7 +1090,7 @@ namespace VajraNative
         throw;
       }
 
-      auto owned_server = take_single_process_server();
+      auto owned_server = take_server_instance();
       if (owned_server)
       {
         owned_server->stop();
@@ -1092,23 +1120,28 @@ namespace VajraNative
 
       if (!start_called_from_ruby_main_thread())
       {
-        run_single_process_server(port, max_request_head_bytes);
-        return;
+        throw std::runtime_error("worker-only Vajra.start must be invoked from the Ruby main thread");
       }
       const BootContractResult master_boot_result = run_boot_contract(
           BootContractConfig{port, max_request_head_bytes, kMasterPreloadRuntimeRole});
       ensure_ready_boot_result(master_boot_result);
 
-      Vajra::listener::Socket listener_socket;
-      Vajra::listener::SocketBinding binding = listener_socket.open(port);
-
       int readiness_pipe[2] = {-1, -1};
       if (pipe(readiness_pipe) != 0)
       {
         const int error_number = errno;
-        close_fd_if_open(binding.fd);
         throw std::runtime_error(
             std::string("worker bootstrap pipe creation failed: ") + std::strerror(error_number));
+      }
+
+      int request_channel[2] = {-1, -1};
+      if (socketpair(AF_UNIX, SOCK_STREAM, 0, request_channel) != 0)
+      {
+        const int error_number = errno;
+        close_fd_if_open(readiness_pipe[0]);
+        close_fd_if_open(readiness_pipe[1]);
+        throw std::runtime_error(
+            std::string("worker request channel creation failed: ") + std::strerror(error_number));
       }
 
 #if defined(__APPLE__)
@@ -1124,18 +1157,22 @@ namespace VajraNative
         const int error_number = errno;
         close_fd_if_open(readiness_pipe[0]);
         close_fd_if_open(readiness_pipe[1]);
-        close_fd_if_open(binding.fd);
+        close_fd_if_open(request_channel[0]);
+        close_fd_if_open(request_channel[1]);
         throw std::runtime_error(
             std::string("worker fork failed: ") + std::strerror(error_number));
       }
 
       if (pid == 0)
       {
+        rb_thread_atfork();
         close_fd_if_open(readiness_pipe[0]);
-        run_worker_process(binding.fd, binding.port, max_request_head_bytes, readiness_pipe[1]);
+        close_fd_if_open(request_channel[0]);
+        run_worker_process(request_channel[1], port, max_request_head_bytes, readiness_pipe[1]);
       }
 
-      set_worker_pid(pid);
+      close_fd_if_open(request_channel[1]);
+      set_worker_runtime(pid, request_channel[0]);
       replay_pending_stop_if_needed();
       close_fd_if_open(readiness_pipe[1]);
 
@@ -1147,7 +1184,6 @@ namespace VajraNative
       catch (...)
       {
         close_fd_if_open(readiness_pipe[0]);
-        close_fd_if_open(binding.fd);
         stop_worker_process();
         reap_worker_process(pid);
         clear_worker_pid();
@@ -1157,7 +1193,6 @@ namespace VajraNative
 
       if (report.status == WorkerBootstrapStatus::failed)
       {
-        close_fd_if_open(binding.fd);
         reap_worker_process(pid);
         clear_worker_pid();
         const auto &diagnostic = report.diagnostic.value();
@@ -1166,7 +1201,8 @@ namespace VajraNative
             diagnostic.message);
       }
 
-      close_fd_if_open(binding.fd);
+      run_master_runtime_server(port, max_request_head_bytes, request_channel[0]);
+      stop_worker_process();
       wait_for_worker_exit(pid);
       clear_worker_pid();
     }
@@ -1179,10 +1215,7 @@ namespace VajraNative
 
   void stop()
   {
-    if (stop_worker_process())
-    {
-      return;
-    }
+    (void)stop_worker_process();
 
     std::lock_guard<std::mutex> lock(server_mutex);
     if (server_instance)

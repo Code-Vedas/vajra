@@ -11,6 +11,7 @@
 #include "ruby.h"
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace Vajra
@@ -19,11 +20,23 @@ namespace Vajra
   {
     void initialize_rack_execution_bridge();
     void set_rack_execution_callback(VALUE callback);
+    void run_worker_request_execution_loop(int channel_fd);
+    std::shared_ptr<const class RackExecutionTransport> request_channel_transport(int channel_fd);
+
+    class RackExecutionSession
+    {
+    public:
+      virtual ~RackExecutionSession() = default;
+      virtual void append_request_body_chunk(const std::string &chunk) = 0;
+      virtual std::optional<Vajra::response::Response> finish() = 0;
+    };
 
     class RackExecutionTransport
     {
     public:
       virtual ~RackExecutionTransport() = default;
+      virtual std::unique_ptr<RackExecutionSession> start(
+          const std::vector<request::RackEnvEntry> &env_entries) const;
       virtual std::optional<Vajra::response::Response> execute(
           const std::vector<request::RackEnvEntry> &env_entries,
           const std::string &request_body) const = 0;
@@ -35,6 +48,8 @@ namespace Vajra
       RackRequestExecutor();
       explicit RackRequestExecutor(std::shared_ptr<const RackExecutionTransport> transport);
 
+      std::unique_ptr<request::RequestExecutionSession> start(
+          const request::RequestContext &request_context) const override;
       std::optional<Vajra::response::Response> execute(const request::RequestContext &request_context) const override;
 
     private:

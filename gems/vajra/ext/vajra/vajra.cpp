@@ -815,16 +815,11 @@ namespace VajraNative
       worker_startup_in_progress = false;
     }
 
-    pid_t current_worker_pid()
-    {
-      const std::lock_guard<std::mutex> lock(server_mutex);
-      return worker_pid;
-    }
-
     void install_single_process_server(std::unique_ptr<Vajra::Server> server)
     {
       const std::lock_guard<std::mutex> lock(server_mutex);
       server_instance = std::move(server);
+      worker_startup_in_progress = false;
     }
 
     std::unique_ptr<Vajra::Server> take_single_process_server()
@@ -833,10 +828,16 @@ namespace VajraNative
       return std::move(server_instance);
     }
 
-    bool single_process_server_running()
+    bool try_begin_startup()
     {
       const std::lock_guard<std::mutex> lock(server_mutex);
-      return static_cast<bool>(server_instance);
+      if (worker_pid > 0 || server_instance || worker_startup_in_progress)
+      {
+        return false;
+      }
+
+      worker_startup_in_progress = true;
+      return true;
     }
 
     bool stop_worker_process()
@@ -852,26 +853,26 @@ namespace VajraNative
           stop_requested = true;
         }
       }
-  if (pid <= 0)
-  {
-    return false;
-  }
+      if (pid <= 0)
+      {
+        return false;
+      }
 
-  for (;;)
-  {
-    if (kill(pid, SIGINT) == 0 || errno == ESRCH)
-    {
-      return true;
+      for (;;)
+      {
+        if (kill(pid, SIGINT) == 0 || errno == ESRCH)
+        {
+          return true;
+        }
+
+        if (errno == EINTR)
+        {
+          continue;
+        }
+
+        throw std::runtime_error("failed to signal worker shutdown");
+      }
     }
-
-    if (errno == EINTR)
-    {
-      continue;
-    }
-
-    throw std::runtime_error("failed to signal worker shutdown");
-  }
-}
 
     void replay_pending_stop_if_needed()
     {
@@ -1083,7 +1084,7 @@ namespace VajraNative
 
     try
     {
-      if (current_worker_pid() > 0 || single_process_server_running())
+      if (!try_begin_startup())
       {
         std::cout << "Vajra already running" << std::endl;
         return;
@@ -1093,11 +1094,6 @@ namespace VajraNative
       {
         run_single_process_server(port, max_request_head_bytes);
         return;
-      }
-
-      {
-        const std::lock_guard<std::mutex> lock(server_mutex);
-        worker_startup_in_progress = true;
       }
       const BootContractResult master_boot_result = run_boot_contract(
           BootContractConfig{port, max_request_head_bytes, kMasterPreloadRuntimeRole});

@@ -152,7 +152,7 @@ RSpec.describe Vajra::Internal::Boot do
     )
 
     expect(status).to eq('ready')
-    expect(role).to eq('single_process_bootstrap')
+    expect(role).to eq('ignored')
     expect(diagnostic).to be_nil
   end
 

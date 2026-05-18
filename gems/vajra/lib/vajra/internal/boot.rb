@@ -54,10 +54,10 @@ module Vajra
         )
       end
 
-      def default_coordinator(_boot_request)
+      def default_coordinator(boot_request)
         {
           status: STATUSES.fetch(:ready),
-          role: SINGLE_PROCESS_BOOTSTRAP_ROLE
+          role: boot_request.fetch(:runtime_role)
         }
       end
       private_class_method :default_coordinator

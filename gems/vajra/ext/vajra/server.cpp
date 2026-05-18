@@ -126,7 +126,11 @@ namespace
     stream << "[Vajra][" << event_type << "] " << utc_timestamp() << ' ' << message << std::endl;
   }
 
-  std::string lifecycle_details(const Vajra::lifecycle::Snapshot &snapshot, const std::string &runtime_role)
+  std::string lifecycle_details(
+      const Vajra::lifecycle::Snapshot &snapshot,
+      const std::string &runtime_role,
+      const std::string &runtime_mode,
+      int worker_processes)
   {
     std::ostringstream message;
     message << "state=" << state_name(snapshot.state)
@@ -135,9 +139,9 @@ namespace
             << " port=" << snapshot.port
             << " listener_owned=" << (snapshot.listener_owned ? "true" : "false")
             << " listener_fd=" << snapshot.listener_fd
-            << " mode=single_process"
+            << " mode=" << runtime_mode
             << " runtime_role=" << runtime_role
-            << " worker_processes=0";
+            << " worker_processes=" << worker_processes;
     return message.str();
   }
 
@@ -145,14 +149,20 @@ namespace
       const char *event_name,
       const Vajra::lifecycle::Snapshot &snapshot,
       const std::string &runtime_role,
+      const std::string &runtime_mode,
+      int worker_processes,
       std::ostream &stream)
   {
     std::ostringstream message;
-    message << "event=" << event_name << ' ' << lifecycle_details(snapshot, runtime_role);
+    message << "event=" << event_name << ' '
+            << lifecycle_details(snapshot, runtime_role, runtime_mode, worker_processes);
     log_message("lifecycle", message.str(), stream);
   }
 
-  void log_booting_event(const std::string &runtime_role)
+  void log_booting_event(
+      const std::string &runtime_role,
+      const std::string &runtime_mode,
+      int worker_processes)
   {
     const Vajra::lifecycle::Snapshot snapshot{
         Vajra::lifecycle::State::booting,
@@ -162,7 +172,7 @@ namespace
         -1,
         -1,
     };
-    log_runtime_event("booting", snapshot, runtime_role, std::cout);
+    log_runtime_event("booting", snapshot, runtime_role, runtime_mode, worker_processes, std::cout);
   }
 
   void log_listening_banner(int port)
@@ -184,31 +194,36 @@ Vajra::Server::Server(
     int port,
     std::size_t max_request_head_bytes,
     std::shared_ptr<const request::RequestExecutor> request_executor,
-    std::string runtime_role)
+    std::string runtime_role,
+    std::string runtime_mode,
+    int worker_processes,
+    int inherited_listener_fd)
     : port_(port),
-      server_fd_(-1),
+      server_fd_(inherited_listener_fd),
       listener_socket_(),
       request_processor_(max_request_head_bytes, std::move(request_executor)),
       lifecycle_(),
-      runtime_role_(std::move(runtime_role))
+      runtime_role_(std::move(runtime_role)),
+      runtime_mode_(std::move(runtime_mode)),
+      worker_processes_(worker_processes)
 {
   set_lifecycle_observer([this](lifecycle::HookPoint hook_point, const lifecycle::Snapshot &snapshot) {
     switch (hook_point)
     {
       case lifecycle::HookPoint::boot_complete:
-        log_runtime_event("boot_complete", snapshot, runtime_role_, std::cout);
+        log_runtime_event("boot_complete", snapshot, runtime_role_, runtime_mode_, worker_processes_, std::cout);
         return;
       case lifecycle::HookPoint::serving_entered:
-        log_runtime_event("serving_entered", snapshot, runtime_role_, std::cout);
+        log_runtime_event("serving_entered", snapshot, runtime_role_, runtime_mode_, worker_processes_, std::cout);
         return;
       case lifecycle::HookPoint::drain_requested:
-        log_runtime_event("drain_requested", snapshot, runtime_role_, std::cout);
+        log_runtime_event("drain_requested", snapshot, runtime_role_, runtime_mode_, worker_processes_, std::cout);
         return;
       case lifecycle::HookPoint::stop_completed:
-        log_runtime_event("stop_completed", snapshot, runtime_role_, std::cout);
+        log_runtime_event("stop_completed", snapshot, runtime_role_, runtime_mode_, worker_processes_, std::cout);
         return;
       case lifecycle::HookPoint::failed_entered:
-        log_runtime_event("failed_entered", snapshot, runtime_role_, std::cerr);
+        log_runtime_event("failed_entered", snapshot, runtime_role_, runtime_mode_, worker_processes_, std::cerr);
         return;
     }
 
@@ -245,17 +260,20 @@ void Vajra::Server::start()
     return;
   }
 
-  log_booting_event(runtime_role_);
+  log_booting_event(runtime_role_, runtime_mode_, worker_processes_);
 
-  listener::SocketBinding binding;
-  try
+  listener::SocketBinding binding{server_fd_.load(), port_};
+  if (binding.fd < 0)
   {
-    binding = listener_socket_.open(port_);
-  }
-  catch (...)
-  {
-    lifecycle_.mark_failed(lifecycle::StopReason::startup_failure);
-    throw;
+    try
+    {
+      binding = listener_socket_.open(port_);
+    }
+    catch (...)
+    {
+      lifecycle_.mark_failed(lifecycle::StopReason::startup_failure);
+      throw;
+    }
   }
 
   port_ = binding.port;

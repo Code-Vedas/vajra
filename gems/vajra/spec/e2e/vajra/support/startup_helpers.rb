@@ -78,11 +78,13 @@ module VajraE2EStartupHelpers
       bind_host = "#{VajraE2EHelpers::LISTENER_BIND_HOST}"
       Thread.report_on_exception = false
 
-      def listener_ready?(host, port)
+      def server_ready?(host, port)
         socket = TCPSocket.new(host, port)
+        socket.write("GET / HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n")
+        response = socket.readpartial(1024)
         socket.close
-        true
-      rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH
+        response.include?("HTTP/1.1 200 OK")
+      rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH, EOFError
         false
       end
 
@@ -90,7 +92,7 @@ module VajraE2EStartupHelpers
 
       Timeout.timeout(5) do
         loop do
-          break if listener_ready?(host, port)
+          break if server_ready?(host, port)
           sleep 0.01
         end
       end

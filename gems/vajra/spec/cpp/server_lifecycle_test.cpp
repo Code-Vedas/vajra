@@ -9,6 +9,7 @@
 #include "test_support.hpp"
 
 #include <exception>
+#include <unistd.h>
 #include <sstream>
 #include <thread>
 
@@ -163,6 +164,44 @@ namespace VajraSpecCpp
       assert_can_rebind(port);
       expect_stopped_snapshot(server, Vajra::lifecycle::StopReason::programmatic_stop);
     }
+
+    void test_inherited_listener_start_and_stop_release_listener()
+    {
+      Vajra::listener::Socket listener_socket;
+      Vajra::listener::SocketBinding binding = listener_socket.open(available_port());
+      Vajra::Server server(
+          binding.port,
+          Vajra::request::kDefaultMaxRequestHeadBytes,
+          nullptr,
+          "ruby_worker_bootstrap",
+          "master_worker",
+          1,
+          binding.fd);
+      std::exception_ptr server_error;
+
+      std::thread server_thread([&]() {
+        try
+        {
+          server.start();
+        }
+        catch (...)
+        {
+          server_error = std::current_exception();
+        }
+      });
+
+      wait_until_listening(binding.port);
+      server.stop();
+      server_thread.join();
+
+      if (server_error)
+      {
+        std::rethrow_exception(server_error);
+      }
+
+      assert_can_rebind(binding.port);
+      expect_stopped_snapshot(server, Vajra::lifecycle::StopReason::programmatic_stop);
+    }
   }
 
   void run_server_lifecycle_tests()
@@ -171,5 +210,6 @@ namespace VajraSpecCpp
     test_stop_before_start_exits_cleanly();
     test_repeated_start_stop_cycles_remain_reusable();
     test_repeated_stop_requests_are_idempotent();
+    test_inherited_listener_start_and_stop_release_listener();
   }
 }

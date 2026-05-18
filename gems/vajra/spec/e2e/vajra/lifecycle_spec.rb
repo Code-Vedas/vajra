@@ -18,9 +18,9 @@ RSpec.describe 'Vajra lifecycle', :e2e, :integration do # rubocop:disable RSpec/
       'event=drain_requested',
       'event=stop_completed',
       'boot_status=ready',
-      'mode=single_process',
-      'runtime_role=single_process_bootstrap',
-      'worker_processes=0'
+      'mode=master_worker',
+      'runtime_role=ruby_worker_bootstrap',
+      'worker_processes=1'
     )
 
     rebound_server = bind_port(port: shutdown[:port])

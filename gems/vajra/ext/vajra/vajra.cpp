@@ -1081,10 +1081,6 @@ namespace VajraNative
       const BootContractResult master_boot_result = run_boot_contract(
           BootContractConfig{port, max_request_head_bytes, kMasterPreloadRuntimeRole});
       ensure_ready_boot_result(master_boot_result);
-      {
-        const std::lock_guard<std::mutex> lock(server_mutex);
-        stop_requested = false;
-      }
 
       Vajra::listener::Socket listener_socket;
       Vajra::listener::SocketBinding binding = listener_socket.open(port);

@@ -49,9 +49,12 @@ module Vajra
         normalize_boot_result(active_coordinator.call(normalized_request), normalized_request)
       rescue StandardError => e
         failure_result(
-          code: normalized_failure_code(e),
-          category: failure_category_for(e),
-          message: "#{e.class}: #{e.message}"
+          role: normalized_request&.fetch(:runtime_role, SINGLE_PROCESS_BOOTSTRAP_ROLE) || SINGLE_PROCESS_BOOTSTRAP_ROLE,
+          diagnostic: [
+            normalized_failure_code(e),
+            failure_category_for(e),
+            "#{e.class}: #{e.message}"
+          ]
         )
       end
 
@@ -194,11 +197,11 @@ module Vajra
       end
       private_class_method :invalid_boot_diagnostic!
 
-      def failure_result(code:, category:, message:)
+      def failure_result(role:, diagnostic:)
         [
           STATUSES.fetch(:failed),
-          SINGLE_PROCESS_BOOTSTRAP_ROLE,
-          [String(code), String(category), String(message)]
+          String(role),
+          diagnostic.map { |value| String(value) }
         ]
       end
       private_class_method :failure_result

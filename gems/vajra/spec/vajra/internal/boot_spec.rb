@@ -142,6 +142,22 @@ RSpec.describe Vajra::Internal::Boot do
     )
   end
 
+  it 'preserves the requested runtime role when the coordinator raises' do
+    described_class.install!(->(_boot_request) { raise 'worker exploded' })
+
+    status, role, diagnostic = described_class.call(
+      port: 3000,
+      max_request_head_bytes: 16_384,
+      runtime_role: 'ruby_worker_bootstrap'
+    )
+
+    expect(status).to eq('failed')
+    expect(role).to eq('ruby_worker_bootstrap')
+    expect(diagnostic).to eq(
+      ['boot_callback_error', 'boot', 'RuntimeError: worker exploded']
+    )
+  end
+
   it 'uses the default coordinator when install! is called without arguments' do
     described_class.install!
 

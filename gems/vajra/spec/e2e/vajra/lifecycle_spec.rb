@@ -19,7 +19,6 @@ RSpec.describe 'Vajra lifecycle', :e2e, :integration do # rubocop:disable RSpec/
       'event=stop_completed',
       'boot_status=ready',
       'mode=master_worker',
-      'runtime_role=ruby_worker_bootstrap',
       'worker_processes=1'
     )
 

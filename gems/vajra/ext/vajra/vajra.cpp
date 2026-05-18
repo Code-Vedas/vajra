@@ -16,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <cstring>
 #include <string>
@@ -27,11 +28,42 @@ namespace
   std::unique_ptr<Vajra::Server> server_instance;
   ID id_port;
   ID id_max_request_head_bytes;
+  ID id_runtime_role;
+  std::mutex boot_callback_mutex;
+  VALUE boot_callback = Qnil;
 
   struct RuntimeConfig
   {
     int port;
     std::size_t max_request_head_bytes;
+  };
+
+  struct BootContractConfig
+  {
+    int port;
+    std::size_t max_request_head_bytes;
+    std::string runtime_role;
+  };
+
+  struct BootDiagnostic
+  {
+    std::string code;
+    std::string category;
+    std::string message;
+  };
+
+  enum class BootStatus
+  {
+    pending,
+    ready,
+    failed,
+  };
+
+  struct BootContractResult
+  {
+    BootStatus status;
+    std::string runtime_role;
+    std::optional<BootDiagnostic> diagnostic;
   };
 
   struct ProtectedIntegerConversion
@@ -168,6 +200,146 @@ namespace
     const VALUE hash = lookup[0];
     const VALUE key = lookup[1];
     return rb_hash_lookup(hash, key);
+  }
+
+  std::string ruby_string_value(VALUE value, const char *error_message)
+  {
+    if (RB_TYPE_P(value, T_STRING) == 0)
+    {
+      throw std::runtime_error(error_message);
+    }
+
+    return std::string(RSTRING_PTR(value), static_cast<std::size_t>(RSTRING_LEN(value)));
+  }
+
+  VALUE ruby_boot_request_from(const BootContractConfig &config)
+  {
+    VALUE boot_request = rb_hash_new();
+    rb_hash_aset(boot_request, ID2SYM(id_port), INT2NUM(config.port));
+    rb_hash_aset(boot_request, ID2SYM(id_max_request_head_bytes), SIZET2NUM(config.max_request_head_bytes));
+    rb_hash_aset(
+        boot_request,
+        ID2SYM(id_runtime_role),
+        rb_str_new(config.runtime_role.data(), static_cast<long>(config.runtime_role.size())));
+    return boot_request;
+  }
+
+  VALUE protected_execute_boot_callback(VALUE data)
+  {
+    auto *config = reinterpret_cast<BootContractConfig *>(data);
+    VALUE callback = Qnil;
+    {
+      const std::lock_guard<std::mutex> callback_lock(boot_callback_mutex);
+      callback = boot_callback;
+    }
+
+    if (NIL_P(callback))
+    {
+      rb_raise(
+          rb_eRuntimeError,
+          "Ruby boot contract callback is not installed. Require \"vajra\" or call Vajra::Internal::Boot.install! before starting Vajra.");
+    }
+
+    VALUE boot_request = ruby_boot_request_from(*config);
+    VALUE arguments[] = {boot_request};
+    return rb_proc_call(callback, rb_ary_new_from_values(1, arguments));
+  }
+
+  BootStatus boot_status_from_ruby(VALUE status)
+  {
+    const std::string status_value = ruby_string_value(status, "Ruby boot contract returned a non-string status");
+    if (status_value == "pending")
+    {
+      return BootStatus::pending;
+    }
+    if (status_value == "ready")
+    {
+      return BootStatus::ready;
+    }
+    if (status_value == "failed")
+    {
+      return BootStatus::failed;
+    }
+
+    throw std::runtime_error("Ruby boot contract returned an unsupported status: " + status_value);
+  }
+
+  std::optional<BootDiagnostic> boot_diagnostic_from_ruby(VALUE diagnostic)
+  {
+    if (NIL_P(diagnostic))
+    {
+      return std::nullopt;
+    }
+
+    if (TYPE(diagnostic) != T_ARRAY || RARRAY_LEN(diagnostic) != 3)
+    {
+      throw std::runtime_error("Ruby boot contract returned an invalid diagnostic");
+    }
+
+    return BootDiagnostic{
+        ruby_string_value(rb_ary_entry(diagnostic, 0), "Ruby boot contract returned a non-string diagnostic code"),
+        ruby_string_value(rb_ary_entry(diagnostic, 1), "Ruby boot contract returned a non-string diagnostic category"),
+        ruby_string_value(rb_ary_entry(diagnostic, 2), "Ruby boot contract returned a non-string diagnostic message")};
+  }
+
+  BootContractResult boot_result_from_ruby(VALUE result)
+  {
+    if (TYPE(result) != T_ARRAY || RARRAY_LEN(result) != 3)
+    {
+      throw std::runtime_error("Ruby boot contract returned an invalid result");
+    }
+
+    return BootContractResult{
+        boot_status_from_ruby(rb_ary_entry(result, 0)),
+        ruby_string_value(rb_ary_entry(result, 1), "Ruby boot contract returned a non-string runtime role"),
+        boot_diagnostic_from_ruby(rb_ary_entry(result, 2))};
+  }
+
+  BootContractResult run_boot_contract(const BootContractConfig &config)
+  {
+    int state = 0;
+    VALUE result = rb_protect(
+        protected_execute_boot_callback,
+        reinterpret_cast<VALUE>(const_cast<BootContractConfig *>(&config)),
+        &state);
+    if (state == 0)
+    {
+      return boot_result_from_ruby(result);
+    }
+
+    VALUE message = Qnil;
+    int message_state = 0;
+    message = rb_protect(protected_format_ruby_exception_message, Qnil, &message_state);
+    rb_set_errinfo(Qnil);
+
+    if (message_state != 0 || NIL_P(message))
+    {
+      throw std::runtime_error("Ruby boot contract execution failed: Ruby exception");
+    }
+
+    throw std::runtime_error("Ruby boot contract execution failed: " + std::string(StringValueCStr(message)));
+  }
+
+  void ensure_ready_boot_result(const BootContractResult &result)
+  {
+    switch (result.status)
+    {
+      case BootStatus::ready:
+        return;
+      case BootStatus::pending:
+        throw std::runtime_error("Ruby boot contract did not reach ready state");
+      case BootStatus::failed:
+        if (!result.diagnostic.has_value())
+        {
+          throw std::runtime_error("Ruby boot failed without diagnostic details");
+        }
+
+        throw std::runtime_error(
+            "Ruby boot failed (" + result.diagnostic->code + "/" + result.diagnostic->category + "): " +
+            result.diagnostic->message);
+    }
+
+    throw std::runtime_error("Ruby boot contract returned an unknown state");
   }
 
   int validate_start_option_key(VALUE key, VALUE, VALUE data)
@@ -363,7 +535,10 @@ namespace
       VALUE options = Qnil;
       rb_scan_args(argc, argv, "0:", &options);
       const RuntimeConfig config = configured_runtime(options);
-      VajraNative::start(config.port, config.max_request_head_bytes);
+      const BootContractResult boot_result = run_boot_contract(
+          BootContractConfig{config.port, config.max_request_head_bytes, "single_process_bootstrap"});
+      ensure_ready_boot_result(boot_result);
+      VajraNative::start(config.port, config.max_request_head_bytes, boot_result.runtime_role);
     }
     catch (const std::exception &error)
     {
@@ -392,6 +567,16 @@ namespace
     Vajra::rack::set_rack_execution_callback(callback);
     return callback;
   }
+
+  VALUE rb_boot_native_set_callback(VALUE self, VALUE callback)
+  {
+    (void)self;
+    {
+      const std::lock_guard<std::mutex> callback_lock(boot_callback_mutex);
+      boot_callback = callback;
+    }
+    return callback;
+  }
 }
 
 namespace VajraNative
@@ -401,7 +586,7 @@ namespace VajraNative
     return shutting_down != 0;
   }
 
-  void start(int port, std::size_t max_request_head_bytes)
+  void start(int port, std::size_t max_request_head_bytes, const std::string &runtime_role)
   {
     SignalHandlerGuard signal_handler_guard;
     signal_handler_guard.install();
@@ -421,7 +606,8 @@ namespace VajraNative
         server_instance = std::make_unique<Vajra::Server>(
             port,
             max_request_head_bytes,
-            std::make_shared<Vajra::rack::RackRequestExecutor>());
+            std::make_shared<Vajra::rack::RackRequestExecutor>(),
+            runtime_role);
         server = server_instance.get();
       }
 
@@ -459,12 +645,20 @@ extern "C" void Init_vajra()
 {
   id_port = rb_intern("port");
   id_max_request_head_bytes = rb_intern("max_request_head_bytes");
+  id_runtime_role = rb_intern("runtime_role");
+  rb_global_variable(&boot_callback);
   Vajra::rack::initialize_rack_execution_bridge();
   VALUE mVajra = rb_define_module("Vajra");
   VALUE mInternal = rb_define_module_under(mVajra, "Internal");
+  VALUE mBoot = rb_define_module_under(mInternal, "Boot");
   VALUE mRackExecution = rb_define_module_under(mInternal, "RackExecution");
   rb_define_singleton_method(mVajra, "start", RUBY_METHOD_FUNC(rb_vajra_start), -1);
   rb_define_singleton_method(mVajra, "stop", RUBY_METHOD_FUNC(rb_vajra_stop), 0);
+  rb_define_singleton_method(
+      mBoot,
+      "__native_set_boot_callback__",
+      RUBY_METHOD_FUNC(rb_boot_native_set_callback),
+      1);
   rb_define_singleton_method(
       mRackExecution,
       "__native_set_callback__",

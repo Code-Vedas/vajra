@@ -26,12 +26,14 @@ namespace VajraSpecCpp
       {
         fail("lifecycle controller failed to begin normal startup");
       }
+      controller.mark_boot_ready();
       controller.mark_serving();
       controller.request_stop(Vajra::lifecycle::StopReason::programmatic_stop);
       controller.finish_stop();
 
       const Vajra::lifecycle::Snapshot snapshot = controller.snapshot();
       if (snapshot.state != Vajra::lifecycle::State::stopped ||
+          snapshot.boot_readiness != Vajra::lifecycle::BootReadiness::pending ||
           snapshot.last_stop_reason != Vajra::lifecycle::StopReason::programmatic_stop ||
           snapshot.listener_owned)
       {
@@ -76,6 +78,40 @@ namespace VajraSpecCpp
       catch (const std::logic_error &)
       {
       }
+
+      try
+      {
+        controller.mark_boot_ready();
+        fail("lifecycle controller accepted boot-ready before listening");
+      }
+      catch (const std::logic_error &)
+      {
+      }
+    }
+
+    void test_lifecycle_controller_emits_boot_complete_only_after_boot_ready()
+    {
+      Vajra::lifecycle::Controller controller;
+      std::vector<Vajra::lifecycle::HookPoint> hook_points;
+      controller.set_observer([&](Vajra::lifecycle::HookPoint hook_point, const Vajra::lifecycle::Snapshot &) {
+        hook_points.push_back(hook_point);
+      });
+
+      if (!controller.begin_startup() || !controller.mark_listening(7, 3000))
+      {
+        fail("lifecycle controller failed to reach listening before boot-ready");
+      }
+
+      if (!hook_points.empty())
+      {
+        fail("lifecycle controller emitted boot_complete before boot-ready");
+      }
+
+      controller.mark_boot_ready();
+      if (hook_points != std::vector<Vajra::lifecycle::HookPoint>{Vajra::lifecycle::HookPoint::boot_complete})
+      {
+        fail("lifecycle controller did not emit boot_complete when boot-ready was reported");
+      }
     }
 
     void test_lifecycle_controller_preserves_failure_state()
@@ -94,6 +130,7 @@ namespace VajraSpecCpp
 
       const Vajra::lifecycle::Snapshot snapshot = controller.snapshot();
       if (snapshot.state != Vajra::lifecycle::State::failed ||
+          snapshot.boot_readiness != Vajra::lifecycle::BootReadiness::failed ||
           snapshot.last_stop_reason != Vajra::lifecycle::StopReason::startup_failure ||
           snapshot.listener_owned)
       {
@@ -116,6 +153,7 @@ namespace VajraSpecCpp
       {
         fail("lifecycle controller failed to begin normal startup");
       }
+      controller.mark_boot_ready();
       controller.request_stop(Vajra::lifecycle::StopReason::signal_shutdown);
       controller.request_stop(Vajra::lifecycle::StopReason::programmatic_stop);
       controller.finish_stop();
@@ -139,6 +177,7 @@ namespace VajraSpecCpp
 
       const Vajra::lifecycle::Snapshot snapshot = controller.snapshot();
       if (snapshot.state != Vajra::lifecycle::State::draining ||
+          snapshot.boot_readiness != Vajra::lifecycle::BootReadiness::pending ||
           snapshot.last_stop_reason != Vajra::lifecycle::StopReason::programmatic_stop)
       {
         fail("lifecycle controller did not preserve draining state when serving raced with stop");
@@ -161,12 +200,48 @@ namespace VajraSpecCpp
 
       const Vajra::lifecycle::Snapshot snapshot = controller.snapshot();
       if (snapshot.state != Vajra::lifecycle::State::draining ||
+          snapshot.boot_readiness != Vajra::lifecycle::BootReadiness::pending ||
           snapshot.last_stop_reason != Vajra::lifecycle::StopReason::programmatic_stop ||
           snapshot.port != 3000 ||
           snapshot.listener_fd != 7 ||
           !snapshot.listener_owned)
       {
         fail("lifecycle controller did not preserve bound listener diagnostics when listening raced with stop");
+      }
+    }
+
+    void test_lifecycle_controller_allows_boot_ready_after_drain_when_listener_is_bound()
+    {
+      Vajra::lifecycle::Controller controller;
+      std::vector<Vajra::lifecycle::HookPoint> hook_points;
+      controller.set_observer([&](Vajra::lifecycle::HookPoint hook_point, const Vajra::lifecycle::Snapshot &) {
+        hook_points.push_back(hook_point);
+      });
+
+      if (!controller.begin_startup() || !controller.mark_listening(7, 3000))
+      {
+        fail("lifecycle controller failed to reach listening before drain");
+      }
+
+      controller.request_stop(Vajra::lifecycle::StopReason::programmatic_stop);
+      controller.mark_boot_ready();
+
+      const Vajra::lifecycle::Snapshot snapshot = controller.snapshot();
+      if (snapshot.state != Vajra::lifecycle::State::draining ||
+          snapshot.boot_readiness != Vajra::lifecycle::BootReadiness::ready ||
+          snapshot.last_stop_reason != Vajra::lifecycle::StopReason::programmatic_stop ||
+          !snapshot.listener_owned)
+      {
+        fail("lifecycle controller did not preserve boot readiness during drain after listener bind");
+      }
+
+      const std::vector<Vajra::lifecycle::HookPoint> expected_hooks = {
+          Vajra::lifecycle::HookPoint::drain_requested,
+          Vajra::lifecycle::HookPoint::boot_complete,
+      };
+      if (hook_points != expected_hooks)
+      {
+        fail("lifecycle controller did not emit boot_complete after drain when listener was already bound");
       }
     }
 
@@ -177,6 +252,7 @@ namespace VajraSpecCpp
 
       const Vajra::lifecycle::Snapshot requested_snapshot = controller.snapshot();
       if (requested_snapshot.state != Vajra::lifecycle::State::stopped ||
+          requested_snapshot.boot_readiness != Vajra::lifecycle::BootReadiness::pending ||
           requested_snapshot.last_stop_reason != Vajra::lifecycle::StopReason::programmatic_stop ||
           controller.begin_startup())
       {
@@ -204,10 +280,12 @@ namespace VajraSpecCpp
   {
     test_lifecycle_controller_tracks_normal_transitions();
     test_lifecycle_controller_rejects_invalid_transitions();
+    test_lifecycle_controller_emits_boot_complete_only_after_boot_ready();
     test_lifecycle_controller_preserves_failure_state();
     test_lifecycle_controller_stop_requests_are_idempotent();
     test_lifecycle_controller_ignores_serving_transition_after_drain_begins();
     test_lifecycle_controller_rejects_listening_completion_after_drain_begins();
+    test_lifecycle_controller_allows_boot_ready_after_drain_when_listener_is_bound();
     test_lifecycle_controller_tracks_stop_before_start_separately_from_stopped_state();
   }
 }

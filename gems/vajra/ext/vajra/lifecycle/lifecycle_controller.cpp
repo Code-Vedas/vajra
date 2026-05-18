@@ -14,6 +14,7 @@ namespace Vajra
   {
     Controller::Controller()
         : state_(State::stopped),
+          boot_readiness_(BootReadiness::pending),
           last_stop_reason_(StopReason::none),
           listener_owned_(false),
           pending_stop_before_start_(false),
@@ -38,6 +39,7 @@ namespace Vajra
       }
 
       state_ = State::booting;
+      boot_readiness_ = BootReadiness::pending;
       last_stop_reason_ = StopReason::none;
       listener_owned_ = false;
       pending_stop_before_start_ = false;
@@ -48,8 +50,6 @@ namespace Vajra
 
     bool Controller::mark_listening(int listener_fd, int port)
     {
-      Snapshot snapshot_value;
-      bool notify_observer = false;
       {
         std::lock_guard<std::mutex> lock(mutex_);
         if (state_ == State::draining)
@@ -69,15 +69,38 @@ namespace Vajra
         listener_owned_ = true;
         port_ = port;
         listener_fd_ = listener_fd;
-        snapshot_value = snapshot_unlocked();
-        notify_observer = true;
-      }
-
-      if (notify_observer)
-      {
-        notify(HookPoint::boot_complete, snapshot_value);
       }
       return true;
+    }
+
+    void Controller::mark_boot_ready()
+    {
+      Snapshot snapshot_value;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (boot_readiness_ == BootReadiness::ready)
+        {
+          return;
+        }
+
+        const bool listener_bound = listener_owned_ && listener_fd_ >= 0;
+        if (state_ == State::draining && listener_bound)
+        {
+          boot_readiness_ = BootReadiness::ready;
+          snapshot_value = snapshot_unlocked();
+        }
+        else if (state_ == State::listening || state_ == State::serving)
+        {
+          boot_readiness_ = BootReadiness::ready;
+          snapshot_value = snapshot_unlocked();
+        }
+        else
+        {
+          throw std::logic_error("lifecycle can only enter boot-ready from listening, serving, or draining with a bound listener");
+        }
+      }
+
+      notify(HookPoint::boot_complete, snapshot_value);
     }
 
     void Controller::mark_serving()
@@ -174,6 +197,7 @@ namespace Vajra
           }
 
           state_ = State::stopped;
+          boot_readiness_ = BootReadiness::pending;
           listener_owned_ = false;
           pending_stop_before_start_ = false;
           listener_fd_ = -1;
@@ -199,6 +223,7 @@ namespace Vajra
       {
         std::lock_guard<std::mutex> lock(mutex_);
         state_ = State::failed;
+        boot_readiness_ = BootReadiness::failed;
         last_stop_reason_ = reason;
         listener_owned_ = false;
         pending_stop_before_start_ = false;
@@ -219,6 +244,7 @@ namespace Vajra
     {
       return Snapshot{
           state_,
+          boot_readiness_,
           last_stop_reason_,
           listener_owned_,
           port_,

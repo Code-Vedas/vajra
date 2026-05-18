@@ -17,7 +17,9 @@ RSpec.describe 'Vajra lifecycle', :e2e, :integration do # rubocop:disable RSpec/
       '[Vajra][lifecycle]',
       'event=drain_requested',
       'event=stop_completed',
+      'boot_status=ready',
       'mode=single_process',
+      'runtime_role=single_process_bootstrap',
       'worker_processes=0'
     )
 

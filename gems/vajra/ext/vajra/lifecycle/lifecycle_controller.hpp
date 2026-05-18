@@ -33,6 +33,13 @@ namespace Vajra
       listener_failure,
     };
 
+    enum class BootReadiness
+    {
+      pending,
+      ready,
+      failed,
+    };
+
     enum class HookPoint
     {
       boot_complete,
@@ -45,6 +52,7 @@ namespace Vajra
     struct Snapshot
     {
       State state;
+      BootReadiness boot_readiness;
       StopReason last_stop_reason;
       bool listener_owned;
       int port;
@@ -60,6 +68,7 @@ namespace Vajra
 
       bool begin_startup();
       bool mark_listening(int listener_fd, int port);
+      void mark_boot_ready();
       void mark_serving();
       void request_stop(StopReason reason);
       void finish_stop();
@@ -74,6 +83,7 @@ namespace Vajra
 
       mutable std::mutex mutex_;
       State state_;
+      BootReadiness boot_readiness_;
       StopReason last_stop_reason_;
       bool listener_owned_;
       bool pending_stop_before_start_;

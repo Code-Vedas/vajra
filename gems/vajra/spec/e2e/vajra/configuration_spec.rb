@@ -75,6 +75,26 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     )
   end
 
+  it 'fails startup with actionable Ruby boot diagnostics' do
+    failure = startup_failure_with_inline_script(<<~RUBY)
+      require "vajra"
+
+      Vajra::Internal::Boot.install!(lambda do |_boot_request|
+        raise "boot exploded"
+      end)
+
+      Vajra.start
+    RUBY
+
+    expect(failure).to match(
+      exitstatus: be_positive,
+      output: a_string_including(
+        'Unable to start Vajra: Ruby boot failed (boot_callback_error/boot): RuntimeError: boot exploded'
+      )
+    )
+    expect(failure[:output]).not_to include('listening on port')
+  end
+
   it 'lets Ruby configure the listener port when VAJRA_PORT is unset' do
     request = request_response_from_inline_start(env: { 'RUBY_PORT' => disposable_listener_port.to_s })
 

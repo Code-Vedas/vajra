@@ -19,7 +19,7 @@ run_suite() {
   fi
 
   if grep -R -n -w -E 'untyped|top|Object|BasicObject' "${REPO_ROOT}/${suite_dir}/sig" >/dev/null 2>&1; then
-    echo "Strict RBS check failed for ${suite_label}: found forbidden generic types in sig/"
+    echo "Strict RBS check failed for ${suite_label}: found forbidden broad types or placeholders in sig/ (untyped, top, Object, BasicObject)"
     grep -R -n -w -E 'untyped|top|Object|BasicObject' "${REPO_ROOT}/${suite_dir}/sig"
     return 1
   fi

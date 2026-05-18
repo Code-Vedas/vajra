@@ -1,0 +1,61 @@
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+module Vajra
+  module Internal
+    module Boot
+      type boot_status = "ready" | "failed" | "pending"
+      type boot_diagnostic = [String, String, String]
+      type boot_request = Hash[Symbol | String, String | Integer]
+      type coordinator_boot_request = {
+        port: Integer,
+        max_request_head_bytes: Integer,
+        runtime_role: String
+      }
+      type boot_result = [boot_status, String, boot_diagnostic?]
+      type raw_boot_status = boot_status | :ready | :failed | :pending
+      type raw_boot_diagnostic_value = String | Symbol | Integer
+      type raw_boot_diagnostic_array = [
+        raw_boot_diagnostic_value,
+        raw_boot_diagnostic_value,
+        raw_boot_diagnostic_value
+      ]
+      type raw_boot_diagnostic_hash = {
+        code: raw_boot_diagnostic_value,
+        category: raw_boot_diagnostic_value,
+        message: raw_boot_diagnostic_value
+      }
+      type raw_boot_diagnostic = raw_boot_diagnostic_array | raw_boot_diagnostic_hash
+      type raw_boot_result = [raw_boot_status, String | Symbol | Integer, raw_boot_diagnostic?]
+      type boot_result_hash = boot_result_hash_without_diagnostic | boot_result_hash_with_diagnostic
+      type boot_result_hash_without_diagnostic = {
+        status: raw_boot_status,
+        role: String | Symbol | Integer
+      }
+      type boot_result_hash_with_diagnostic = {
+        status: raw_boot_status,
+        role: String | Symbol | Integer,
+        diagnostic: raw_boot_diagnostic?
+      }
+
+      interface _BootCoordinator
+        def call: (coordinator_boot_request) -> (boot_result_hash | raw_boot_result | raw_boot_status)
+      end
+      type boot_coordinator = _BootCoordinator | Method
+
+      STATUSES: Hash[Symbol, String]
+      SINGLE_PROCESS_BOOTSTRAP_ROLE: String
+
+      class BootContractError < StandardError
+      end
+
+      def self.install!: (?boot_coordinator) -> boot_coordinator
+      def self.uninstall!: () -> nil
+      def self.installed?: () -> bool
+      def self.call: (boot_request) -> boot_result
+      def self.__native_set_boot_callback__: (Proc | nil) -> (Proc | nil)
+    end
+  end
+end

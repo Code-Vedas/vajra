@@ -36,6 +36,49 @@ bin/setup
 `bin/setup` installs gem dependencies and compiles the native extension through
 the package-local build path.
 
+## Application Installation
+
+For application usage, add `vajra` to the host app bundle.
+
+### Rails
+
+```ruby
+# Gemfile
+gem "vajra"
+```
+
+```ruby
+# config/vajra.rb
+Vajra.configure do |config|
+  config.port 3000
+  config.max_request_head_bytes 32768
+end
+```
+
+```bash
+bin/rails server
+```
+
+Rails remains the user-facing launcher. Vajra supplies the server handler, so a
+Rails app does not need `puma` just to satisfy `bin/rails server`.
+
+### Sinatra, Roda, and Hanami
+
+```ruby
+# Gemfile
+gem "vajra"
+```
+
+Keep the framework’s standard `config.ru`. Vajra loads that rackup file
+automatically when no explicit `config/vajra.rb` is present.
+
+```bash
+bundle exec vajra
+```
+
+Add `config/vajra.rb` only when the app needs Vajra-owned server settings such
+as `host`, `port`, or `max_request_head_bytes`.
+
 ## Expected Build Outputs
 
 The native build flow produces artifacts that line up with the gem’s canonical

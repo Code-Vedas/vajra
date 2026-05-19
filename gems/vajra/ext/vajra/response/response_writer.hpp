@@ -22,6 +22,8 @@ namespace Vajra
       bool send(int client_fd, const Response &response) const;
       Response success_response(ConnectionBehavior connection_behavior = ConnectionBehavior::close) const;
       Response internal_server_error_response() const;
+      Response queue_capacity_response() const;
+      Response request_timeout_response() const;
       Response request_head_failure_response(Vajra::request::HeadFailureKind kind) const;
       void log_request_head_error(const Vajra::request::HeadError &error) const;
 

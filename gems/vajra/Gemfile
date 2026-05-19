@@ -10,11 +10,16 @@ source 'https://rubygems.org'
 gemspec
 
 gem 'bundler-audit', require: false
+gem 'hanami', '~> 2.3.2'
+gem 'hanami-controller', '~> 2.3.1'
+gem 'hanami-router', '~> 2.3.1'
 gem 'irb'
+gem 'rails'
 gem 'rake', require: false
 gem 'rake-compiler'
 gem 'rbs'
 gem 'reek', require: false
+gem 'roda'
 gem 'rspec', '~> 3.13'
 gem 'rubocop', '~> 1.72', require: false
 gem 'rubocop-performance', require: false
@@ -22,3 +27,4 @@ gem 'rubocop-rake', require: false
 gem 'rubocop-rspec', require: false
 gem 'rubocop-thread_safety', '~> 0.7.2', require: false
 gem 'simplecov', '~> 0.22', require: false
+gem 'sinatra'

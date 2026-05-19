@@ -14,6 +14,9 @@ module Vajra
   # Base error type for Ruby-side Vajra failures.
   class Error < StandardError; end
 
+  autoload :CLI, 'vajra/cli'
+  autoload :Rails, 'vajra/rails'
+
   # Loads the compiled native entrypoint through the canonical package path.
   module NativeExtension
     module_function
@@ -31,8 +34,111 @@ module Vajra
 
   NativeExtension.load!
   Vajra::Internal::Boot.install!
+  # Rails integration is optional for non-Rails hosts and is loaded lazily when Rails is present.
+  # :nocov:
+  def self.install_optional_railtie
+    return unless defined?(::Rails::Railtie)
+
+    require_relative 'vajra/railtie'
+  rescue LoadError, NoMethodError
+    nil
+  end
+  install_optional_railtie
+  # :nocov:
 
   class << self
+    DOCUMENTED_START_OPTION_KEYS = %i[
+      host
+      port
+      bind
+      unix_socket
+      backlog
+      reuse_port
+      workers
+      threads
+      preload_app
+      worker_boot_timeout
+      worker_shutdown_timeout
+      phased_restart
+      max_request_head_bytes
+      request_timeout
+      first_data_timeout
+      persistent_timeout
+      worker_timeout
+      max_request_body_bytes
+      request_head_timeout
+      request_body_timeout
+      keepalive_timeout
+      max_keepalive_requests
+      linger_timeout
+      max_connections
+      queue_capacity
+      max_requests_per_worker
+      scheduler_policy
+      tls
+      tls_certificate
+      tls_private_key
+      tls_ca_certificate
+      tls_verify_mode
+      tls_min_version
+      alpn_protocols
+      http2
+      http2_max_concurrent_streams
+      http2_initial_window_size
+      http2_max_frame_size
+      http2_header_table_size
+      log_level
+      access_log
+      error_log
+      structured_logs
+      stats_path
+      metrics_endpoint
+      pidfile
+      state_path
+      control_socket
+      drain_timeout
+      shutdown_timeout
+    ].freeze
+
+    NATIVE_START_OPTION_KEYS = %i[
+      host
+      port
+      workers
+      threads
+      queue_capacity
+      scheduler_policy
+      max_request_head_bytes
+      request_timeout
+      request_head_timeout
+      first_data_timeout
+      persistent_timeout
+      worker_timeout
+      log_level
+    ].freeze
+
+    alias __native_start__ start
+    alias __native_stop__ stop
+
+    def configure(&block)
+      config_target = CLI.current_config_target
+      raise Error, 'Vajra.configure is only available while loading Vajra configuration' unless config_target
+
+      if block.arity == 1
+        yield(config_target)
+      else
+        config_target.instance_eval(&block)
+      end
+    end
+
+    def start(**options)
+      validate_start_options!(options)
+      __native_start__(**options.slice(*NATIVE_START_OPTION_KEYS))
+    end
+
+    def stop
+      __native_stop__
+    end
+
     def header
       art = <<~'TEXT'
         __      __  _         _   ____       _
@@ -43,6 +149,15 @@ module Vajra
       TEXT
 
       "#{art}\nv#{Vajra::VERSION}\n\n"
+    end
+
+    private
+
+    def validate_start_options!(options)
+      unknown_option = options.keys.find { |key| !DOCUMENTED_START_OPTION_KEYS.include?(key) }
+      return unless unknown_option
+
+      raise Error, "unknown start option: #{unknown_option}"
     end
   end
 end

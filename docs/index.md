@@ -43,7 +43,8 @@ Vajra is organized as one gem with one clear runtime boundary.
 8. [Observability](/observability/)
 9. [Benchmarking](/benchmarking/)
 10. [Troubleshooting](/troubleshooting/)
-11. [Development](/development/)
+11. [Frameworks](/frameworks/)
+12. [Development](/development/)
 
 ## Support Snapshot
 
@@ -72,13 +73,15 @@ Vajra is organized as one gem with one clear runtime boundary.
 - [Runtime Model](/runtime-model/): listener lifecycle, connection handling, and
   where runtime behavior lives
 - [Configuration](/configuration/): configuration surfaces, precedence, and
-  tuning families
+  the complete product configuration reference
 - [Operations](/operations/): boot, shutdown, runtime checks, and the operator
   view of normal and degraded service
 - [Observability](/observability/): startup diagnostics, request visibility, and
   operating signals
 - [Integration](/integration/): Rack and Rails integration posture plus the
   framework-support boundary
+- [Frameworks](/frameworks/): framework-specific setup for Rails, Sinatra,
+  Roda, and Hanami
 - [Benchmarking](/benchmarking/): benchmark interpretation, fixture families, and
   environment caveats
 - [Troubleshooting](/troubleshooting/): build, boot, docs, and local runtime
@@ -87,11 +90,13 @@ Vajra is organized as one gem with one clear runtime boundary.
   release-supporting maintenance
 - [Docs Publishing](/docs-publishing/): local preview, CI validation, Pages
   deployment, and `vajra.codevedas.com`
-- [Engineering Runtime](/engineering-runtime/): runtime lifecycle and ownership
-  boundaries
-- [Engineering IPC](/engineering-ipc/): supervision and control-channel
-  boundaries
-- [Engineering Scheduling](/engineering-scheduling/): scheduling, admission, and
-  capacity boundaries
-- [Engineering Failure Modes](/engineering-failure-modes/): boot, shutdown, and
-  recovery-oriented engineering guidance
+
+## Deep Reference
+
+These pages describe the internal product architecture and protocol model in
+more detail:
+
+- [Engineering Runtime](/engineering-runtime/)
+- [Engineering IPC](/engineering-ipc/)
+- [Engineering Scheduling](/engineering-scheduling/)
+- [Engineering Failure Modes](/engineering-failure-modes/)

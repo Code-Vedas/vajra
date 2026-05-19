@@ -25,14 +25,20 @@ namespace Vajra
     class HeadReader
     {
     public:
-      explicit HeadReader(std::size_t max_request_head_bytes);
+      explicit HeadReader(
+          std::size_t max_request_head_bytes,
+          int continuation_timeout_seconds = 5);
 
-      HeadReadResult read(int client_fd, std::string buffered_bytes = "") const;
+      HeadReadResult read(
+          int client_fd,
+          std::string buffered_bytes = "",
+          int initial_timeout_seconds = 30) const;
 
     private:
-      bool configure_read_timeout(int client_fd) const;
+      bool configure_read_timeout(int client_fd, int timeout_seconds) const;
 
       RequestHeadSizeValidator request_head_size_validator_;
+      int continuation_timeout_seconds_;
     };
   }
 }

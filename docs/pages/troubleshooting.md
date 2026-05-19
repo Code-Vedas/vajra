@@ -54,6 +54,51 @@ bin/rspec-unit
 That path validates both the extension load boundary and the committed startup
 smoke behavior.
 
+## Application Does Not Boot
+
+If `bundle exec vajra` fails in an app root:
+
+- check `config/vajra.rb` first
+- if no Vajra config file is present, check `config.ru`
+- for Rails, confirm `config/environment.rb` loads and defines
+  `Rails.application`
+- for Rack-first frameworks, confirm `config.ru` returns a valid Rack app
+
+If `bin/rails server` says:
+
+```text
+Could not find a server gem. Maybe you need to add one to the Gemfile?
+```
+
+confirm that:
+
+- `gem "vajra"` is in the application bundle
+- Vajra's Railtie has been loaded through Bundler
+- the app is not forcing another Rack server through conflicting environment
+  variables or server flags
+
+Rails applications using Vajra do not need `puma` just to satisfy the server
+command.
+
+## Lifecycle Log Looks Like The Master Is Serving Requests
+
+If the logs show a serving transition from the runtime process, read the
+ownership fields carefully:
+
+- `process_role` identifies which process emitted the event
+- `request_execution_role` identifies which role executes application requests
+
+This line is normal in a master-worker runtime:
+
+```text
+event=serving_entered ... process_role=native_runtime_control request_execution_role=ruby_worker_bootstrap
+```
+
+It means:
+
+- the native runtime owns the listener and entered serving state
+- the Ruby worker still owns application request execution
+
 ## Clean Checkout Fails
 
 Run:

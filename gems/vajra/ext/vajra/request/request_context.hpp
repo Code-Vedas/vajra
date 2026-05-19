@@ -27,6 +27,7 @@ namespace Vajra
     {
       ParsedRequest request;
       SocketContext socket;
+      int client_fd = -1;
       std::string request_body = "";
     };
   }

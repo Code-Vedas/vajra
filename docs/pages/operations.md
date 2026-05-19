@@ -6,8 +6,8 @@ permalink: /operations/
 
 # Operations
 
-Use this page when Vajra is already installed and the next question is how to
-run it, observe it, and respond to problems without guessing.
+Use this page when Vajra is already installed and the question is how to run,
+observe, control, and tune it in normal service.
 
 ## Operating Posture
 
@@ -37,15 +37,17 @@ Operators answer:
 - did the native extension load correctly?
 - did the listener bind correctly?
 - did the application boot path complete?
-- are runtime diagnostics consistent with the configured runtime?
+- did the configured workers become ready?
+- are lifecycle diagnostics consistent with the configured runtime shape?
 
 ### Steady State
 
 Operators observe:
 
 - request success and failure behavior
-- structured runtime events for boot, worker readiness, shutdown, and failures
+- structured runtime events for boot, readiness, serving, drain, shutdown, and failures
 - whether the listener is reachable and the application responds correctly
+- whether process ownership and execution ownership match expectations
 
 ### Shutdown
 
@@ -66,6 +68,30 @@ When the runtime is degraded, the first questions are:
 - are failures isolated or poisoning unrelated work?
 
 The linked engineering pages define the ownership model behind those answers.
+
+## Lifecycle Log Reading
+
+Vajra's lifecycle logs are designed to answer two different questions:
+
+- which process owns the current runtime transition
+- which role executes application requests
+
+The key fields are:
+
+- `process_role`
+- `request_execution_role`
+- `mode`
+- `worker_processes`
+- `listener_owned`
+- `listener_fd`
+
+In a master-worker runtime, it is normal for:
+
+- `process_role=native_runtime_control`
+- `request_execution_role=ruby_worker_bootstrap`
+
+on serving-related events. That means the runtime process owns the listener
+while the worker owns request execution.
 
 ## Related Reading
 

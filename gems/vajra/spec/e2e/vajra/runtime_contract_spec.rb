@@ -67,7 +67,7 @@ RSpec.describe 'Vajra runtime contract', :e2e, :integration do # rubocop:disable
   end
 
   it 'closes an idle reusable connection when the next request head times out' do
-    result = idle_keep_alive_timeout_result
+    result = idle_keep_alive_timeout_result(env: { 'VAJRA_PERSISTENT_TIMEOUT' => '1' })
 
     expect(result[:exitstatus]).to eq(0)
     expect(result[:response]).to include(

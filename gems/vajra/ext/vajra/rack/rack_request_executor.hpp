@@ -10,6 +10,7 @@
 #include "request/request_executor.hpp"
 #include "ruby.h"
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -20,9 +21,19 @@ namespace Vajra
   {
     void initialize_rack_execution_bridge();
     void set_rack_execution_callback(VALUE callback);
-    void run_worker_request_execution_loop(int channel_fd);
+    void run_worker_request_execution_loop(
+        const std::vector<int> &channel_fds,
+        std::size_t min_threads,
+        std::size_t max_threads);
     std::shared_ptr<const class RackExecutionTransport> request_channel_transport(int channel_fd);
-
+    std::shared_ptr<const class RackExecutionTransport> request_channel_transport(
+        const std::vector<std::vector<int>> &worker_channel_fds,
+        const std::vector<int> &worker_pids,
+        std::size_t min_threads,
+        std::size_t queue_capacity,
+        std::size_t request_timeout_seconds,
+        std::size_t worker_timeout_seconds,
+        bool debug_logging);
     class RackExecutionSession
     {
     public:
@@ -36,7 +47,8 @@ namespace Vajra
     public:
       virtual ~RackExecutionTransport() = default;
       virtual std::unique_ptr<RackExecutionSession> start(
-          const std::vector<request::RackEnvEntry> &env_entries) const;
+          const std::vector<request::RackEnvEntry> &env_entries,
+          int client_fd) const;
       virtual std::optional<Vajra::response::Response> execute(
           const std::vector<request::RackEnvEntry> &env_entries,
           const std::string &request_body) const = 0;

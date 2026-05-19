@@ -66,6 +66,18 @@ Environment variables take precedence when both are present.
   - default: `16384` (`16 KiB`)
   - accepted range: `1..2147483647`
 
+## Executable Startup
+
+The `vajra` executable looks for app startup files in this order:
+
+1. `-C` / `--config`
+2. `config/vajra.rb`
+3. `config.ru`
+
+Use `config/vajra.rb` for Vajra-specific settings such as `port`,
+`max_request_head_bytes`, and the `rails` adapter directive. Use `config.ru`
+for Rack app boot in Sinatra, Roda, Hanami, and other Rack-first frameworks.
+
 ## Native Extension
 
 The canonical native source tree lives under `ext/vajra/`.

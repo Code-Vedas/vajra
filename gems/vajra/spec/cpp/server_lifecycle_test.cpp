@@ -41,7 +41,7 @@ namespace VajraSpecCpp
       for (int attempt = 0; attempt < 10; ++attempt)
       {
         const int port = available_port();
-        Vajra::Server server(port, Vajra::request::kDefaultMaxRequestHeadBytes);
+        Vajra::Server server(port, "0.0.0.0", Vajra::request::kDefaultMaxRequestHeadBytes);
         std::exception_ptr server_error;
 
         std::thread server_thread([&]() {
@@ -93,7 +93,7 @@ namespace VajraSpecCpp
     void test_stop_before_start_exits_cleanly()
     {
       const int port = available_port();
-      Vajra::Server server(port, Vajra::request::kDefaultMaxRequestHeadBytes);
+      Vajra::Server server(port, "0.0.0.0", Vajra::request::kDefaultMaxRequestHeadBytes);
       server.stop();
       server.start();
       assert_can_rebind(port);
@@ -105,7 +105,7 @@ namespace VajraSpecCpp
       for (int cycle = 0; cycle < 3; ++cycle)
       {
         const int port = available_port();
-        Vajra::Server server(port, Vajra::request::kDefaultMaxRequestHeadBytes);
+        Vajra::Server server(port, "0.0.0.0", Vajra::request::kDefaultMaxRequestHeadBytes);
         std::exception_ptr server_error;
 
         std::thread server_thread([&]() {
@@ -136,7 +136,7 @@ namespace VajraSpecCpp
     void test_repeated_stop_requests_are_idempotent()
     {
       const int port = available_port();
-      Vajra::Server server(port, Vajra::request::kDefaultMaxRequestHeadBytes);
+      Vajra::Server server(port, "0.0.0.0", Vajra::request::kDefaultMaxRequestHeadBytes);
       std::exception_ptr server_error;
 
       std::thread server_thread([&]() {
@@ -167,14 +167,17 @@ namespace VajraSpecCpp
     void test_inherited_listener_start_and_stop_release_listener()
     {
       Vajra::listener::Socket listener_socket;
-      Vajra::listener::SocketBinding binding = listener_socket.open(available_port());
+      Vajra::listener::SocketBinding binding = listener_socket.open("0.0.0.0", available_port());
       Vajra::Server server(
           binding.port,
+          "0.0.0.0",
           Vajra::request::kDefaultMaxRequestHeadBytes,
           nullptr,
-          "ruby_worker_bootstrap",
+          "native_runtime_control",
           "master_worker",
           1,
+          "ruby_worker_bootstrap",
+          false,
           binding.fd);
       std::exception_ptr server_error;
 

@@ -128,9 +128,10 @@ namespace
 
   std::string lifecycle_details(
       const Vajra::lifecycle::Snapshot &snapshot,
-      const std::string &runtime_role,
+      const std::string &process_role,
       const std::string &runtime_mode,
-      int worker_processes)
+      int worker_processes,
+      const std::string &request_execution_role)
   {
     std::ostringstream message;
     message << "state=" << state_name(snapshot.state)
@@ -140,7 +141,8 @@ namespace
             << " listener_owned=" << (snapshot.listener_owned ? "true" : "false")
             << " listener_fd=" << snapshot.listener_fd
             << " mode=" << runtime_mode
-            << " runtime_role=" << runtime_role
+            << " process_role=" << process_role
+            << " request_execution_role=" << request_execution_role
             << " worker_processes=" << worker_processes;
     return message.str();
   }
@@ -148,22 +150,30 @@ namespace
   void log_runtime_event(
       const char *event_name,
       const Vajra::lifecycle::Snapshot &snapshot,
-      const std::string &runtime_role,
+      const std::string &process_role,
       const std::string &runtime_mode,
       int worker_processes,
+      const std::string &request_execution_role,
       std::ostream &stream)
   {
     std::ostringstream message;
     message << "event=" << event_name << ' '
-            << lifecycle_details(snapshot, runtime_role, runtime_mode, worker_processes);
+            << lifecycle_details(snapshot, process_role, runtime_mode, worker_processes, request_execution_role);
     log_message("lifecycle", message.str(), stream);
   }
 
   void log_booting_event(
-      const std::string &runtime_role,
+      const std::string &process_role,
       const std::string &runtime_mode,
-      int worker_processes)
+      int worker_processes,
+      const std::string &request_execution_role,
+      bool debug_logging)
   {
+    if (!debug_logging)
+    {
+      return;
+    }
+
     const Vajra::lifecycle::Snapshot snapshot{
         Vajra::lifecycle::State::booting,
         Vajra::lifecycle::BootReadiness::pending,
@@ -172,11 +182,13 @@ namespace
         -1,
         -1,
     };
-    log_runtime_event("booting", snapshot, runtime_role, runtime_mode, worker_processes, std::cout);
+    log_runtime_event("booting", snapshot, process_role, runtime_mode, worker_processes, request_execution_role, std::cout);
   }
 
-  void log_listening_banner(int port)
+  void log_listening_banner(const std::string &host, int port)
   {
+    std::cout << "[" << getpid() << "] * Listening on http://" << host << ":" << port << std::endl;
+    std::cout << "[" << getpid() << "] Use Ctrl-C to stop" << std::endl;
     std::ostringstream message;
     message << "listening on port " << port;
     log_message("lifecycle", message.str(), std::cout);
@@ -192,38 +204,68 @@ namespace
 
 Vajra::Server::Server(
     int port,
+    std::string host,
     std::size_t max_request_head_bytes,
     std::shared_ptr<const request::RequestExecutor> request_executor,
-    std::string runtime_role,
+    std::string process_role,
     std::string runtime_mode,
     int worker_processes,
-    int inherited_listener_fd)
-    : port_(port),
+    std::string request_execution_role,
+    bool debug_logging,
+    int inherited_listener_fd,
+    int request_head_timeout_seconds,
+    int first_data_timeout_seconds,
+    int persistent_timeout_seconds)
+    : host_(std::move(host)),
+      port_(port),
       server_fd_(inherited_listener_fd),
       listener_socket_(),
-      request_processor_(max_request_head_bytes, std::move(request_executor)),
+      request_processor_(
+          max_request_head_bytes,
+          request_head_timeout_seconds,
+          first_data_timeout_seconds,
+          persistent_timeout_seconds,
+          std::move(request_executor)),
       lifecycle_(),
-      runtime_role_(std::move(runtime_role)),
+      process_role_(std::move(process_role)),
       runtime_mode_(std::move(runtime_mode)),
-      worker_processes_(worker_processes)
+      worker_processes_(worker_processes),
+      request_execution_role_(std::move(request_execution_role)),
+      debug_logging_(debug_logging)
 {
   set_lifecycle_observer([this](lifecycle::HookPoint hook_point, const lifecycle::Snapshot &snapshot) {
     switch (hook_point)
     {
       case lifecycle::HookPoint::boot_complete:
-        log_runtime_event("boot_complete", snapshot, runtime_role_, runtime_mode_, worker_processes_, std::cout);
+        if (!debug_logging_)
+        {
+          return;
+        }
+        log_runtime_event("boot_complete", snapshot, process_role_, runtime_mode_, worker_processes_, request_execution_role_, std::cout);
         return;
       case lifecycle::HookPoint::serving_entered:
-        log_runtime_event("serving_entered", snapshot, runtime_role_, runtime_mode_, worker_processes_, std::cout);
+        if (!debug_logging_)
+        {
+          return;
+        }
+        log_runtime_event("serving_entered", snapshot, process_role_, runtime_mode_, worker_processes_, request_execution_role_, std::cout);
         return;
       case lifecycle::HookPoint::drain_requested:
-        log_runtime_event("drain_requested", snapshot, runtime_role_, runtime_mode_, worker_processes_, std::cout);
+        if (!debug_logging_)
+        {
+          return;
+        }
+        log_runtime_event("drain_requested", snapshot, process_role_, runtime_mode_, worker_processes_, request_execution_role_, std::cout);
         return;
       case lifecycle::HookPoint::stop_completed:
-        log_runtime_event("stop_completed", snapshot, runtime_role_, runtime_mode_, worker_processes_, std::cout);
+        if (!debug_logging_)
+        {
+          return;
+        }
+        log_runtime_event("stop_completed", snapshot, process_role_, runtime_mode_, worker_processes_, request_execution_role_, std::cout);
         return;
       case lifecycle::HookPoint::failed_entered:
-        log_runtime_event("failed_entered", snapshot, runtime_role_, runtime_mode_, worker_processes_, std::cerr);
+        log_runtime_event("failed_entered", snapshot, process_role_, runtime_mode_, worker_processes_, request_execution_role_, std::cerr);
         return;
     }
 
@@ -252,6 +294,23 @@ void Vajra::Server::close_listener_fd(bool interrupt_accept)
   close(listener_fd);
 }
 
+void Vajra::Server::join_handler_threads()
+{
+  std::vector<std::thread> handler_threads;
+  {
+    std::lock_guard<std::mutex> lock(handler_threads_mutex_);
+    handler_threads = std::move(handler_threads_);
+  }
+
+  for (std::thread &thread : handler_threads)
+  {
+    if (thread.joinable())
+    {
+      thread.join();
+    }
+  }
+}
+
 void Vajra::Server::start()
 {
   if (!lifecycle_.begin_startup())
@@ -260,14 +319,14 @@ void Vajra::Server::start()
     return;
   }
 
-  log_booting_event(runtime_role_, runtime_mode_, worker_processes_);
+  log_booting_event(process_role_, runtime_mode_, worker_processes_, request_execution_role_, debug_logging_);
 
   listener::SocketBinding binding{server_fd_.load(), port_};
   if (binding.fd < 0)
   {
     try
     {
-      binding = listener_socket_.open(port_);
+      binding = listener_socket_.open(host_, port_);
     }
     catch (...)
     {
@@ -285,7 +344,7 @@ void Vajra::Server::start()
     return;
   }
   lifecycle_.mark_boot_ready();
-  log_listening_banner(port_);
+  log_listening_banner(host_, port_);
 
   for (;;)
   {
@@ -297,6 +356,7 @@ void Vajra::Server::start()
 
     if (VajraNative::shutdown_requested())
     {
+      VajraNative::begin_runtime_shutdown();
       lifecycle_.request_stop(lifecycle::StopReason::signal_shutdown);
       break;
     }
@@ -317,6 +377,7 @@ void Vajra::Server::start()
       {
         if (VajraNative::shutdown_requested())
         {
+          VajraNative::begin_runtime_shutdown();
           lifecycle_.request_stop(lifecycle::StopReason::signal_shutdown);
         }
         break;
@@ -336,15 +397,22 @@ void Vajra::Server::start()
       lifecycle_.mark_serving();
     }
 
-    request_processor_.handle(client_fd, socket_context_for(client_fd, client_addr, port_));
+    {
+      std::lock_guard<std::mutex> lock(handler_threads_mutex_);
+      handler_threads_.emplace_back([this, client_fd, client_addr]() {
+        request_processor_.handle(client_fd, socket_context_for(client_fd, client_addr, port_));
+      });
+    }
   }
 
   close_listener_fd(false);
+  join_handler_threads();
   lifecycle_.finish_stop();
 }
 
 void Vajra::Server::stop()
 {
+  VajraNative::begin_runtime_shutdown();
   lifecycle_.request_stop(lifecycle::StopReason::programmatic_stop);
   close_listener_fd(true);
 }

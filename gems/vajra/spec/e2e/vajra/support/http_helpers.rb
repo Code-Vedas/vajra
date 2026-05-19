@@ -5,7 +5,10 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-module VajraE2EHttpHelpers
+require 'fileutils'
+require 'tmpdir'
+
+module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
   def parse_http_response(response)
     headers, body = response.split("\r\n\r\n", 2)
     raise ArgumentError, "incomplete HTTP response: #{response.inspect}" if body.nil?
@@ -103,7 +106,8 @@ module VajraE2EHttpHelpers
 
   def request_response_from_inline_start(env:, timeout: 15)
     Open3.popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
-      selected_port = wait_for_banner(output)
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
       socket.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
@@ -112,7 +116,7 @@ module VajraE2EHttpHelpers
 
       status = stop_process(wait_thread, timeout:)
 
-      { exitstatus: status.exitstatus, response: response, port: selected_port, output: output.read }
+      { exitstatus: status.exitstatus, response: response, port: selected_port, output: "#{startup_output.join}#{output.read}" }
     ensure
       cleanup_process(wait_thread, output)
     end
@@ -238,7 +242,8 @@ module VajraE2EHttpHelpers
     RUBY
 
     Open3.popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
-      selected_port = wait_for_banner(output)
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
       socket.write(request)
@@ -247,7 +252,7 @@ module VajraE2EHttpHelpers
 
       status = stop_process(wait_thread)
 
-      { exitstatus: status.exitstatus, response:, output: output.read, port: selected_port }
+      { exitstatus: status.exitstatus, response:, output: "#{startup_output.join}#{output.read}", port: selected_port }
     ensure
       cleanup_process(wait_thread, output)
     end
@@ -255,7 +260,8 @@ module VajraE2EHttpHelpers
 
   def rack_app_request_result(script:, request:, port: disposable_listener_port, env: {})
     Open3.popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
-      selected_port = wait_for_banner(output)
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
       socket.write(request)
@@ -264,7 +270,7 @@ module VajraE2EHttpHelpers
 
       status = stop_process(wait_thread)
 
-      { exitstatus: status.exitstatus, response:, output: output.read, port: selected_port }
+      { exitstatus: status.exitstatus, response:, output: "#{startup_output.join}#{output.read}", port: selected_port }
     ensure
       cleanup_process(wait_thread, output)
     end
@@ -272,7 +278,8 @@ module VajraE2EHttpHelpers
 
   def rack_app_request_chunks_result(script:, chunks:, port: disposable_listener_port, env: {}, pause: nil)
     Open3.popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
-      selected_port = wait_for_banner(output)
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
       begin
@@ -288,9 +295,160 @@ module VajraE2EHttpHelpers
 
       status = stop_process(wait_thread)
 
-      { exitstatus: status.exitstatus, response:, output: output.read, port: selected_port }
+      { exitstatus: status.exitstatus, response:, output: "#{startup_output.join}#{output.read}", port: selected_port }
     ensure
       cleanup_process(wait_thread, output)
     end
   end
+
+  # rubocop:disable Metrics/AbcSize, ThreadSafety/NewThread
+  def concurrent_rack_app_request_results(script:, requests:, port: disposable_listener_port, env: {})
+    Open3.popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
+
+      responses = Array.new(requests.length)
+      ready_mutex = Mutex.new
+      ready_condition = ConditionVariable.new
+      ready_count = 0
+      release_requests = false
+      workers = requests.each_with_index.map do |request, index|
+        Thread.new do
+          socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+          begin
+            ready_mutex.synchronize do
+              ready_count += 1
+              ready_condition.broadcast if ready_count == requests.length
+              ready_condition.wait(ready_mutex) until release_requests
+            end
+            socket.write(request)
+            responses[index] = read_raw_http_response(
+              socket,
+              wait_thread:,
+              output:,
+              request_label: "concurrent_rack_app_request_results:#{index}"
+            )
+          ensure
+            socket.close unless socket.closed?
+          end
+        end
+      end
+      ready_mutex.synchronize do
+        ready_condition.wait(ready_mutex) until ready_count == requests.length
+        release_requests = true
+        ready_condition.broadcast
+      end
+      workers.each(&:join)
+
+      status = stop_process(wait_thread)
+
+      {
+        exitstatus: status.exitstatus,
+        responses:,
+        output: "#{startup_output.join}#{output.read}",
+        port: selected_port
+      }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+  # rubocop:enable Metrics/AbcSize, ThreadSafety/NewThread
+
+  def packaged_app_request_result(files:, request:, env: {}, args: [])
+    packaged_app_command_request_result(
+      files:,
+      command: packaged_vajra_command(*args),
+      request:,
+      env: vajra_env(port: 0).merge(env)
+    )
+  end
+
+  def packaged_app_startup_failure(files:, env: {}, args: [])
+    packaged_app_command_startup_failure(
+      files:,
+      command: packaged_vajra_command(*args),
+      env: vajra_env(port: 0).merge(env)
+    )
+  end
+
+  def packaged_app_command_request_result(files:, command:, request:, env: {})
+    with_packaged_app(files:) do |app_root|
+      Open3.popen2e(app_root_bundle_env.merge(env), *command, chdir: app_root) do |_stdin, output, wait_thread|
+        startup_output = []
+        selected_port = wait_for_banner(output, captured_lines: startup_output)
+
+        socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+        socket.write(request)
+        response = read_raw_http_response(socket, wait_thread:, output:, request_label: 'packaged_app_command_request_result')
+        socket.close
+
+        status = stop_process(wait_thread)
+
+        { exitstatus: status.exitstatus, response:, output: "#{startup_output.join}#{output.read}", port: selected_port }
+      ensure
+        cleanup_process(wait_thread, output)
+      end
+    end
+  end
+
+  def packaged_app_command_request_result_on_port(files:, command:, request:, port:, env: {}, timeout: 15)
+    with_packaged_app(files:) do |app_root|
+      Open3.popen2e(app_root_bundle_env.merge(env), *command, chdir: app_root) do |_stdin, output, wait_thread|
+        response = wait_for_http_response(
+          port,
+          request,
+          wait_thread:,
+          output:,
+          timeout:,
+          request_label: 'packaged_app_command_request_result_on_port'
+        )
+        status = stop_process(wait_thread)
+
+        { exitstatus: status.exitstatus, response:, output: output.read, port: }
+      ensure
+        cleanup_process(wait_thread, output)
+      end
+    end
+  end
+
+  def packaged_app_command_startup_failure(files:, command:, env: {})
+    with_packaged_app(files:) do |app_root|
+      Open3.popen2e(app_root_bundle_env.merge(env), *command, chdir: app_root) do |_stdin, output, wait_thread|
+        status = Timeout.timeout(15) { wait_thread.value }
+        { exitstatus: status.exitstatus, output: output.read }
+      ensure
+        cleanup_process(wait_thread, output)
+      end
+    end
+  end
+
+  def with_packaged_app(files:)
+    Dir.mktmpdir('vajra-app-root') do |app_root|
+      files.each do |relative_path, contents|
+        absolute_path = File.join(app_root, relative_path)
+        FileUtils.mkdir_p(File.dirname(absolute_path))
+        File.write(absolute_path, contents)
+      end
+
+      yield app_root
+    end
+  end
+  private :with_packaged_app
+
+  def wait_for_http_response(port, request, wait_thread:, output:, timeout:, request_label:)
+    Timeout.timeout(timeout) do
+      loop do
+        raise "#{request_label} exited early: #{process_diagnostics(wait_thread, output)}" unless wait_thread.alive?
+
+        socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, port)
+        socket.write(request)
+        return read_raw_http_response(socket, wait_thread:, output:, request_label:)
+      rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH, Errno::ECONNRESET, EOFError, Timeout::Error
+        sleep 0.01
+      ensure
+        socket&.close unless socket.nil? || socket.closed?
+      end
+    end
+  end
+  private :wait_for_http_response
 end

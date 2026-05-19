@@ -11,11 +11,30 @@
 
 #include <memory>
 #include <optional>
+#include <stdexcept>
 
 namespace Vajra
 {
   namespace request
   {
+    class QueueCapacityError : public std::runtime_error
+    {
+    public:
+      explicit QueueCapacityError(const std::string &message)
+          : std::runtime_error(message)
+      {
+      }
+    };
+
+    class RequestTimeoutError : public std::runtime_error
+    {
+    public:
+      explicit RequestTimeoutError(const std::string &message)
+          : std::runtime_error(message)
+      {
+      }
+    };
+
     class RequestExecutionSession
     {
     public:

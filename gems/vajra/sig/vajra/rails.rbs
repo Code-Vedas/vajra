@@ -1,0 +1,21 @@
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+module Vajra
+  module Rails
+    class Error < Vajra::Error
+    end
+
+    interface _RailsApplication
+      def call: (Hash[String, String | bool | IO | StringIO | Array[Integer]]) -> [Integer | String, Hash[String | Symbol, String] | Array[[String | Symbol, String]], Array[String]]
+      def initialized?: () -> bool
+      def initialize!: () -> self
+    end
+
+    def self.install!: (?_RailsApplication) -> _RailsApplication
+    def self.installed?: () -> bool
+    def self.uninstall!: () -> nil
+  end
+end

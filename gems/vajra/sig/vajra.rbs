@@ -4,9 +4,26 @@
 # LICENSE file in the root directory of this source tree.
 
 module Vajra
+  class Error < StandardError
+  end
+
   VERSION: String
 
   def self.header: () -> String
-  def self.start: (?port: Integer, ?max_request_head_bytes: Integer) -> nil
+  def self.start: (
+    ?host: String,
+    ?port: Integer,
+    ?workers: Integer,
+    ?threads: [Integer] | [Integer, Integer],
+    ?queue_capacity: Integer,
+    ?scheduler_policy: String,
+    ?max_request_head_bytes: Integer,
+    ?request_timeout: Integer,
+    ?request_head_timeout: Integer,
+    ?first_data_timeout: Integer,
+    ?persistent_timeout: Integer,
+    ?worker_timeout: Integer,
+    ?log_level: String
+  ) -> nil
   def self.stop: () -> nil
 end

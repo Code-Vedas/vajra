@@ -59,7 +59,28 @@ module VajraE2EStartupHelpers
     inline_ruby_command(<<~RUBY)
       require "vajra"
       options = {}
+      options[:host] = ENV["RUBY_HOST"] if ENV.key?("RUBY_HOST")
       options[:port] = Integer(ENV["RUBY_PORT"]) if ENV.key?("RUBY_PORT")
+      options[:workers] = Integer(ENV["RUBY_WORKERS"]) if ENV.key?("RUBY_WORKERS")
+      options[:log_level] = ENV["RUBY_LOG_LEVEL"] if ENV.key?("RUBY_LOG_LEVEL")
+      if ENV.key?("RUBY_THREADS")
+        options[:threads] = ENV.fetch("RUBY_THREADS").split(",").map { |value| Integer(value.strip) }
+      end
+      if ENV.key?("RUBY_QUEUE_CAPACITY")
+        options[:queue_capacity] = Integer(ENV.fetch("RUBY_QUEUE_CAPACITY"))
+      end
+      options[:scheduler_policy] = ENV["RUBY_SCHEDULER_POLICY"] if ENV.key?("RUBY_SCHEDULER_POLICY")
+      options[:request_timeout] = Integer(ENV.fetch("RUBY_REQUEST_TIMEOUT")) if ENV.key?("RUBY_REQUEST_TIMEOUT")
+      if ENV.key?("RUBY_REQUEST_HEAD_TIMEOUT")
+        options[:request_head_timeout] = Integer(ENV.fetch("RUBY_REQUEST_HEAD_TIMEOUT"))
+      end
+      if ENV.key?("RUBY_FIRST_DATA_TIMEOUT")
+        options[:first_data_timeout] = Integer(ENV.fetch("RUBY_FIRST_DATA_TIMEOUT"))
+      end
+      if ENV.key?("RUBY_PERSISTENT_TIMEOUT")
+        options[:persistent_timeout] = Integer(ENV.fetch("RUBY_PERSISTENT_TIMEOUT"))
+      end
+      options[:worker_timeout] = Integer(ENV.fetch("RUBY_WORKER_TIMEOUT")) if ENV.key?("RUBY_WORKER_TIMEOUT")
       if ENV.key?("RUBY_MAX_REQUEST_HEAD_BYTES")
         options[:max_request_head_bytes] = Integer(ENV.fetch("RUBY_MAX_REQUEST_HEAD_BYTES"))
       end
@@ -135,7 +156,8 @@ module VajraE2EStartupHelpers
 
   def oversized_request_result(env:, payload_size:)
     Open3.popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
-      selected_port = wait_for_banner(output)
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
       socket.write(
@@ -149,7 +171,7 @@ module VajraE2EStartupHelpers
 
       status = stop_process(wait_thread)
 
-      { exitstatus: status.exitstatus, response:, output: output.read, port: selected_port }
+      { exitstatus: status.exitstatus, response:, output: "#{startup_output.join}#{output.read}", port: selected_port }
     ensure
       cleanup_process(wait_thread, output)
     end
@@ -157,7 +179,8 @@ module VajraE2EStartupHelpers
 
   def request_with_body_result(env:, body:)
     Open3.popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
-      selected_port = wait_for_banner(output)
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
       socket.write(
@@ -172,7 +195,7 @@ module VajraE2EStartupHelpers
 
       status = stop_process(wait_thread)
 
-      { exitstatus: status.exitstatus, response:, output: output.read, port: selected_port }
+      { exitstatus: status.exitstatus, response:, output: "#{startup_output.join}#{output.read}", port: selected_port }
     ensure
       cleanup_process(wait_thread, output)
     end

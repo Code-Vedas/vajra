@@ -14,12 +14,23 @@ RSpec.describe 'Vajra lifecycle', :e2e, :integration do # rubocop:disable RSpec/
     expect(shutdown[:exitstatus]).to eq(0)
     expect(shutdown[:output]).not_to include('accept failed')
     expect(shutdown[:output]).to include(
-      '[Vajra][lifecycle]',
+      '=== vajra boot:',
+      'Vajra starting in master-worker mode...',
+      '* Environment: development',
+      '* Master PID:',
+      '* Workers: 1',
+      'Use Ctrl-C to stop',
+      '- Gracefully shutting down workers...',
+      '=== vajra shutdown:',
+      '- Goodbye!'
+    )
+    expect(shutdown[:output]).not_to include(
+      'event=worker_ready',
+      'event=booting',
+      'event=boot_complete',
+      'event=serving_entered',
       'event=drain_requested',
-      'event=stop_completed',
-      'boot_status=ready',
-      'mode=master_worker',
-      'worker_processes=1'
+      'event=stop_completed'
     )
 
     rebound_server = bind_port(port: shutdown[:port])
@@ -41,16 +52,27 @@ RSpec.describe 'Vajra lifecycle', :e2e, :integration do # rubocop:disable RSpec/
     rebound_server.close
   end
 
+  it 'prints the graceful shutdown banner immediately after Ctrl-C even after requests have flowed' do
+    shutdown = active_request_shutdown(
+      request: "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+
+    expect(shutdown[:exitstatus]).to eq(0)
+    expect(shutdown[:response]).to include('HTTP/1.1 200 OK')
+    expect(shutdown[:immediate_output]).to include('- Gracefully shutting down workers...')
+    expect(shutdown[:output]).to include(
+      '- Gracefully shutting down workers...',
+      '=== vajra shutdown:',
+      '- Goodbye!'
+    )
+  end
+
   it 'supports programmatic Vajra.stop and releases the listener' do
     shutdown = programmatic_shutdown
 
     expect(shutdown[:exitstatus]).to eq(0), shutdown[:output]
     expect(shutdown[:output]).not_to include('accept failed')
-    expect(shutdown[:output]).to include(
-      '[Vajra][lifecycle]',
-      'event=drain_requested',
-      'stop_reason=programmatic_stop'
-    )
+    expect(shutdown[:output]).not_to include('event=drain_requested')
   end
 
   it 'does not let Vajra.stop before startup poison the next start' do
@@ -58,11 +80,7 @@ RSpec.describe 'Vajra lifecycle', :e2e, :integration do # rubocop:disable RSpec/
 
     expect(shutdown[:exitstatus]).to eq(0), shutdown[:output]
     expect(shutdown[:output]).not_to include('Vajra already running')
-    expect(shutdown[:output]).to include(
-      '[Vajra][lifecycle]',
-      'event=drain_requested',
-      'stop_reason=programmatic_stop'
-    )
+    expect(shutdown[:output]).not_to include('event=drain_requested')
   end
 
   it 'survives repeated process start stop thrashing and releases the listener every time' do

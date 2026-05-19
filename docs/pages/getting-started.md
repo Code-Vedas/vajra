@@ -84,3 +84,23 @@ bundle exec exe/vajra
 
 Vajra binds to port `3000`, prints a startup banner, and responds to a basic
 HTTP request. That runtime path is covered by the committed e2e suite.
+
+## Application Runtime Check
+
+For a real app integration, use the framework-native launcher shape:
+
+```bash
+bin/rails server
+```
+
+or:
+
+```bash
+bundle exec vajra
+```
+
+Use `bin/rails server` for Rails. Use `bundle exec vajra` for Rack-first hosts
+such as Sinatra, Roda, and Hanami.
+
+The standalone executable looks for `config/vajra.rb` first. If no Vajra
+config file is present, it falls back to `config.ru`.

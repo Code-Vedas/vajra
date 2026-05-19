@@ -25,15 +25,29 @@ module VajraE2EHelpers
     ['bundle', 'exec', RbConfig.ruby, '-Ilib', 'exe/vajra', *args]
   end
 
+  def packaged_vajra_command(*args)
+    ['bundle', 'exec', RbConfig.ruby, "-I#{File.join(PACKAGE_ROOT, 'lib')}", File.join(PACKAGE_ROOT, 'exe', 'vajra'), *args]
+  end
+
+  def packaged_bundle_command(*args)
+    ['bundle', 'exec', *args]
+  end
+
   def inline_ruby_command(script)
     ['bundle', 'exec', RbConfig.ruby, '-Ilib', '-e', script]
   end
 
-  def vajra_env(port: nil, max_request_head_bytes: nil)
+  def app_root_bundle_env
+    { 'BUNDLE_GEMFILE' => File.join(PACKAGE_ROOT, 'Gemfile') }
+  end
+
+  def vajra_env(host: nil, port: nil, max_request_head_bytes: nil)
     {
+      'VAJRA_HOST' => nil,
       'VAJRA_PORT' => nil,
       'VAJRA_MAX_REQUEST_HEAD_BYTES' => nil
     }.tap do |env|
+      env['VAJRA_HOST'] = host unless host.nil?
       env['VAJRA_PORT'] = port.to_s unless port.nil?
       env['VAJRA_MAX_REQUEST_HEAD_BYTES'] = max_request_head_bytes.to_s unless max_request_head_bytes.nil?
     end
@@ -43,11 +57,13 @@ module VajraE2EHelpers
     "listening on port #{port}"
   end
 
-  def wait_for_banner(output)
+  def wait_for_banner(output, captured_lines: nil)
     Timeout.timeout(15) do
       loop do
         line = output.gets
         raise 'vajra exited before startup banner' if line.nil?
+
+        captured_lines << line if captured_lines
 
         match = line.match(/\[Vajra\]\[lifecycle\] .* listening on port (\d+)/) ||
                 line.match(/\[Vajra\]\[lifecycle\] .* event=boot_complete .* port=(\d+)/)

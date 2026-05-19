@@ -52,6 +52,24 @@ Vajra::response::Response Vajra::response::ResponseWriter::internal_server_error
       ConnectionBehavior::close};
 }
 
+Vajra::response::Response Vajra::response::ResponseWriter::queue_capacity_response() const
+{
+  return Response{
+      Status{503, "Service Unavailable"},
+      {Header{"Content-Type", "text/plain"}},
+      "Service Unavailable",
+      ConnectionBehavior::close};
+}
+
+Vajra::response::Response Vajra::response::ResponseWriter::request_timeout_response() const
+{
+  return Response{
+      Status{408, "Request Timeout"},
+      {Header{"Content-Type", "text/plain"}},
+      "Request Timeout",
+      ConnectionBehavior::close};
+}
+
 Vajra::response::Response Vajra::response::ResponseWriter::request_head_failure_response(
     Vajra::request::HeadFailureKind kind) const
 {

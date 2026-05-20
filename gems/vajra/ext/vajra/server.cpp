@@ -478,13 +478,12 @@ void Vajra::Server::start()
     try
     {
       std::lock_guard<std::mutex> lock(handler_threads_mutex_);
-      handler_threads_.push_back(HandlerThread{
-          std::thread([this, client_fd, client_addr, completed]() {
-            ActiveConnectionGuard active_connection_guard(active_connection_count_);
-            request_processor_.handle(client_fd, socket_context_for(client_fd, client_addr, port_));
-            completed->store(true, std::memory_order_release);
-          }),
-          completed,
+      handler_threads_.push_back(HandlerThread{std::thread(), completed});
+      HandlerThread &handler_thread = handler_threads_.back();
+      handler_thread.thread = std::thread([this, client_fd, client_addr, completed]() {
+        ActiveConnectionGuard active_connection_guard(active_connection_count_);
+        request_processor_.handle(client_fd, socket_context_for(client_fd, client_addr, port_));
+        completed->store(true, std::memory_order_release);
       });
     }
     catch (...)

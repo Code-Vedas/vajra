@@ -38,7 +38,8 @@ namespace Vajra
         int inherited_listener_fd = -1,
         int request_head_timeout_seconds = 5,
         int first_data_timeout_seconds = 30,
-        int persistent_timeout_seconds = 30);
+        int persistent_timeout_seconds = 30,
+        std::function<void()> shutdown_begin_callback = {});
     ~Server();
 
     void start();
@@ -58,6 +59,7 @@ namespace Vajra
     int worker_processes_;
     std::string request_execution_role_;
     bool debug_logging_;
+    std::function<void()> shutdown_begin_callback_;
     std::mutex handler_threads_mutex_;
     std::vector<std::thread> handler_threads_;
 

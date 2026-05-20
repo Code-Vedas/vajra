@@ -87,6 +87,7 @@ module Vajra
 
     def with_config_target(target)
       current_thread = Thread.current
+      previous_target = nil
       previous_target = current_thread[:vajra_config_target]
       current_thread[:vajra_config_target] = target
       yield

@@ -215,7 +215,8 @@ Vajra::Server::Server(
     int inherited_listener_fd,
     int request_head_timeout_seconds,
     int first_data_timeout_seconds,
-    int persistent_timeout_seconds)
+    int persistent_timeout_seconds,
+    std::function<void()> shutdown_begin_callback)
     : host_(std::move(host)),
       port_(port),
       server_fd_(inherited_listener_fd),
@@ -231,7 +232,8 @@ Vajra::Server::Server(
       runtime_mode_(std::move(runtime_mode)),
       worker_processes_(worker_processes),
       request_execution_role_(std::move(request_execution_role)),
-      debug_logging_(debug_logging)
+      debug_logging_(debug_logging),
+      shutdown_begin_callback_(std::move(shutdown_begin_callback))
 {
   set_lifecycle_observer([this](lifecycle::HookPoint hook_point, const lifecycle::Snapshot &snapshot) {
     switch (hook_point)
@@ -356,7 +358,10 @@ void Vajra::Server::start()
 
     if (VajraNative::shutdown_requested())
     {
-      VajraNative::begin_runtime_shutdown();
+      if (shutdown_begin_callback_)
+      {
+        shutdown_begin_callback_();
+      }
       lifecycle_.request_stop(lifecycle::StopReason::signal_shutdown);
       break;
     }
@@ -377,7 +382,10 @@ void Vajra::Server::start()
       {
         if (VajraNative::shutdown_requested())
         {
-          VajraNative::begin_runtime_shutdown();
+          if (shutdown_begin_callback_)
+          {
+            shutdown_begin_callback_();
+          }
           lifecycle_.request_stop(lifecycle::StopReason::signal_shutdown);
         }
         break;
@@ -412,7 +420,10 @@ void Vajra::Server::start()
 
 void Vajra::Server::stop()
 {
-  VajraNative::begin_runtime_shutdown();
+  if (shutdown_begin_callback_)
+  {
+    shutdown_begin_callback_();
+  }
   lifecycle_.request_stop(lifecycle::StopReason::programmatic_stop);
   close_listener_fd(true);
 }

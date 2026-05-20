@@ -38,7 +38,7 @@ namespace
   volatile std::sig_atomic_t shutting_down = 0;
   bool runtime_shutdown_started = false;
   std::mutex server_mutex;
-  std::unique_ptr<Vajra::Server> server_instance;
+  std::shared_ptr<Vajra::Server> server_instance;
   std::vector<pid_t> worker_pids;
   std::vector<int> worker_request_channel_fds;
   bool stop_requested = false;
@@ -1284,17 +1284,19 @@ namespace VajraNative
       }
     }
 
-    void install_server_instance(std::unique_ptr<Vajra::Server> server)
+    void install_server_instance(std::shared_ptr<Vajra::Server> server)
     {
       const std::lock_guard<std::mutex> lock(server_mutex);
       server_instance = std::move(server);
       worker_startup_in_progress = false;
     }
 
-    std::unique_ptr<Vajra::Server> take_server_instance()
+    std::shared_ptr<Vajra::Server> take_server_instance()
     {
       const std::lock_guard<std::mutex> lock(server_mutex);
-      return std::move(server_instance);
+      std::shared_ptr<Vajra::Server> server = server_instance;
+      server_instance.reset();
+      return server;
     }
 
     bool try_begin_startup()
@@ -1562,7 +1564,7 @@ namespace VajraNative
         int worker_processes,
         bool debug_logging)
     {
-      auto server = std::make_unique<Vajra::Server>(
+      auto server = std::make_shared<Vajra::Server>(
           port,
           host,
           max_request_head_bytes,
@@ -1583,7 +1585,8 @@ namespace VajraNative
           -1,
           request_head_timeout_seconds,
           first_data_timeout_seconds,
-          persistent_timeout_seconds);
+          persistent_timeout_seconds,
+          begin_runtime_shutdown);
       Vajra::Server *server_ptr = server.get();
       install_server_instance(std::move(server));
       ServerRunContext context{server_ptr, ""};
@@ -1838,9 +1841,11 @@ namespace VajraNative
     (void)stop_worker_processes();
 
     Vajra::Server *server = nullptr;
+    std::shared_ptr<Vajra::Server> server_handle;
     {
       std::lock_guard<std::mutex> lock(server_mutex);
-      server = server_instance.get();
+      server_handle = server_instance;
+      server = server_handle.get();
     }
 
     if (server != nullptr)

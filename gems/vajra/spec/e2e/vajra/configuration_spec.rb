@@ -106,34 +106,19 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
       runtime_output = queue_capacity_runtime_output(output)
       sockets[1].write(post_request('two'))
       sockets[2].write(post_request('three'))
-
-      third_response = parse_http_response(
-        read_raw_http_response(
-          sockets[2],
-          wait_thread:,
-          output:,
-          request_label: 'queue_capacity_result:2'
-        )
-      )
       sockets[0].write(first_body)
-      first_response = parse_http_response(
-        read_raw_http_response(
-          sockets[0],
-          wait_thread:,
-          output:,
-          request_label: 'queue_capacity_result:0'
+      responses = sockets.each_with_index.map do |socket, index|
+        parse_http_response(
+          read_raw_http_response(
+            socket,
+            wait_thread:,
+            output:,
+            request_label: "queue_capacity_result:#{index}"
+          )
         )
-      )
-      second_response = parse_http_response(
-        read_raw_http_response(
-          sockets[1],
-          wait_thread:,
-          output:,
-          request_label: 'queue_capacity_result:1'
-        )
-      )
+      end
 
-      [[first_response, second_response, third_response], runtime_output]
+      [responses, runtime_output]
     ensure
       sockets.each { |socket| socket.close unless socket.closed? }
     end

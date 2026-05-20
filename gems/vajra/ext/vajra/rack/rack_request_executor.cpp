@@ -1209,6 +1209,7 @@ namespace
     std::vector<Vajra::request::RackEnvEntry> env_entries;
     std::chrono::steady_clock::time_point deadline;
     std::atomic_bool assigned = false;
+    std::atomic_bool released = false;
     std::atomic_bool canceled = false;
     std::atomic_bool timed_out = false;
     std::atomic_bool client_gone = false;
@@ -1367,10 +1368,17 @@ namespace
 
     void release_channel(const std::shared_ptr<PendingRequest> &pending_request) const
     {
+      bool expected = false;
+      if (!pending_request->released.compare_exchange_strong(expected, true))
+      {
+        return;
+      }
+
       {
         std::lock_guard<std::mutex> lock(scheduler_mutex_);
         const std::shared_ptr<WorkerSlot> slot = slot_for(pending_request->worker_index);
         slot->channels.at(pending_request->channel_index).busy = false;
+        pending_request->assigned = false;
         while (slot->active_channels > slot->min_channels &&
                !slot->channels[slot->active_channels - 1].busy &&
                pending_requests_.empty())

@@ -518,6 +518,12 @@ void Vajra::Server::start()
     }
     catch (...)
     {
+      std::lock_guard<std::mutex> lock(handler_threads_mutex_);
+      if (!handler_threads_.empty() && handler_threads_.back().thread.joinable() == false &&
+          handler_threads_.back().completed == completed)
+      {
+        handler_threads_.pop_back();
+      }
       active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
       close(client_fd);
       throw;

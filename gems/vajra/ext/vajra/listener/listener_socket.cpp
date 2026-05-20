@@ -16,6 +16,12 @@
 
 namespace
 {
+  enum class SocketFailureStage
+  {
+    socket_create,
+    bind
+  };
+
   std::runtime_error startup_error(const char *stage, const std::string &host, int port, int error_number)
   {
     return std::runtime_error(
@@ -52,12 +58,14 @@ Vajra::listener::SocketBinding Vajra::listener::Socket::open(const std::string &
 
   int socket_fd = -1;
   int last_error = 0;
+  SocketFailureStage last_failure_stage = SocketFailureStage::bind;
   for (addrinfo *candidate = result; candidate != nullptr; candidate = candidate->ai_next)
   {
     socket_fd = socket(candidate->ai_family, candidate->ai_socktype, candidate->ai_protocol);
     if (socket_fd < 0)
     {
       last_error = errno;
+      last_failure_stage = SocketFailureStage::socket_create;
       continue;
     }
 
@@ -76,6 +84,7 @@ Vajra::listener::SocketBinding Vajra::listener::Socket::open(const std::string &
     }
 
     last_error = errno;
+    last_failure_stage = SocketFailureStage::bind;
     close(socket_fd);
     socket_fd = -1;
   }
@@ -84,7 +93,7 @@ Vajra::listener::SocketBinding Vajra::listener::Socket::open(const std::string &
 
   if (socket_fd < 0)
   {
-    throw startup_error("bind", host, port, last_error);
+    throw startup_error(last_failure_stage == SocketFailureStage::socket_create ? "socket create" : "bind", host, port, last_error);
   }
 
   sockaddr_in bound_addr{};

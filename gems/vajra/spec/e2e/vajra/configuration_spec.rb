@@ -53,6 +53,113 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     RUBY
   end
 
+  def queue_capacity_script
+    <<~RUBY
+      require "vajra"
+
+      Vajra::Internal::RackExecution.install!(
+        lambda do |_rack_env|
+          sleep 0.75
+          [200, { "Content-Type" => "text/plain" }, ["OK"]]
+        end
+      )
+
+      Vajra.start(
+        workers: 1,
+        threads: [1, 1],
+        queue_capacity: 1,
+        scheduler_policy: "least_loaded",
+        log_level: "debug"
+      )
+    RUBY
+  end
+
+  def queue_capacity_request_head(body)
+    "POST / HTTP/1.1\r\n" \
+      "Host: localhost\r\n" \
+      "Content-Type: text/plain\r\n" \
+      "Content-Length: #{body.bytesize}\r\n" \
+      "Connection: close\r\n\r\n"
+  end
+
+  def queue_capacity_runtime_output(output)
+    runtime_output = +''
+
+    Timeout.timeout(2) do
+      loop do
+        runtime_output << read_available_output(output)
+        break if runtime_output.include?('event=request_assigned')
+
+        sleep 0.01
+      end
+    end
+
+    runtime_output
+  end
+
+  def queue_capacity_responses(selected_port, wait_thread, output)
+    first_body = 'one'
+    sockets = open_request_sockets(selected_port, 3)
+
+    begin
+      sockets[0].write(queue_capacity_request_head(first_body))
+      runtime_output = queue_capacity_runtime_output(output)
+      sockets[1].write(post_request('two'))
+      sockets[2].write(post_request('three'))
+
+      third_response = parse_http_response(
+        read_raw_http_response(
+          sockets[2],
+          wait_thread:,
+          output:,
+          request_label: 'queue_capacity_result:2'
+        )
+      )
+      sockets[0].write(first_body)
+      first_response = parse_http_response(
+        read_raw_http_response(
+          sockets[0],
+          wait_thread:,
+          output:,
+          request_label: 'queue_capacity_result:0'
+        )
+      )
+      second_response = parse_http_response(
+        read_raw_http_response(
+          sockets[1],
+          wait_thread:,
+          output:,
+          request_label: 'queue_capacity_result:1'
+        )
+      )
+
+      [[first_response, second_response, third_response], runtime_output]
+    ensure
+      sockets.each { |socket| socket.close unless socket.closed? }
+    end
+  end
+
+  def queue_capacity_result(script:)
+    Open3.popen2e(
+      vajra_env(port: disposable_listener_port),
+      *inline_ruby_command(script),
+      chdir: VajraE2EHelpers::PACKAGE_ROOT
+    ) do |_stdin, output, wait_thread|
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
+      responses, runtime_output = queue_capacity_responses(selected_port, wait_thread, output)
+      status = stop_process(wait_thread)
+
+      {
+        exitstatus: status.exitstatus,
+        responses:,
+        output: "#{startup_output.join}#{runtime_output}#{output.read}"
+      }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
   def open_request_sockets(port, count)
     Array.new(count) { TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, port) }
   end
@@ -486,41 +593,10 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
   end
 
   it 'caps the single global FIFO queue and reports the hard-cap rejection in debug output' do
-    script = <<~RUBY
-      require "vajra"
-
-      Vajra::Internal::RackExecution.install!(
-        lambda do |_rack_env|
-          sleep 0.75
-          [200, { "Content-Type" => "text/plain" }, ["OK"]]
-        end
-      )
-
-      Vajra.start(
-        workers: 1,
-        threads: [1, 1],
-        queue_capacity: 1,
-        scheduler_policy: "least_loaded",
-        log_level: "debug"
-      )
-    RUBY
-
-    request = lambda do |body|
-      "POST / HTTP/1.1\r\n" \
-        "Host: localhost\r\n" \
-        "Content-Type: text/plain\r\n" \
-        "Content-Length: #{body.bytesize}\r\n" \
-        "Connection: close\r\n\r\n" \
-        "#{body}"
-    end
-
-    result = concurrent_rack_app_request_results(
-      script:,
-      requests: [request.call('one'), request.call('two'), request.call('three')]
-    )
+    result = queue_capacity_result(script: queue_capacity_script)
 
     expect(result[:exitstatus]).to eq(0), result[:output]
-    responses = result[:responses].map { |response| parse_http_response(response) }
+    responses = result[:responses]
     expect(responses.count { |response| response[:status_line] == 'HTTP/1.1 200 OK' }).to eq(2)
     expect(responses.count { |response| response[:status_line] == 'HTTP/1.1 503 Service Unavailable' }).to eq(1)
     expect(result[:output]).to include(

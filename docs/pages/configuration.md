@@ -49,7 +49,7 @@ Vajra.configure do |config|
   config.linger_timeout 5
 
   # Scheduling and admission
-  config.max_connections 10_000
+  config.max_connections 256
   config.queue_capacity 100_000
   config.max_requests_per_worker 10_000
   config.scheduler_policy "least_loaded"
@@ -130,7 +130,7 @@ oldest live queued request to the least-busy worker.
 | `worker_timeout` | `60` | `VAJRA_WORKER_TIMEOUT` | `config.worker_timeout 60` | stuck worker lifecycle timeout |
 | `max_keepalive_requests` | `1000` | none | `config.max_keepalive_requests 1000` | maximum sequential requests per connection |
 | `linger_timeout` | `5` | none | `config.linger_timeout 5` | close and linger behavior after response completion |
-| `max_connections` | `10_000` | none | `config.max_connections 10_000` | global accepted-connection ceiling |
+| `max_connections` | `256` | none | `config.max_connections 10_000` | global accepted-connection ceiling |
 | `queue_capacity` | signed `long` max | `VAJRA_QUEUE_CAPACITY` | `config.queue_capacity 100_000` | global pending request-queue limit |
 | `max_requests_per_worker` | `10_000` | none | `config.max_requests_per_worker 10_000` | worker recycle threshold |
 | `scheduler_policy` | `"least_loaded"` | `VAJRA_SCHEDULER_POLICY` | `config.scheduler_policy "least_loaded"` | worker selection policy |

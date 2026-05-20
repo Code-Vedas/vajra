@@ -304,12 +304,33 @@ namespace
     return true;
   }
 
-  bool read_frame_with_timeout(int fd, Vajra::ipc::FrameHeader &header, std::string &payload, int timeout_milliseconds)
+  enum class TimedReadResult
+  {
+    ready,
+    eof,
+    timeout,
+  };
+
+  TimedReadResult read_frame_with_timeout(int fd, Vajra::ipc::FrameHeader &header, std::string &payload, int timeout_milliseconds)
   {
     std::array<std::uint8_t, Vajra::ipc::kFrameHeaderSize> encoded_header{};
     if (!read_exact_or_eof_with_timeout(fd, encoded_header.data(), encoded_header.size(), timeout_milliseconds))
     {
-      return false;
+      std::uint8_t probe = 0;
+      const ssize_t probe_result = recv(fd, &probe, 1, MSG_PEEK | MSG_DONTWAIT);
+      if (probe_result == 0)
+      {
+        return TimedReadResult::eof;
+      }
+      if (probe_result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+      {
+        return TimedReadResult::timeout;
+      }
+      if (probe_result < 0 && errno == EINTR)
+      {
+        return TimedReadResult::timeout;
+      }
+      return TimedReadResult::eof;
     }
 
     Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::none;
@@ -330,11 +351,11 @@ namespace
     if (decoded_header->payload_length > 0 &&
         !read_exact_or_eof_with_timeout(fd, payload.data(), decoded_header->payload_length, timeout_milliseconds))
     {
-      throw std::runtime_error("request channel closed before payload body");
+      throw std::runtime_error("request channel timed out or closed before payload body");
     }
 
     header = *decoded_header;
-    return true;
+    return TimedReadResult::ready;
   }
 
   bool client_disconnected(int client_fd)
@@ -1034,10 +1055,15 @@ namespace
 
       Vajra::ipc::FrameHeader header{};
       std::string payload;
-      if (!read_frame_with_timeout(channel_fd_, header, payload, worker_timeout_milliseconds_))
+      const TimedReadResult metadata_result =
+          read_frame_with_timeout(channel_fd_, header, payload, worker_timeout_milliseconds_);
+      if (metadata_result != TimedReadResult::ready)
       {
         timeout_handler_();
-        throw std::runtime_error("worker request channel closed before response metadata");
+        throw std::runtime_error(
+            metadata_result == TimedReadResult::timeout
+                ? "worker request channel timed out before response metadata"
+                : "worker request channel closed before response metadata");
       }
       if (header.family != Vajra::ipc::FrameFamily::response_metadata_result)
       {
@@ -1060,10 +1086,15 @@ namespace
       std::optional<Vajra::response::Response> response = std::move(metadata.response);
       for (;;)
       {
-        if (!read_frame_with_timeout(channel_fd_, header, payload, worker_timeout_milliseconds_))
+        const TimedReadResult body_result =
+            read_frame_with_timeout(channel_fd_, header, payload, worker_timeout_milliseconds_);
+        if (body_result != TimedReadResult::ready)
         {
           timeout_handler_();
-          throw std::runtime_error("worker request channel closed before response body completion");
+          throw std::runtime_error(
+              body_result == TimedReadResult::timeout
+                  ? "worker request channel timed out before response body completion"
+                  : "worker request channel closed before response body completion");
         }
         if (header.family != Vajra::ipc::FrameFamily::response_body_continuation)
         {

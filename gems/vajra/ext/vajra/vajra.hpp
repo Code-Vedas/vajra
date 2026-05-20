@@ -24,7 +24,7 @@ namespace VajraNative
       int workers = 1,
       std::size_t min_threads = 1,
       std::size_t max_threads = 1,
-      std::size_t max_connections = 10'000,
+      std::size_t max_connections = 256,
       std::size_t queue_capacity = static_cast<std::size_t>(std::numeric_limits<long>::max()),
       std::string scheduler_policy = "least_loaded",
       std::size_t max_request_head_bytes = Vajra::request::kDefaultMaxRequestHeadBytes,

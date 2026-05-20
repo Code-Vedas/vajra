@@ -10,8 +10,8 @@ module Vajra
   VERSION: String
 
   def self.header: () -> String
-  def self.configure: [T] () { (T) -> void } -> void
-                     | () { () -> void } -> void
+  def self.configure: [T, R] () { (T) -> R } -> R
+                     | [R] () { () -> R } -> R
   def self.start: (
     ?host: String,
     ?port: Integer,

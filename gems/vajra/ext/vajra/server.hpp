@@ -39,7 +39,7 @@ namespace Vajra
         int request_head_timeout_seconds = 5,
         int first_data_timeout_seconds = 30,
         int persistent_timeout_seconds = 30,
-        std::size_t max_connections = 10'000,
+        std::size_t max_connections = 256,
         std::function<void()> shutdown_begin_callback = {});
     ~Server();
 

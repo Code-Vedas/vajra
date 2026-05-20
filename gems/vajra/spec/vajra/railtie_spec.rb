@@ -8,6 +8,7 @@
 require 'fileutils'
 require 'rails'
 require 'rails/railtie'
+require 'tmpdir'
 require 'rackup/handler/vajra'
 require 'vajra/railtie'
 require_relative '../support/documented_server_options'

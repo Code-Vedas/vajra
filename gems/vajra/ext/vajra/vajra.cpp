@@ -1057,7 +1057,7 @@ namespace
         options,
         id_max_connections,
         "max_connections option",
-        10'000,
+        256,
         1,
         std::numeric_limits<int>::max());
     const long ruby_queue_capacity = configured_integer_from_ruby(

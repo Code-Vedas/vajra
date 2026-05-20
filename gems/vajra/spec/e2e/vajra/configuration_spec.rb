@@ -62,6 +62,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     sockets[1].write(post_request(request_bodies[1]))
     sleep 0.05
     sockets[2].write(post_request(request_bodies[2]))
+    sleep 0.05
     sockets[3].write(post_request(request_bodies[3]))
   end
 

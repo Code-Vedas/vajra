@@ -1621,6 +1621,12 @@ namespace
       return;
     }
 
+    if (pending_request_->assigned)
+    {
+      transport_.release_channel(pending_request_);
+      return;
+    }
+
     transport_.cancel_request(pending_request_);
   }
 

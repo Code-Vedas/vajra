@@ -200,6 +200,30 @@ namespace
     message << "accept failed: " << error_message;
     log_message("error", message.str(), std::cerr);
   }
+
+  void log_connection_rejected(std::size_t max_connections)
+  {
+    std::ostringstream message;
+    message << "connection rejected: active connection limit reached (max_connections=" << max_connections << ")";
+    log_message("error", message.str(), std::cerr);
+  }
+
+  class ActiveConnectionGuard
+  {
+  public:
+    explicit ActiveConnectionGuard(std::atomic<std::size_t> &active_connection_count)
+        : active_connection_count_(active_connection_count)
+    {
+    }
+
+    ~ActiveConnectionGuard()
+    {
+      active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
+    }
+
+  private:
+    std::atomic<std::size_t> &active_connection_count_;
+  };
 }
 
 Vajra::Server::Server(
@@ -216,6 +240,7 @@ Vajra::Server::Server(
     int request_head_timeout_seconds,
     int first_data_timeout_seconds,
     int persistent_timeout_seconds,
+    std::size_t max_connections,
     std::function<void()> shutdown_begin_callback)
     : host_(std::move(host)),
       port_(port),
@@ -233,6 +258,7 @@ Vajra::Server::Server(
       worker_processes_(worker_processes),
       request_execution_role_(std::move(request_execution_role)),
       debug_logging_(debug_logging),
+      max_connections_(max_connections),
       shutdown_begin_callback_(std::move(shutdown_begin_callback))
 {
   set_lifecycle_observer([this](lifecycle::HookPoint hook_point, const lifecycle::Snapshot &snapshot) {
@@ -440,16 +466,32 @@ void Vajra::Server::start()
 
     reap_completed_handler_threads();
 
+    if (active_connection_count_.load(std::memory_order_acquire) >= max_connections_)
+    {
+      log_connection_rejected(max_connections_);
+      close(client_fd);
+      continue;
+    }
+
     const std::shared_ptr<std::atomic<bool>> completed = std::make_shared<std::atomic<bool>>(false);
+    active_connection_count_.fetch_add(1, std::memory_order_acq_rel);
+    try
     {
       std::lock_guard<std::mutex> lock(handler_threads_mutex_);
       handler_threads_.push_back(HandlerThread{
           std::thread([this, client_fd, client_addr, completed]() {
+            ActiveConnectionGuard active_connection_guard(active_connection_count_);
             request_processor_.handle(client_fd, socket_context_for(client_fd, client_addr, port_));
             completed->store(true, std::memory_order_release);
           }),
           completed,
       });
+    }
+    catch (...)
+    {
+      active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
+      close(client_fd);
+      throw;
     }
   }
 

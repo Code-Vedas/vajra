@@ -105,6 +105,7 @@ module Vajra
       port
       workers
       threads
+      max_connections
       queue_capacity
       scheduler_policy
       max_request_head_bytes

@@ -21,7 +21,7 @@ module Vajra
     end
 
     def self.with_config_target: [T, R] (T target) { () -> R } -> R
-    def self.current_config_target: () -> (Symbol | Vajra::_ConfigTarget | Launcher)?
+    def self.current_config_target: () -> (Symbol | Launcher)?
     def self.start: (?argv: Array[String], ?root: String, ?stdout: IO) -> nil
 
     class Launcher

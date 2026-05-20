@@ -48,6 +48,7 @@ namespace
   ID id_workers;
   ID id_threads;
   ID id_max_request_head_bytes;
+  ID id_max_connections;
   ID id_queue_capacity;
   ID id_scheduler_policy;
   ID id_request_timeout;
@@ -72,6 +73,7 @@ namespace
     int workers;
     std::size_t min_threads;
     std::size_t max_threads;
+    std::size_t max_connections;
     std::size_t queue_capacity;
     std::string scheduler_policy;
     std::size_t max_request_head_bytes;
@@ -1051,6 +1053,13 @@ namespace
     const long ruby_port = configured_integer_from_ruby(options, id_port, "port option", 3000, 0, 65'535);
     const long ruby_workers = configured_integer_from_ruby(options, id_workers, "workers option", 1, 1, 1'024);
     const std::pair<std::size_t, std::size_t> ruby_threads = configured_threads_from_ruby(options);
+    const long ruby_max_connections = configured_integer_from_ruby(
+        options,
+        id_max_connections,
+        "max_connections option",
+        10'000,
+        1,
+        std::numeric_limits<int>::max());
     const long ruby_queue_capacity = configured_integer_from_ruby(
         options,
         id_queue_capacity,
@@ -1120,6 +1129,7 @@ namespace
         1,
         1'024));
     const std::pair<std::size_t, std::size_t> threads = configured_threads_from_env(ruby_threads);
+    const std::size_t max_connections = static_cast<std::size_t>(ruby_max_connections);
     const std::size_t queue_capacity = static_cast<std::size_t>(configured_integer_from_env(
         "VAJRA_QUEUE_CAPACITY",
         ruby_queue_capacity,
@@ -1169,6 +1179,7 @@ namespace
         workers,
         threads.first,
         threads.second,
+        max_connections,
         queue_capacity,
         scheduler_policy,
         max_request_head_bytes,
@@ -1194,6 +1205,7 @@ namespace
           config.workers,
           config.min_threads,
           config.max_threads,
+          config.max_connections,
           config.queue_capacity,
           config.scheduler_policy,
           config.max_request_head_bytes,
@@ -1555,6 +1567,7 @@ namespace VajraNative
         const std::vector<std::vector<int>> &request_channel_fds,
         const std::vector<pid_t> &worker_pids_for_runtime,
         std::size_t min_threads,
+        std::size_t max_connections,
         std::size_t queue_capacity,
         std::size_t request_timeout_seconds,
         int request_head_timeout_seconds,
@@ -1586,6 +1599,7 @@ namespace VajraNative
           request_head_timeout_seconds,
           first_data_timeout_seconds,
           persistent_timeout_seconds,
+          max_connections,
           begin_runtime_shutdown);
       Vajra::Server *server_ptr = server.get();
       install_server_instance(std::move(server));
@@ -1637,6 +1651,7 @@ namespace VajraNative
       int workers,
       std::size_t min_threads,
       std::size_t max_threads,
+      std::size_t max_connections,
       std::size_t queue_capacity,
       std::string scheduler_policy,
       std::size_t max_request_head_bytes,
@@ -1814,6 +1829,7 @@ namespace VajraNative
           parent_request_channels,
           booted_worker_pids,
           min_threads,
+          max_connections,
           queue_capacity,
           request_timeout_seconds,
           request_head_timeout_seconds,
@@ -1861,6 +1877,7 @@ extern "C" void Init_vajra()
   id_host = rb_intern("host");
   id_workers = rb_intern("workers");
   id_threads = rb_intern("threads");
+  id_max_connections = rb_intern("max_connections");
   id_queue_capacity = rb_intern("queue_capacity");
   id_scheduler_policy = rb_intern("scheduler_policy");
   id_request_timeout = rb_intern("request_timeout");

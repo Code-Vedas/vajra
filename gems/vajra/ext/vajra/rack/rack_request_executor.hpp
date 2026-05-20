@@ -23,7 +23,6 @@ namespace Vajra
     void set_rack_execution_callback(VALUE callback);
     void run_worker_request_execution_loop(
         const std::vector<int> &channel_fds,
-        std::size_t min_threads,
         std::size_t max_threads);
     std::shared_ptr<const class RackExecutionTransport> request_channel_transport(int channel_fd);
     std::shared_ptr<const class RackExecutionTransport> request_channel_transport(

@@ -12,6 +12,7 @@
 #include <cstring>
 #include <cstdint>
 #include <ctime>
+#include <fcntl.h>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -206,6 +207,16 @@ namespace
     std::ostringstream message;
     message << "connection rejected: active connection limit reached (max_connections=" << max_connections << ")";
     log_message("error", message.str(), std::cerr);
+  }
+
+  void log_handler_thread_failure(const sockaddr_in &client_addr, int client_fd, const std::string &message)
+  {
+    std::ostringstream error_message;
+    error_message << "handler thread failed for client="
+                  << socket_address(client_addr) << ':' << ntohs(client_addr.sin_port)
+                  << " client_fd=" << client_fd
+                  << " error=" << message;
+    log_message("error", error_message.str(), std::cerr);
   }
 
   class ActiveConnectionGuard
@@ -482,7 +493,26 @@ void Vajra::Server::start()
       HandlerThread &handler_thread = handler_threads_.back();
       handler_thread.thread = std::thread([this, client_fd, client_addr, completed]() {
         ActiveConnectionGuard active_connection_guard(active_connection_count_);
-        request_processor_.handle(client_fd, socket_context_for(client_fd, client_addr, port_));
+        try
+        {
+          request_processor_.handle(client_fd, socket_context_for(client_fd, client_addr, port_));
+        }
+        catch (const std::exception &error)
+        {
+          log_handler_thread_failure(client_addr, client_fd, error.what());
+          if (fcntl(client_fd, F_GETFD) != -1 || errno != EBADF)
+          {
+            close(client_fd);
+          }
+        }
+        catch (...)
+        {
+          log_handler_thread_failure(client_addr, client_fd, "unknown exception");
+          if (fcntl(client_fd, F_GETFD) != -1 || errno != EBADF)
+          {
+            close(client_fd);
+          }
+        }
         completed->store(true, std::memory_order_release);
       });
     }

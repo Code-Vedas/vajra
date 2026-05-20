@@ -1203,6 +1203,7 @@ namespace
     int client_fd = -1;
     std::vector<Vajra::request::RackEnvEntry> env_entries;
     std::chrono::steady_clock::time_point deadline;
+    std::atomic_bool ready_for_execution = false;
     std::atomic_bool assigned = false;
     std::atomic_bool canceled = false;
     std::atomic_bool timed_out = false;
@@ -1360,6 +1361,22 @@ namespace
       return {pending_request->worker_index, pending_request->channel_index};
     }
 
+    void mark_request_ready_for_execution(const std::shared_ptr<PendingRequest> &pending_request) const
+    {
+      {
+        std::lock_guard<std::mutex> lock(scheduler_mutex_);
+        if (pending_request->ready_for_execution || pending_request->canceled || pending_request->timed_out ||
+            pending_request->client_gone)
+        {
+          return;
+        }
+
+        pending_request->ready_for_execution = true;
+        assign_pending_requests_locked();
+      }
+      scheduler_condition_.notify_all();
+    }
+
     void release_channel(const std::shared_ptr<PendingRequest> &pending_request) const
     {
       {
@@ -1433,7 +1450,6 @@ namespace
       pending_request->env_entries = env_entries;
       pending_request->deadline = std::chrono::steady_clock::now() + request_timeout_;
       pending_requests_.push_back(pending_request);
-      assign_pending_requests_locked();
       scheduler_condition_.notify_all();
       return pending_request;
     }
@@ -1509,6 +1525,11 @@ namespace
         {
           pending_requests_.pop_front();
           continue;
+        }
+
+        if (!pending_request->ready_for_execution)
+        {
+          return;
         }
 
         const std::optional<std::pair<std::size_t, std::size_t>> assignment = least_busy_channel_locked();
@@ -1611,13 +1632,8 @@ namespace
   void QueuedWorkerProcessRackExecutionSession::append_request_body_chunk(const std::string &chunk)
   {
     ensure_request_still_live();
-    if (live_session_)
-    {
-      live_session_->append_request_body_chunk(chunk);
-      return;
-    }
-
-    buffered_request_body_.append(chunk);
+    ensure_live_session_started();
+    live_session_->append_request_body_chunk(chunk);
   }
 
   std::optional<Vajra::response::Response> QueuedWorkerProcessRackExecutionSession::finish()
@@ -1668,6 +1684,7 @@ namespace
       return;
     }
 
+    transport_.mark_request_ready_for_execution(pending_request_);
     const auto [worker_index, channel_index] = transport_.await_assignment(pending_request_);
 
     try
@@ -1955,17 +1972,11 @@ std::optional<Vajra::response::Response> Vajra::rack::RackRequestExecutor::execu
 
 void Vajra::rack::run_worker_request_execution_loop(
     const std::vector<int> &channel_fds,
-    std::size_t min_threads,
     std::size_t max_threads)
 {
   if (channel_fds.size() != max_threads)
   {
     throw std::runtime_error("worker request channel count must match max_threads");
-  }
-
-  if (min_threads > max_threads)
-  {
-    throw std::runtime_error("worker min_threads must not exceed max_threads");
   }
 
   std::vector<WorkerChannelThreadContext> contexts;

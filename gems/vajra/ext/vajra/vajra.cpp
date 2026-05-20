@@ -1506,7 +1506,6 @@ namespace VajraNative
 
     void run_worker_process(
         std::vector<int> request_channel_fds,
-        std::size_t min_threads,
         std::size_t max_threads,
         int port,
         std::size_t max_request_head_bytes,
@@ -1545,7 +1544,7 @@ namespace VajraNative
         const std::chrono::duration<double> boot_elapsed = boot_finished_at - boot_started_at;
         log_worker_booted(worker_index, getpid(), boot_elapsed.count());
         close(readiness_write_fd);
-        Vajra::rack::run_worker_request_execution_loop(request_channel_fds, min_threads, max_threads);
+        Vajra::rack::run_worker_request_execution_loop(request_channel_fds, max_threads);
         _exit(0);
       }
       catch (const std::exception &error)
@@ -1762,7 +1761,6 @@ namespace VajraNative
           }
           run_worker_process(
               std::move(child_request_channels),
-              min_threads,
               max_threads,
               port,
               max_request_head_bytes,

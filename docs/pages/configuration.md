@@ -87,9 +87,12 @@ Vajra.configure do |config|
 end
 ```
 
-The `Environment override` column lists the runtime-backed environment variables
-that Vajra reads directly. Framework launchers such as `bin/rails server -p
-4000` remain valid where the framework owns that surface.
+The table below lists the full `Vajra.configure` DSL. The `Native environment
+override` column identifies the entries that flow directly into the native
+runtime. Directives without a native environment override still belong to the
+configuration DSL and keep their declared server meaning in Vajra's product
+surface. Framework launchers such as `bin/rails server -p 4000` remain valid
+where the framework owns that surface.
 
 Vajra uses one pending request queue. That queue is global and FIFO.
 `queue_capacity` applies to that one global queue. The scheduler assigns the
@@ -97,7 +100,7 @@ oldest live queued request to the least-busy worker.
 
 ## Configuration Reference
 
-| Setting | Default | Environment override | Example | Purpose |
+| Setting | Default | Native environment override | Example | Purpose |
 | --- | --- | --- | --- | --- |
 | `rails` | `config/environment` | none | `config.rails` | load Rails and install `Rails.application` |
 | `rails PATH` | `config/environment` | none | `config.rails "config/environment"` | load a non-default Rails environment file |

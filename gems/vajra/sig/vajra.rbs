@@ -10,7 +10,7 @@ module Vajra
   VERSION: String
 
   def self.header: () -> String
-  def self.configure: () { (Vajra::CLI::Launcher) -> void } -> void
+  def self.configure: [T] () { (T) -> void } -> void
                      | () { () -> void } -> void
   def self.start: (
     ?host: String,

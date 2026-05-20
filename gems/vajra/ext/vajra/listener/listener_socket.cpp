@@ -51,6 +51,7 @@ Vajra::listener::SocketBinding Vajra::listener::Socket::open(const std::string &
   }
 
   int socket_fd = -1;
+  int last_bind_error = 0;
   for (addrinfo *candidate = result; candidate != nullptr; candidate = candidate->ai_next)
   {
     socket_fd = socket(candidate->ai_family, candidate->ai_socktype, candidate->ai_protocol);
@@ -73,6 +74,7 @@ Vajra::listener::SocketBinding Vajra::listener::Socket::open(const std::string &
       break;
     }
 
+    last_bind_error = errno;
     close(socket_fd);
     socket_fd = -1;
   }
@@ -81,7 +83,7 @@ Vajra::listener::SocketBinding Vajra::listener::Socket::open(const std::string &
 
   if (socket_fd < 0)
   {
-    throw startup_error("bind", host, port, errno);
+    throw startup_error("bind", host, port, last_bind_error);
   }
 
   sockaddr_in bound_addr{};

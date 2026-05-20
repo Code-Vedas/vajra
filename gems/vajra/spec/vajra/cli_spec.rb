@@ -11,6 +11,18 @@ require_relative '../support/documented_server_options'
 
 RSpec.describe Vajra::CLI do
   describe '.start!' do
+    it 'restores the previous config target after yielding' do
+      Thread.current[:vajra_config_target] = :previous_target
+
+      described_class.with_config_target(:next_target) do
+        expect(described_class.current_config_target).to eq(:next_target)
+      end
+
+      expect(described_class.current_config_target).to eq(:previous_target)
+    ensure
+      Thread.current[:vajra_config_target] = nil
+    end
+
     it 'loads the default config file and passes configured start options' do
       Dir.mktmpdir('vajra-cli-config') do |root|
         config_dir = File.join(root, 'config')
@@ -216,6 +228,10 @@ RSpec.describe Vajra::CLI do
 
   describe Vajra::CLI::Launcher do
     subject(:launcher) { described_class.new(root: Dir.pwd) }
+
+    it 'keeps documented server directives unique' do
+      expect(Vajra::CLI::DOCUMENTED_SERVER_SETTINGS).to eq(Vajra::CLI::DOCUMENTED_SERVER_SETTINGS.uniq)
+    end
 
     it 'allows explicit values for boolean directives' do
       expect(launcher.send(:normalize_setting_values, :structured_logs, [false])).to be(false)

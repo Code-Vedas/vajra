@@ -8,6 +8,6 @@ module Vajra
     class Error < Vajra::Error
     end
 
-    def self.start!: (?argv: Array[String], ?root: String, ?stdout: IO) -> nil
+    def self.start: (?argv: Array[String], ?root: String, ?stdout: IO) -> nil
   end
 end

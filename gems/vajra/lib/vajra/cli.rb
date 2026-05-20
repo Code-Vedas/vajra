@@ -78,12 +78,7 @@ module Vajra
         structured_logs
       ].freeze
     }.freeze
-    DOCUMENTED_SERVER_SETTINGS = (
-      %i[
-        bind
-        unix_socket
-      ] + SETTING_TYPE_GROUPS.values.flatten
-    ).freeze
+    DOCUMENTED_SERVER_SETTINGS = SETTING_TYPE_GROUPS.values.flatten.freeze
 
     def with_config_target(target)
       current_thread = Thread.current

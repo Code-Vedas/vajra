@@ -48,6 +48,12 @@ namespace Vajra
     void set_lifecycle_observer(lifecycle::Controller::Observer observer);
 
   private:
+    struct HandlerThread
+    {
+      std::thread thread;
+      std::shared_ptr<std::atomic<bool>> completed;
+    };
+
     std::string host_;
     int port_;
     std::atomic<int> server_fd_;
@@ -61,10 +67,11 @@ namespace Vajra
     bool debug_logging_;
     std::function<void()> shutdown_begin_callback_;
     std::mutex handler_threads_mutex_;
-    std::vector<std::thread> handler_threads_;
+    std::vector<HandlerThread> handler_threads_;
 
     void close_listener_fd(bool interrupt_accept);
     void join_handler_threads();
+    void reap_completed_handler_threads();
   };
 }
 

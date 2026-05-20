@@ -7,9 +7,15 @@ module Vajra
   class Error < StandardError
   end
 
+  interface _ConfigTarget
+    def instance_eval: () { () -> void } -> void
+  end
+
   VERSION: String
 
   def self.header: () -> String
+  def self.configure: () { (_ConfigTarget) -> void } -> void
+                     | () { () -> void } -> void
   def self.start: (
     ?host: String,
     ?port: Integer,

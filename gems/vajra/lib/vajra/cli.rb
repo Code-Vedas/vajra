@@ -81,13 +81,14 @@ module Vajra
     DOCUMENTED_SERVER_SETTINGS = SETTING_TYPE_GROUPS.values.flatten.freeze
 
     def with_config_target(target)
-      current_thread = Thread.current
+      current_thread = nil
       previous_target = nil
-      previous_target = current_thread[:vajra_config_target]
-      current_thread[:vajra_config_target] = target
+      current_thread = config_target_thread
+      previous_target = current_thread[:vajra_config_target] if current_thread
+      current_thread[:vajra_config_target] = target if current_thread
       yield
     ensure
-      current_thread[:vajra_config_target] = previous_target
+      current_thread[:vajra_config_target] = previous_target if current_thread
     end
 
     def current_config_target
@@ -116,6 +117,11 @@ module Vajra
       raise Error, e.message
     end
     private_class_method :parse_args
+
+    def config_target_thread
+      Thread.current
+    end
+    private_class_method :config_target_thread
 
     # Evaluates `config/vajra.rb` and the fallback rackup path for the CLI runtime.
     class Launcher

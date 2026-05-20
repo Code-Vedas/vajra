@@ -23,6 +23,14 @@ RSpec.describe Vajra::CLI do
       Thread.current[:vajra_config_target] = nil
     end
 
+    it 'skips target restoration when the config thread is unavailable' do
+      allow(described_class).to receive(:config_target_thread).and_return(nil)
+
+      expect do
+        described_class.with_config_target(:next_target) { nil }
+      end.not_to raise_error
+    end
+
     it 'loads the default config file and passes configured start options' do
       Dir.mktmpdir('vajra-cli-config') do |root|
         config_dir = File.join(root, 'config')

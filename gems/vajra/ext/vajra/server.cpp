@@ -301,10 +301,43 @@ void Vajra::Server::join_handler_threads()
   std::vector<std::thread> handler_threads;
   {
     std::lock_guard<std::mutex> lock(handler_threads_mutex_);
-    handler_threads = std::move(handler_threads_);
+    handler_threads.reserve(handler_threads_.size());
+    for (HandlerThread &handler_thread : handler_threads_)
+    {
+      handler_threads.push_back(std::move(handler_thread.thread));
+    }
+    handler_threads_.clear();
   }
 
   for (std::thread &thread : handler_threads)
+  {
+    if (thread.joinable())
+    {
+      thread.join();
+    }
+  }
+}
+
+void Vajra::Server::reap_completed_handler_threads()
+{
+  std::vector<std::thread> completed_threads;
+  {
+    std::lock_guard<std::mutex> lock(handler_threads_mutex_);
+    auto handler_thread = handler_threads_.begin();
+    while (handler_thread != handler_threads_.end())
+    {
+      if (!handler_thread->completed->load(std::memory_order_acquire))
+      {
+        ++handler_thread;
+        continue;
+      }
+
+      completed_threads.push_back(std::move(handler_thread->thread));
+      handler_thread = handler_threads_.erase(handler_thread);
+    }
+  }
+
+  for (std::thread &thread : completed_threads)
   {
     if (thread.joinable())
     {
@@ -405,10 +438,17 @@ void Vajra::Server::start()
       lifecycle_.mark_serving();
     }
 
+    reap_completed_handler_threads();
+
+    const std::shared_ptr<std::atomic<bool>> completed = std::make_shared<std::atomic<bool>>(false);
     {
       std::lock_guard<std::mutex> lock(handler_threads_mutex_);
-      handler_threads_.emplace_back([this, client_fd, client_addr]() {
-        request_processor_.handle(client_fd, socket_context_for(client_fd, client_addr, port_));
+      handler_threads_.push_back(HandlerThread{
+          std::thread([this, client_fd, client_addr, completed]() {
+            request_processor_.handle(client_fd, socket_context_for(client_fd, client_addr, port_));
+            completed->store(true, std::memory_order_release);
+          }),
+          completed,
       });
     }
   }

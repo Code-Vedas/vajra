@@ -524,18 +524,10 @@ void Vajra::Server::start()
           catch (const std::exception &error)
           {
             log_handler_thread_failure(client_addr, client_fd, error.what());
-            if (fcntl(client_fd, F_GETFD) != -1 || errno != EBADF)
-            {
-              close(client_fd);
-            }
           }
           catch (...)
           {
             log_handler_thread_failure(client_addr, client_fd, "unknown exception");
-            if (fcntl(client_fd, F_GETFD) != -1 || errno != EBADF)
-            {
-              close(client_fd);
-            }
           }
           completed->store(true, std::memory_order_release);
         });

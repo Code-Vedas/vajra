@@ -1344,13 +1344,34 @@ namespace
              !pending_request->canceled.load())
       {
         prune_queue_locked();
-        assign_pending_requests_locked();
         if (pending_request->assigned.load() ||
             pending_request->timed_out.load() ||
             pending_request->client_gone.load() ||
             pending_request->canceled.load())
         {
           break;
+        }
+
+        if (!pending_requests_.empty() && pending_requests_.front() == pending_request)
+        {
+          const std::optional<std::pair<std::size_t, std::size_t>> assignment = least_busy_channel_locked();
+          if (assignment.has_value())
+          {
+            const std::shared_ptr<WorkerSlot> slot = slot_for(assignment->first);
+            slot->channels[assignment->second].busy = true;
+            pending_request->assigned = true;
+            pending_request->worker_index = assignment->first;
+            pending_request->channel_index = assignment->second;
+            log_scheduler_debug_event(
+                "event=request_assigned policy=least_loaded request_id=" + std::to_string(pending_request->request_id) +
+                    " selected_worker=" + std::to_string(assignment->first) +
+                    " channel=" + std::to_string(assignment->second) +
+                    " inflight=" + std::to_string(inflight_count_locked(*slot)) +
+                    " queue_depth=" + std::to_string(pending_requests_.size() - 1),
+                debug_logging_);
+            pending_requests_.pop_front();
+            break;
+          }
         }
 
         if (pending_request->deadline <= std::chrono::steady_clock::now())
@@ -1397,7 +1418,6 @@ namespace
         {
           --slot->active_channels;
         }
-        assign_pending_requests_locked();
       }
       scheduler_condition_.notify_all();
     }
@@ -1468,7 +1488,6 @@ namespace
       pending_request->env_entries = env_entries;
       pending_request->deadline = std::chrono::steady_clock::now() + request_timeout_;
       pending_requests_.push_back(pending_request);
-      assign_pending_requests_locked();
       scheduler_condition_.notify_all();
       return pending_request;
     }
@@ -1488,7 +1507,6 @@ namespace
               " worker_pid=" + std::to_string(slot->pid),
           debug_logging_);
       kill(slot->pid, SIGKILL);
-      assign_pending_requests_locked();
       scheduler_condition_.notify_all();
     }
 
@@ -1532,42 +1550,6 @@ namespace
       }
 
       return best_assignment;
-    }
-
-    void assign_pending_requests_locked() const
-    {
-      prune_queue_locked();
-      while (!pending_requests_.empty())
-      {
-        const std::shared_ptr<PendingRequest> pending_request = pending_requests_.front();
-        if (pending_request->canceled.load() ||
-            pending_request->timed_out.load() ||
-            pending_request->client_gone.load())
-        {
-          pending_requests_.pop_front();
-          continue;
-        }
-
-        const std::optional<std::pair<std::size_t, std::size_t>> assignment = least_busy_channel_locked();
-        if (!assignment.has_value())
-        {
-          return;
-        }
-
-        const std::shared_ptr<WorkerSlot> slot = slot_for(assignment->first);
-        slot->channels[assignment->second].busy = true;
-        pending_request->assigned = true;
-        pending_request->worker_index = assignment->first;
-        pending_request->channel_index = assignment->second;
-        log_scheduler_debug_event(
-            "event=request_assigned policy=least_loaded request_id=" + std::to_string(pending_request->request_id) +
-                " selected_worker=" + std::to_string(assignment->first) +
-                " channel=" + std::to_string(assignment->second) +
-                " inflight=" + std::to_string(inflight_count_locked(*slot)) +
-                " queue_depth=" + std::to_string(pending_requests_.size() - 1),
-            debug_logging_);
-        pending_requests_.pop_front();
-      }
     }
 
     void prune_queue_locked() const

@@ -2013,9 +2013,36 @@ void Vajra::rack::run_worker_request_execution_loop(
   }
 
   ID id_join = rb_intern("join");
-  for (VALUE thread : threads)
+  VALUE join_timeout = rb_float_new(0.01);
+  std::vector<bool> joined(threads.size(), false);
+  std::size_t joined_count = 0;
+
+  while (joined_count < threads.size())
   {
-    rb_funcall(thread, id_join, 0);
+    for (std::size_t index = 0; index < threads.size(); ++index)
+    {
+      if (joined[index])
+      {
+        continue;
+      }
+      if (!contexts[index].error_message.empty())
+      {
+        throw std::runtime_error(contexts[index].error_message);
+      }
+
+      const VALUE join_result = rb_funcall(threads[index], id_join, 1, join_timeout);
+      if (NIL_P(join_result))
+      {
+        continue;
+      }
+
+      joined[index] = true;
+      ++joined_count;
+      if (!contexts[index].error_message.empty())
+      {
+        throw std::runtime_error(contexts[index].error_message);
+      }
+    }
   }
 
   for (const WorkerChannelThreadContext &context : contexts)

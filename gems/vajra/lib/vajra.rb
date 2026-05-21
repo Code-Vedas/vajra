@@ -115,6 +115,7 @@ module Vajra
       worker_timeout
       log_level
     ].freeze
+    UNIMPLEMENTED_START_OPTION_KEYS = (DOCUMENTED_START_OPTION_KEYS - NATIVE_START_OPTION_KEYS).freeze
 
     alias __native_start__ start
     alias __native_stop__ stop
@@ -155,10 +156,15 @@ module Vajra
     private
 
     def validate_start_options!(options)
-      unknown_option = options.keys.find { |key| !DOCUMENTED_START_OPTION_KEYS.include?(key) }
-      return unless unknown_option
+      option_keys = options.keys
+      invalid_option = option_keys.find do |key|
+        !DOCUMENTED_START_OPTION_KEYS.include?(key) || UNIMPLEMENTED_START_OPTION_KEYS.include?(key)
+      end
+      return unless invalid_option
 
-      raise Error, "unknown start option: #{unknown_option}"
+      raise Error, "start option not implemented yet: #{invalid_option}" if UNIMPLEMENTED_START_OPTION_KEYS.include?(invalid_option)
+
+      raise Error, "unknown start option: #{invalid_option}"
     end
   end
 end

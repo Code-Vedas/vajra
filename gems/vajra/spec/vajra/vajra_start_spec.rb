@@ -98,32 +98,22 @@ RSpec.describe Vajra, '.start' do
   end
 
   describe '.start' do
-    it 'validates the full documented start surface and forwards native-backed options only' do
+    it 'accepts the native-backed start surface' do
       allow(described_class).to receive(:__native_start__)
 
-      described_class.start(**DocumentedServerOptions.start_options)
+      described_class.start(**DocumentedServerOptions.native_start_options)
 
-      expect(described_class).to have_received(:__native_start__).with(
-        host: '127.0.0.1',
-        port: 4321,
-        workers: 4,
-        threads: [5, 5],
-        max_connections: 256,
-        queue_capacity: 5000,
-        scheduler_policy: 'least_loaded',
-        max_request_head_bytes: 2048,
-        request_timeout: 25,
-        request_head_timeout: 15,
-        first_data_timeout: 30,
-        persistent_timeout: 30,
-        worker_timeout: 60,
-        log_level: 'info'
-      )
+      expect(described_class).to have_received(:__native_start__).with(DocumentedServerOptions.native_start_options)
     end
 
     it 'rejects unknown start options' do
       expect { described_class.start(unknown_option: 1) }
         .to raise_error(Vajra::Error, 'unknown start option: unknown_option')
+    end
+
+    it 'rejects documented start options that are not implemented yet' do
+      expect { described_class.start(tls: true) }
+        .to raise_error(Vajra::Error, 'start option not implemented yet: tls')
     end
   end
 

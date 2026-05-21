@@ -65,6 +65,28 @@ module DocumentedServerOptions
     RUBY
   end
 
+  def native_config_file_contents
+    <<~RUBY
+      Vajra.configure do |config|
+        config.host "127.0.0.1"
+        config.port 4321
+        config.workers 4
+        config.threads 5, 5
+        config.worker_timeout 60
+        config.request_timeout 25
+        config.first_data_timeout 30
+        config.persistent_timeout 30
+        config.request_head_timeout 15
+        config.max_connections 256
+        config.queue_capacity 5000
+        config.scheduler_policy "least_loaded"
+        config.log_level "info"
+        config.max_request_head_bytes 2048
+        config.app ->(_env) { [200, { "Content-Type" => "text/plain" }, ["OK"]] }
+      end
+    RUBY
+  end
+
   def start_options
     {
       access_log: 'log/vajra-access.log',
@@ -116,6 +138,25 @@ module DocumentedServerOptions
       worker_timeout: 60,
       worker_shutdown_timeout: 45,
       workers: 4
+    }
+  end
+
+  def native_start_options
+    {
+      host: '127.0.0.1',
+      port: 4321,
+      workers: 4,
+      threads: [5, 5],
+      worker_timeout: 60,
+      request_timeout: 25,
+      first_data_timeout: 30,
+      persistent_timeout: 30,
+      request_head_timeout: 15,
+      max_connections: 256,
+      queue_capacity: 5000,
+      scheduler_policy: 'least_loaded',
+      log_level: 'info',
+      max_request_head_bytes: 2048
     }
   end
 end

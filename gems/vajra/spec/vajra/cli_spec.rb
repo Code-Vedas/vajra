@@ -61,11 +61,11 @@ RSpec.describe Vajra::CLI do
       end
     end
 
-    it 'accepts and propagates the full documented server configuration surface' do
+    it 'accepts and propagates the native-backed server configuration surface' do
       Dir.mktmpdir('vajra-cli-config') do |root|
         config_dir = File.join(root, 'config')
         FileUtils.mkdir_p(config_dir)
-        File.write(File.join(config_dir, 'vajra.rb'), DocumentedServerOptions.config_file_contents)
+        File.write(File.join(config_dir, 'vajra.rb'), DocumentedServerOptions.native_config_file_contents)
 
         allow(Vajra::Internal::RackExecution).to receive(:install!)
         allow(Vajra).to receive(:header).and_return('header')
@@ -74,7 +74,25 @@ RSpec.describe Vajra::CLI do
         described_class.start(argv: [], root:, stdout: StringIO.new)
 
         expect(Vajra::Internal::RackExecution).to have_received(:install!)
-        expect(Vajra).to have_received(:start).with(DocumentedServerOptions.start_options)
+        expect(Vajra).to have_received(:start).with(DocumentedServerOptions.native_start_options)
+      end
+    end
+
+    it 'rejects documented but unimplemented directives during startup' do
+      Dir.mktmpdir('vajra-cli-config') do |root|
+        config_dir = File.join(root, 'config')
+        FileUtils.mkdir_p(config_dir)
+        File.write(File.join(config_dir, 'vajra.rb'), <<~RUBY)
+          Vajra.configure do |config|
+            config.tls
+          end
+        RUBY
+
+        allow(Vajra).to receive(:header).and_return('header')
+
+        expect do
+          described_class.start(argv: [], root:, stdout: StringIO.new)
+        end.to raise_error(Vajra::Error, /start option not implemented yet: tls/)
       end
     end
 
@@ -276,6 +294,10 @@ RSpec.describe Vajra::CLI do
 
     it 'normalizes a single thread value to fixed min and max threads' do
       expect(launcher.send(:normalize_setting_values, :threads, ['5'])).to eq([5, 5])
+    end
+
+    it 'normalizes array-backed thread settings passed as one array value' do
+      expect(launcher.send(:normalize_setting_values, :threads, [[5, 8]])).to eq([5, 8])
     end
 
     it 'rejects invalid thread setting shapes' do

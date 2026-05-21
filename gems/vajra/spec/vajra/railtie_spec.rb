@@ -96,17 +96,17 @@ RSpec.describe 'Vajra Rails integration', :aggregate_failures do # rubocop:disab
     expect(Vajra).to have_received(:start).with(port: 3000, max_request_head_bytes: 32_768)
   end
 
-  it 'accepts forward-looking config directives while keeping the current handler start surface' do
+  it 'accepts the native-backed config surface while keeping the current handler start surface' do
     Dir.mktmpdir('vajra-handler-root') do |root|
       Dir.chdir(root) do # rubocop:disable ThreadSafety/DirChdir
         FileUtils.mkdir_p('config')
-        File.write('config/vajra.rb', DocumentedServerOptions.config_file_contents)
+        File.write('config/vajra.rb', DocumentedServerOptions.native_config_file_contents)
 
         Rackup::Handler::Vajra.run(rack_app, Port: 3000, user_supplied_options: [])
       end
     end
 
-    expect(Vajra).to have_received(:start).with(DocumentedServerOptions.start_options)
+    expect(Vajra).to have_received(:start).with(DocumentedServerOptions.native_start_options)
   end
 
   it 'prefers an explicit handler max_request_head_bytes option over config defaults' do

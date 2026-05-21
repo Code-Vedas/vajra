@@ -88,13 +88,24 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     Timeout.timeout(2) do
       loop do
         runtime_output << read_available_output(output)
-        break if runtime_output.include?('event=request_assigned')
+        break if runtime_output.include?('event=request_admitted')
 
         sleep 0.01
       end
     end
 
     runtime_output
+  end
+
+  def wait_for_runtime_output(output, runtime_output, pattern, count: 1)
+    Timeout.timeout(2) do
+      loop do
+        runtime_output << read_available_output(output)
+        break if runtime_output.scan(pattern).size >= count
+
+        sleep 0.01
+      end
+    end
   end
 
   def queue_capacity_responses(selected_port, wait_thread, output)
@@ -105,7 +116,9 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
       sockets[0].write(queue_capacity_request_head(first_body))
       runtime_output = queue_capacity_runtime_output(output)
       sockets[1].write(post_request('two'))
+      wait_for_runtime_output(output, runtime_output, 'event=queue_capacity_reached')
       sockets[2].write(post_request('three'))
+      wait_for_runtime_output(output, runtime_output, 'event=queue_capacity_reached', count: 2)
       sockets[0].write(first_body)
       responses = sockets.each_with_index.map do |socket, index|
         parse_http_response(
@@ -582,9 +595,10 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
 
     expect(result[:exitstatus]).to eq(0), result[:output]
     responses = result[:responses]
-    expect(responses.count { |response| response[:status_line] == 'HTTP/1.1 200 OK' }).to eq(2)
-    expect(responses.count { |response| response[:status_line] == 'HTTP/1.1 503 Service Unavailable' }).to eq(1)
+    expect(responses.count { |response| response[:status_line] == 'HTTP/1.1 200 OK' }).to eq(1)
+    expect(responses.count { |response| response[:status_line] == 'HTTP/1.1 503 Service Unavailable' }).to eq(2)
     expect(result[:output]).to include(
+      'event=request_admitted',
       'event=queue_capacity_reached',
       'queue_capacity=1'
     )

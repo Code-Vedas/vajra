@@ -114,6 +114,24 @@ RSpec.describe Vajra::CLI do
       end
     end
 
+    it 'rejects unknown configuration directives with an actionable error' do
+      Dir.mktmpdir('vajra-cli-config') do |root|
+        config_dir = File.join(root, 'config')
+        FileUtils.mkdir_p(config_dir)
+        File.write(File.join(config_dir, 'vajra.rb'), <<~RUBY)
+          Vajra.configure do |config|
+            config.not_a_real_setting 123
+          end
+        RUBY
+
+        allow(Vajra).to receive(:header).and_return('header')
+
+        expect do
+          described_class.start(argv: [], root:, stdout: StringIO.new)
+        end.to raise_error(Vajra::CLI::Error, /unsupported configuration directive: not_a_real_setting/)
+      end
+    end
+
     it 'falls back to config.ru when no config/vajra.rb is present' do
       Dir.mktmpdir('vajra-cli-rackup') do |root|
         File.write(File.join(root, 'config.ru'), "run ->(_env) { [200, { \"content-type\" => \"text/plain\" }, [\"ok\"]] }\n")
@@ -247,10 +265,9 @@ RSpec.describe Vajra::CLI do
       expect(launcher.send(:normalize_setting_values, :structured_logs, [false])).to be(false)
     end
 
-    it 'rejects unsupported directives during normalization' do
-      expect do
-        launcher.send(:normalize_setting_values, :unsupported_directive, ['value'])
-      end.to raise_error(Vajra::CLI::Error, 'unsupported configuration directive: unsupported_directive')
+    it 'reports supported and unsupported directives through respond_to_missing?' do
+      expect(launcher.send(:respond_to_missing?, :port)).to be(true)
+      expect(launcher.send(:respond_to_missing?, :unsupported_directive)).to be(false)
     end
 
     it 'normalizes thread settings to two integers' do

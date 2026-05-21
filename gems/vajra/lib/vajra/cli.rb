@@ -187,6 +187,14 @@ module Vajra
         end
       end
 
+      def method_missing(name, ...)
+        raise Error, "unsupported configuration directive: #{name}"
+      end
+
+      def respond_to_missing?(name, include_private = false)
+        DOCUMENTED_SERVER_SETTINGS.include?(name) || super
+      end
+
       private
 
       def resolve_config_path(config_path, default_config_path)
@@ -226,9 +234,8 @@ module Vajra
         first_value = values.first
         return Integer(first_value) if setting_type_include?(:integer, directive)
         return String(first_value) if setting_type_include?(:string, directive)
-        return first_value if boolean_setting
 
-        raise Error, "unsupported configuration directive: #{directive}"
+        first_value
       end
 
       def normalize_array_setting(directive, values)

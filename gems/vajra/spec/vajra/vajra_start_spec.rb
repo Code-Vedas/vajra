@@ -47,6 +47,15 @@ RSpec.describe Vajra, '.start' do
       expect(described_class).to have_received(:require_relative).with('vajra/railtie')
     end
 
+    it 'skips optional Railtie installation when Rails::Railtie is absent' do
+      hide_const('Rails')
+      allow(described_class).to receive(:require_relative)
+
+      described_class.install_optional_railtie
+
+      expect(described_class).not_to have_received(:require_relative)
+    end
+
     it 'suppresses optional Railtie load failures' do
       stub_const('Rails', Module.new)
       stub_const('Rails::Railtie', Class.new)

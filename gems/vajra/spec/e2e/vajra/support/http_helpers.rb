@@ -448,18 +448,22 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
   private :with_packaged_app
 
   def wait_for_http_response(port, request, wait_thread:, output:, timeout:, request_label:)
-    Timeout.timeout(timeout) do
-      loop do
-        raise "#{request_label} exited early: #{process_diagnostics(wait_thread, output)}" unless wait_thread.alive?
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
 
-        socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, port)
-        socket.write(request)
-        return read_raw_http_response(socket, wait_thread:, output:, request_label:)
-      rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH, Errno::ECONNRESET, EOFError, Timeout::Error
-        sleep 0.01
-      ensure
-        socket&.close unless socket.nil? || socket.closed?
+    loop do
+      raise "#{request_label} exited early: #{process_diagnostics(wait_thread, output)}" unless wait_thread.alive?
+
+      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, port)
+      socket.write(request)
+      return read_raw_http_response(socket, wait_thread:, output:, request_label:)
+    rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH, Errno::ECONNRESET, EOFError
+      if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        raise Timeout::Error, "#{request_label} timed out: #{process_diagnostics(wait_thread, output)}"
       end
+
+      sleep 0.01
+    ensure
+      socket&.close unless socket.nil? || socket.closed?
     end
   end
   private :wait_for_http_response

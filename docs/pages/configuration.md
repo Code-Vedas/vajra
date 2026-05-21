@@ -23,75 +23,37 @@ Vajra.configure do |config|
   # Listener
   config.host "127.0.0.1"
   config.port 3000
-  config.bind "tcp://127.0.0.1:3000"
-  config.unix_socket "tmp/vajra.sock"
-  config.backlog 1024
-  config.reuse_port true
 
   # Runtime topology
   config.workers 4
   config.threads 5, 5
-  config.preload_app true
-  config.worker_boot_timeout 30
-  config.worker_shutdown_timeout 30
-  config.phased_restart true
 
   # Request and connection limits
   config.max_request_head_bytes 32_768
-  config.max_request_body_bytes 104_857_600
   config.request_timeout 25
   config.request_head_timeout 5
   config.first_data_timeout 30
   config.persistent_timeout 30
   config.worker_timeout 60
-  config.max_keepalive_requests 1000
-  config.linger_timeout 5
 
   # Scheduling and admission
   config.max_connections 256
   config.queue_capacity 100_000
-  config.max_requests_per_worker 10_000
   config.scheduler_policy "least_loaded"
-
-  # TLS
-  config.tls true
-  config.tls_certificate "config/certs/server.crt"
-  config.tls_private_key "config/certs/server.key"
-  config.tls_ca_certificate "config/certs/ca.crt"
-  config.tls_verify_mode "peer"
-  config.tls_min_version "TLSv1_2"
-  config.alpn_protocols %w[h2 http/1.1]
-
-  # HTTP/2
-  config.http2 true
-  config.http2_max_concurrent_streams 128
-  config.http2_initial_window_size 65_535
-  config.http2_max_frame_size 16_384
-  config.http2_header_table_size 4096
 
   # Observability
   config.log_level "info"
-  config.access_log "log/vajra-access.log"
-  config.error_log "log/vajra-error.log"
-  config.structured_logs true
-  config.stats_path "/__vajra/stats"
-  config.metrics_endpoint "/metrics"
-
-  # Operations
-  config.pidfile "tmp/pids/vajra.pid"
-  config.state_path "tmp/vajra.state"
-  config.control_socket "tmp/vajra-control.sock"
-  config.drain_timeout 30
-  config.shutdown_timeout 60
 end
 ```
 
-The table below lists the full `Vajra.configure` DSL. The `Native environment
-override` column identifies the entries that flow directly into the native
-runtime. Directives without a native environment override still belong to the
-configuration DSL and keep their declared server meaning in Vajra's product
-surface. Framework launchers such as `bin/rails server -p 4000` remain valid
-where the framework owns that surface.
+The example above shows the current native-backed startup subset plus the
+application selectors handled by the Ruby launcher.
+
+The table below lists the full `Vajra.configure` DSL. Application selectors
+such as `rails`, `rackup`, and `app` are handled by the Ruby launcher.
+`Vajra.start` accepts only the native-backed runtime subset today. Passing a
+documented runtime directive that is not yet native-backed raises
+`start option not implemented yet: ...`.
 
 Vajra uses one pending request queue. That queue is global and FIFO.
 `queue_capacity` applies to that one global queue. The scheduler assigns the

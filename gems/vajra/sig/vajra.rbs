@@ -10,7 +10,7 @@ module Vajra
   VERSION: String
 
   def self.header: () -> String
-  def self.install_optional_railtie: () -> nil
+  def self.install_optional_railtie: () -> bool?
   def self.configure: [T, R] () { (T) -> R } -> R
                      | [T, R] () { (?T) -> R } -> R
                      | [T, R] () { (*T) -> R } -> R

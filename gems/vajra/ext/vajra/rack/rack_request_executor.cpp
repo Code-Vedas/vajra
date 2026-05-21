@@ -1794,9 +1794,22 @@ namespace
 
   struct WorkerChannelThreadContext
   {
-    int channel_fd;
+    int channel_fd = -1;
+    std::atomic_bool failed{false};
+    mutable std::mutex error_mutex;
     std::string error_message;
   };
+
+  std::optional<std::string> take_worker_channel_error(const WorkerChannelThreadContext &context)
+  {
+    if (!context.failed.load(std::memory_order_acquire))
+    {
+      return std::nullopt;
+    }
+
+    const std::lock_guard<std::mutex> lock(context.error_mutex);
+    return context.error_message;
+  }
 
   VALUE run_worker_request_channel_thread(void *data)
   {
@@ -1814,7 +1827,11 @@ namespace
 
       if (!read_result.error_message.empty())
       {
-        context->error_message = read_result.error_message;
+        {
+          const std::lock_guard<std::mutex> lock(context->error_mutex);
+          context->error_message = read_result.error_message;
+        }
+        context->failed.store(true, std::memory_order_release);
         return Qnil;
       }
       if (read_result.eof)
@@ -1983,15 +2000,17 @@ void Vajra::rack::run_worker_request_execution_loop(
     throw std::runtime_error("worker request channel count must match max_threads");
   }
 
-  std::vector<WorkerChannelThreadContext> contexts;
+  std::vector<std::unique_ptr<WorkerChannelThreadContext>> contexts;
   contexts.reserve(channel_fds.size());
   std::vector<VALUE> threads;
   threads.reserve(channel_fds.size());
 
   for (int channel_fd : channel_fds)
   {
-    contexts.push_back(WorkerChannelThreadContext{channel_fd, ""});
-    threads.push_back(rb_thread_create(run_worker_request_channel_thread, &contexts.back()));
+    auto context = std::make_unique<WorkerChannelThreadContext>();
+    context->channel_fd = channel_fd;
+    contexts.push_back(std::move(context));
+    threads.push_back(rb_thread_create(run_worker_request_channel_thread, contexts.back().get()));
   }
 
   ID id_join = rb_intern("join");
@@ -2007,9 +2026,9 @@ void Vajra::rack::run_worker_request_execution_loop(
       {
         continue;
       }
-      if (!contexts[index].error_message.empty())
+      if (const std::optional<std::string> error_message = take_worker_channel_error(*contexts[index]))
       {
-        throw std::runtime_error(contexts[index].error_message);
+        throw std::runtime_error(*error_message);
       }
 
       const VALUE join_result = rb_funcall(threads[index], id_join, 1, join_timeout);
@@ -2020,18 +2039,18 @@ void Vajra::rack::run_worker_request_execution_loop(
 
       joined[index] = true;
       ++joined_count;
-      if (!contexts[index].error_message.empty())
+      if (const std::optional<std::string> error_message = take_worker_channel_error(*contexts[index]))
       {
-        throw std::runtime_error(contexts[index].error_message);
+        throw std::runtime_error(*error_message);
       }
     }
   }
 
-  for (const WorkerChannelThreadContext &context : contexts)
+  for (const std::unique_ptr<WorkerChannelThreadContext> &context : contexts)
   {
-    if (!context.error_message.empty())
+    if (const std::optional<std::string> error_message = take_worker_channel_error(*context))
     {
-      throw std::runtime_error(context.error_message);
+      throw std::runtime_error(*error_message);
     }
   }
 }

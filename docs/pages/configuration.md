@@ -42,7 +42,6 @@ Vajra.configure do |config|
   config.request_timeout 25
   config.request_head_timeout 5
   config.first_data_timeout 30
-  config.request_body_timeout 30
   config.persistent_timeout 30
   config.worker_timeout 60
   config.max_keepalive_requests 1000
@@ -125,7 +124,6 @@ oldest live queued request to the least-busy worker.
 | `request_timeout` | `25` | `VAJRA_REQUEST_TIMEOUT` | `config.request_timeout 25` | total queue wait budget before execution starts |
 | `request_head_timeout` | `5` | `VAJRA_REQUEST_HEAD_TIMEOUT` | `config.request_head_timeout 5` | header read timeout |
 | `first_data_timeout` | `30` | `VAJRA_FIRST_DATA_TIMEOUT` | `config.first_data_timeout 30` | time allowed before the first request data arrives |
-| `request_body_timeout` | `30` | none | `config.request_body_timeout 30` | request-body read timeout |
 | `persistent_timeout` | `30` | `VAJRA_PERSISTENT_TIMEOUT` | `config.persistent_timeout 30` | idle keepalive timeout between requests |
 | `worker_timeout` | `60` | `VAJRA_WORKER_TIMEOUT` | `config.worker_timeout 60` | stuck worker lifecycle timeout |
 | `max_keepalive_requests` | `1000` | none | `config.max_keepalive_requests 1000` | maximum sequential requests per connection |

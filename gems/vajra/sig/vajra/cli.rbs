@@ -40,7 +40,7 @@ module Vajra
       def backlog: (Integer) -> Integer
       def reuse_port: (?bool) -> bool
       def workers: (Integer) -> Integer
-      def threads: (*Integer | Array[Integer]) -> Array[Integer]
+      def threads: (Integer | Array[Integer], ?Integer) -> Array[Integer]
       def preload_app: (?bool) -> bool
       def worker_boot_timeout: (Integer) -> Integer
       def worker_shutdown_timeout: (Integer) -> Integer
@@ -64,7 +64,7 @@ module Vajra
       def tls_ca_certificate: (String) -> String
       def tls_verify_mode: (String) -> String
       def tls_min_version: (String) -> String
-      def alpn_protocols: (*String | Array[String]) -> Array[String]
+      def alpn_protocols: (String | Array[String], *String) -> Array[String]
       def http2: (?bool) -> bool
       def http2_max_concurrent_streams: (Integer) -> Integer
       def http2_initial_window_size: (Integer) -> Integer

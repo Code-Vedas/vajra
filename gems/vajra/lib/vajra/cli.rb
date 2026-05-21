@@ -80,9 +80,10 @@ module Vajra
     DOCUMENTED_SERVER_SETTINGS = SETTING_TYPE_GROUPS.values.flatten.freeze
     ARRAY_SETTING_NORMALIZERS = {
       threads: lambda do |values|
-        raise Error, 'threads expects exactly two integer values' unless values.length == 2
+        raise Error, 'threads expects one or two integer values' unless [1, 2].include?(values.length)
 
-        values.map { |value| Integer(value) }
+        normalized_values = values.map { |value| Integer(value) }
+        normalized_values.length == 1 ? [normalized_values.first, normalized_values.first] : normalized_values
       end,
       alpn_protocols: lambda do |values|
         raise Error, 'alpn_protocols expects at least one value' if values.empty?

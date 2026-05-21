@@ -257,10 +257,14 @@ RSpec.describe Vajra::CLI do
       expect(launcher.send(:normalize_setting_values, :threads, %w[5 8])).to eq([5, 8])
     end
 
+    it 'normalizes a single thread value to fixed min and max threads' do
+      expect(launcher.send(:normalize_setting_values, :threads, ['5'])).to eq([5, 5])
+    end
+
     it 'rejects invalid thread setting shapes' do
       expect do
         launcher.send(:normalize_setting_values, :threads, [1, 2, 3])
-      end.to raise_error(Vajra::CLI::Error, 'threads expects exactly two integer values')
+      end.to raise_error(Vajra::CLI::Error, 'threads expects one or two integer values')
     end
 
     it 'normalizes alpn_protocols to strings' do

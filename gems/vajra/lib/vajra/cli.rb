@@ -191,8 +191,9 @@ module Vajra
         raise Error, "unsupported configuration directive: #{name}"
       end
 
-      def respond_to_missing?(name, include_private = false)
-        DOCUMENTED_SERVER_SETTINGS.include?(name) || super
+      def respond_to_missing?(name, *args)
+        include_private = args.fetch(0, false)
+        DOCUMENTED_SERVER_SETTINGS.include?(name) || super(name, include_private)
       end
 
       private

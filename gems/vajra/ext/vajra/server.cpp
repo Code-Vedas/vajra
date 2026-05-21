@@ -500,15 +500,16 @@ void Vajra::Server::start()
 
       reap_completed_handler_threads();
 
-      if (active_connection_count_.load(std::memory_order_acquire) >= max_connections_)
+      const std::size_t previous_active_connections = active_connection_count_.fetch_add(1, std::memory_order_acq_rel);
+      if (previous_active_connections >= max_connections_)
       {
+        active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
         log_connection_rejected(max_connections_);
         close(client_fd);
         continue;
       }
 
       const std::shared_ptr<std::atomic<bool>> completed = std::make_shared<std::atomic<bool>>(false);
-      active_connection_count_.fetch_add(1, std::memory_order_acq_rel);
       try
       {
         std::lock_guard<std::mutex> lock(handler_threads_mutex_);

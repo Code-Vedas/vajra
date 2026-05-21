@@ -1670,11 +1670,13 @@ namespace
     try
     {
       std::optional<Vajra::response::Response> response = live_session_->finish();
+      live_session_.reset();
       transport_.release_channel(pending_request_);
       return response;
     }
     catch (...)
     {
+      live_session_.reset();
       transport_.release_channel(pending_request_);
       throw;
     }
@@ -1690,6 +1692,7 @@ namespace
     canceled_ = true;
     if (live_session_)
     {
+      live_session_.reset();
       transport_.release_channel(pending_request_);
       return;
     }

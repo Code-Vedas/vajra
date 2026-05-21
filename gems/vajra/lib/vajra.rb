@@ -122,6 +122,7 @@ module Vajra
     def configure(&block)
       config_target = CLI.current_config_target
       raise Error, 'Vajra.configure is only available while loading Vajra configuration' unless config_target
+      raise Error, 'Vajra.configure requires a block' unless block
 
       if block.arity.zero?
         config_target.instance_eval(&block)

@@ -79,6 +79,13 @@ RSpec.describe Vajra, '.start' do
       expect { described_class.configure { nil } }
         .to raise_error(Vajra::Error, 'Vajra.configure is only available while loading Vajra configuration')
     end
+
+    it 'raises a clear error when called without a block' do
+      Vajra::CLI.with_config_target(config_target) do
+        expect { described_class.configure }
+          .to raise_error(Vajra::Error, 'Vajra.configure requires a block')
+      end
+    end
   end
 
   describe '.start' do

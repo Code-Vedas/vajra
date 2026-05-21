@@ -37,7 +37,6 @@ module Vajra
         max_request_body_bytes
         request_head_timeout
         request_body_timeout
-        keepalive_timeout
         max_keepalive_requests
         linger_timeout
         max_connections

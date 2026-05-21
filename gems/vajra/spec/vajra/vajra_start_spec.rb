@@ -92,7 +92,7 @@ RSpec.describe Vajra, '.start' do
         port: 4321,
         workers: 4,
         threads: [5, 5],
-        max_connections: 10_000,
+        max_connections: 256,
         queue_capacity: 5000,
         scheduler_policy: 'least_loaded',
         max_request_head_bytes: 2048,

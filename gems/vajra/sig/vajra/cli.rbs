@@ -52,7 +52,6 @@ module Vajra
       def max_request_body_bytes: (Integer) -> Integer
       def request_head_timeout: (Integer) -> Integer
       def request_body_timeout: (Integer) -> Integer
-      def keepalive_timeout: (Integer) -> Integer
       def max_keepalive_requests: (Integer) -> Integer
       def linger_timeout: (Integer) -> Integer
       def max_connections: (Integer) -> Integer

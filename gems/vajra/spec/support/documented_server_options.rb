@@ -31,10 +31,9 @@ module DocumentedServerOptions
         config.max_request_body_bytes 10_485_760
         config.request_head_timeout 15
         config.request_body_timeout 30
-        config.keepalive_timeout 15
         config.max_keepalive_requests 1000
         config.linger_timeout 5
-        config.max_connections 10_000
+        config.max_connections 256
         config.queue_capacity 5000
         config.max_requests_per_worker 10_000
         config.scheduler_policy "least_loaded"
@@ -81,10 +80,9 @@ module DocumentedServerOptions
       http2_initial_window_size: 65_535,
       http2_max_concurrent_streams: 128,
       http2_max_frame_size: 16_384,
-      keepalive_timeout: 15,
       linger_timeout: 5,
       log_level: 'info',
-      max_connections: 10_000,
+      max_connections: 256,
       max_keepalive_requests: 1000,
       max_request_body_bytes: 10_485_760,
       max_request_head_bytes: 2048,

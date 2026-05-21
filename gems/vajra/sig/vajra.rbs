@@ -33,7 +33,6 @@ module Vajra
     ?max_request_body_bytes: Integer,
     ?request_head_timeout: Integer,
     ?request_body_timeout: Integer,
-    ?keepalive_timeout: Integer,
     ?max_keepalive_requests: Integer,
     ?linger_timeout: Integer,
     ?max_connections: Integer,

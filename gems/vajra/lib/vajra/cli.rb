@@ -79,6 +79,18 @@ module Vajra
       ].freeze
     }.freeze
     DOCUMENTED_SERVER_SETTINGS = SETTING_TYPE_GROUPS.values.flatten.freeze
+    ARRAY_SETTING_NORMALIZERS = {
+      threads: lambda do |values|
+        raise Error, 'threads expects exactly two integer values' unless values.length == 2
+
+        values.map { |value| Integer(value) }
+      end,
+      alpn_protocols: lambda do |values|
+        raise Error, 'alpn_protocols expects at least one value' if values.empty?
+
+        values.map { |value| String(value) }
+      end
+    }.freeze
 
     def with_config_target(target)
       current_thread = nil
@@ -207,7 +219,7 @@ module Vajra
       def normalize_setting_values(directive, values)
         boolean_setting = setting_type_include?(:boolean, directive)
         return true if boolean_setting && values.empty?
-        return normalize_array_setting(values) if setting_type_include?(:array, directive)
+        return normalize_array_setting(directive, values) if setting_type_include?(:array, directive)
 
         raise Error, "#{directive} expects a single value" unless values.length == 1
 
@@ -219,11 +231,13 @@ module Vajra
         raise Error, "unsupported configuration directive: #{directive}"
       end
 
-      def normalize_array_setting(values)
+      def normalize_array_setting(directive, values)
         first_value = values.first
-        return first_value if values.length == 1 && first_value.is_a?(Array)
+        normalized_values = values.length == 1 && first_value.is_a?(Array) ? first_value : values
+        normalizer = ARRAY_SETTING_NORMALIZERS.fetch(directive, nil)
+        return normalized_values unless normalizer
 
-        values
+        normalizer.call(normalized_values)
       end
 
       def setting_type_include?(type, directive)

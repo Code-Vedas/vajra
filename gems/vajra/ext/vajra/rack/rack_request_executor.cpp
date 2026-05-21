@@ -80,12 +80,22 @@ namespace
 
   constexpr std::size_t kInlineBodyChunkBytes =
       static_cast<std::size_t>(Vajra::ipc::kMaxFramePayloadLength) - 1;
+  constexpr std::size_t kMillisecondsPerSecond = 1000;
   struct DecodedResponseMetadata
   {
     ResponseMetadataKind kind = ResponseMetadataKind::no_response;
     std::optional<Vajra::response::Response> response;
     std::string error_message;
   };
+
+  int clamp_poll_timeout_milliseconds(std::size_t timeout_seconds)
+  {
+    constexpr std::size_t kMaxPollTimeoutMilliseconds = static_cast<std::size_t>(std::numeric_limits<int>::max());
+    const std::size_t timeout_milliseconds = timeout_seconds > (kMaxPollTimeoutMilliseconds / kMillisecondsPerSecond)
+                                                 ? kMaxPollTimeoutMilliseconds
+                                                 : timeout_seconds * kMillisecondsPerSecond;
+    return static_cast<int>(timeout_milliseconds);
+  }
 
   void write_all_or_throw(int fd, const void *buffer, std::size_t length)
   {
@@ -1008,7 +1018,7 @@ namespace
         std::function<void()> timeout_handler)
         : channel_fd_(channel_fd),
           channel_lock_(channel_mutex),
-          worker_timeout_milliseconds_(static_cast<int>(worker_timeout_seconds * 1000)),
+          worker_timeout_milliseconds_(clamp_poll_timeout_milliseconds(worker_timeout_seconds)),
           timeout_handler_(std::move(timeout_handler))
     {
     }

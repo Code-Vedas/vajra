@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <iomanip>
 #include <iostream>
+#include <poll.h>
 #include <sstream>
 #include <stdexcept>
 #include <sys/socket.h>
@@ -24,6 +25,7 @@
 namespace
 {
   constexpr const char *kUnknownSocketAddress = "0.0.0.0";
+  constexpr int kHandlerReapPollTimeoutMilliseconds = 1000;
 
   std::string socket_address(sockaddr_in address)
   {
@@ -440,6 +442,24 @@ void Vajra::Server::start()
     if (listener_fd < 0)
     {
       break;
+    }
+
+    pollfd listener_descriptor{listener_fd, POLLIN, 0};
+    const int poll_result = poll(&listener_descriptor, 1, kHandlerReapPollTimeoutMilliseconds);
+    if (poll_result == 0)
+    {
+      reap_completed_handler_threads();
+      continue;
+    }
+    if (poll_result < 0)
+    {
+      if (errno == EINTR)
+      {
+        continue;
+      }
+
+      log_accept_failed(std::strerror(errno));
+      continue;
     }
 
     sockaddr_in client_addr{};

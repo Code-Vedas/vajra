@@ -252,5 +252,30 @@ RSpec.describe Vajra::CLI do
         launcher.send(:normalize_setting_values, :unsupported_directive, ['value'])
       end.to raise_error(Vajra::CLI::Error, 'unsupported configuration directive: unsupported_directive')
     end
+
+    it 'normalizes thread settings to two integers' do
+      expect(launcher.send(:normalize_setting_values, :threads, %w[5 8])).to eq([5, 8])
+    end
+
+    it 'rejects invalid thread setting shapes' do
+      expect do
+        launcher.send(:normalize_setting_values, :threads, [1, 2, 3])
+      end.to raise_error(Vajra::CLI::Error, 'threads expects exactly two integer values')
+    end
+
+    it 'normalizes alpn_protocols to strings' do
+      expect(launcher.send(:normalize_setting_values, :alpn_protocols, [:h2, 'http/1.1']))
+        .to eq(%w[h2 http/1.1])
+    end
+
+    it 'rejects empty alpn_protocols values' do
+      expect do
+        launcher.send(:normalize_setting_values, :alpn_protocols, [])
+      end.to raise_error(Vajra::CLI::Error, 'alpn_protocols expects at least one value')
+    end
+
+    it 'passes through unsupported array directives unchanged in the private normalizer' do
+      expect(launcher.send(:normalize_array_setting, :unsupported_array_directive, ['value'])).to eq(['value'])
+    end
   end
 end

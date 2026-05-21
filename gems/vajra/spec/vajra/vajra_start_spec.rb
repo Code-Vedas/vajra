@@ -37,6 +37,44 @@ RSpec.describe Vajra, '.start' do
       expect(configured).to be(true)
     end
 
+    it 'installs the optional Railtie when Rails::Railtie is defined' do
+      stub_const('Rails', Module.new)
+      stub_const('Rails::Railtie', Class.new)
+      allow(described_class).to receive(:require_relative).with('vajra/railtie')
+
+      described_class.install_optional_railtie
+
+      expect(described_class).to have_received(:require_relative).with('vajra/railtie')
+    end
+
+    it 'suppresses optional Railtie load failures' do
+      stub_const('Rails', Module.new)
+      stub_const('Rails::Railtie', Class.new)
+      allow(described_class).to receive(:require_relative).with('vajra/railtie').and_raise(LoadError)
+
+      expect { described_class.install_optional_railtie }.not_to raise_error
+    end
+
+    it 'yields the current config target when the block uses an optional argument' do
+      yielded_target = nil
+
+      Vajra::CLI.with_config_target(config_target) do
+        described_class.configure { |config = nil| yielded_target = config }
+      end
+
+      expect(yielded_target).to equal(config_target)
+    end
+
+    it 'yields the current config target when the block uses a rest argument' do
+      yielded_target = nil
+
+      Vajra::CLI.with_config_target(config_target) do
+        described_class.configure { |*config| yielded_target = config.fetch(0) }
+      end
+
+      expect(yielded_target).to equal(config_target)
+    end
+
     it 'raises outside Vajra configuration loading' do
       expect { described_class.configure { nil } }
         .to raise_error(Vajra::Error, 'Vajra.configure is only available while loading Vajra configuration')

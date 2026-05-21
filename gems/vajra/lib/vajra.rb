@@ -124,10 +124,10 @@ module Vajra
       config_target = CLI.current_config_target
       raise Error, 'Vajra.configure is only available while loading Vajra configuration' unless config_target
 
-      if block.arity == 1
-        yield(config_target)
-      else
+      if block.arity.zero?
         config_target.instance_eval(&block)
+      else
+        yield(config_target)
       end
     end
 

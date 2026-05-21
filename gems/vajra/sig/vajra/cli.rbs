@@ -64,7 +64,7 @@ module Vajra
       def tls_ca_certificate: (String) -> String
       def tls_verify_mode: (String) -> String
       def tls_min_version: (String) -> String
-      def alpn_protocols: (String | Array[String], *String) -> Array[String]
+      def alpn_protocols: (String | Symbol | Array[String | Symbol], *(String | Symbol)) -> Array[String]
       def http2: (?bool) -> bool
       def http2_max_concurrent_streams: (Integer) -> Integer
       def http2_initial_window_size: (Integer) -> Integer

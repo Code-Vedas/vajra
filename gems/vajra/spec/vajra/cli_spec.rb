@@ -10,7 +10,7 @@ require 'tmpdir'
 require_relative '../support/documented_server_options'
 
 RSpec.describe Vajra::CLI do
-  describe '.start' do
+  describe '.with_config_target' do
     it 'restores the previous config target after yielding' do
       Thread.current[:vajra_config_target] = :previous_target
 
@@ -30,7 +30,9 @@ RSpec.describe Vajra::CLI do
         described_class.with_config_target(:next_target) { nil }
       end.not_to raise_error
     end
+  end
 
+  describe '.start' do
     it 'loads the default config file and passes configured start options' do
       Dir.mktmpdir('vajra-cli-config') do |root|
         config_dir = File.join(root, 'config')

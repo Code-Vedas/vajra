@@ -312,14 +312,17 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
       ready_condition = ConditionVariable.new
       ready_count = 0
       release_requests = false
+      wait_timeout = VajraE2EHelpers::HTTP_RESPONSE_READ_TIMEOUT_SECONDS
       workers = requests.each_with_index.map do |request, index|
         Thread.new do
           socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
           begin
             ready_mutex.synchronize do
               ready_count += 1
-              ready_condition.broadcast if ready_count == requests.length
-              ready_condition.wait(ready_mutex) until release_requests
+              ready_condition.broadcast
+              Timeout.timeout(wait_timeout) do
+                ready_condition.wait(ready_mutex) until release_requests
+              end
             end
             socket.write(request)
             responses[index] = read_raw_http_response(
@@ -333,12 +336,21 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
           end
         end
       end
-      ready_mutex.synchronize do
-        ready_condition.wait(ready_mutex) until ready_count == requests.length
-        release_requests = true
-        ready_condition.broadcast
+      begin
+        ready_mutex.synchronize do
+          Timeout.timeout(wait_timeout) do
+            ready_condition.wait(ready_mutex) until ready_count == requests.length
+          end
+          release_requests = true
+          ready_condition.broadcast
+        end
+        workers.each(&:value)
+      ensure
+        ready_mutex.synchronize do
+          release_requests = true
+          ready_condition.broadcast
+        end
       end
-      workers.each(&:join)
 
       status = stop_process(wait_thread)
 

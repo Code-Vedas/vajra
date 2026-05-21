@@ -10,7 +10,7 @@ require 'tmpdir'
 require_relative '../support/documented_server_options'
 
 RSpec.describe Vajra::CLI do
-  describe '.start!' do
+  describe '.start' do
     it 'restores the previous config target after yielding' do
       Thread.current[:vajra_config_target] = :previous_target
 

@@ -16,7 +16,6 @@
 #include <algorithm>
 #include <atomic>
 #include <array>
-#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -1329,14 +1328,17 @@ namespace
     std::pair<std::size_t, std::size_t> await_assignment(const std::shared_ptr<PendingRequest> &pending_request) const
     {
       std::unique_lock<std::mutex> lock(scheduler_mutex_);
-      while (!pending_request->assigned &&
-             !pending_request->timed_out &&
-             !pending_request->client_gone &&
-             !pending_request->canceled)
+      while (!pending_request->assigned.load() &&
+             !pending_request->timed_out.load() &&
+             !pending_request->client_gone.load() &&
+             !pending_request->canceled.load())
       {
         prune_queue_locked();
         assign_pending_requests_locked();
-        if (pending_request->assigned || pending_request->timed_out || pending_request->client_gone || pending_request->canceled)
+        if (pending_request->assigned.load() ||
+            pending_request->timed_out.load() ||
+            pending_request->client_gone.load() ||
+            pending_request->canceled.load())
         {
           break;
         }
@@ -1354,11 +1356,11 @@ namespace
         scheduler_condition_.wait_until(lock, pending_request->deadline);
       }
 
-      if (pending_request->timed_out)
+      if (pending_request->timed_out.load())
       {
         throw Vajra::request::RequestTimeoutError("request timed out while waiting in the global queue");
       }
-      if (pending_request->client_gone || pending_request->canceled)
+      if (pending_request->client_gone.load() || pending_request->canceled.load())
       {
         throw Vajra::request::RequestTimeoutError("request left the global queue before execution started");
       }
@@ -1394,7 +1396,7 @@ namespace
     {
       {
         std::lock_guard<std::mutex> lock(scheduler_mutex_);
-        if (!pending_request->assigned)
+        if (!pending_request->assigned.load())
         {
           pending_request->canceled = true;
           erase_pending_request_locked(pending_request);
@@ -1518,7 +1520,9 @@ namespace
       while (!pending_requests_.empty())
       {
         const std::shared_ptr<PendingRequest> pending_request = pending_requests_.front();
-        if (pending_request->canceled || pending_request->timed_out || pending_request->client_gone)
+        if (pending_request->canceled.load() ||
+            pending_request->timed_out.load() ||
+            pending_request->client_gone.load())
         {
           pending_requests_.pop_front();
           continue;
@@ -1551,7 +1555,10 @@ namespace
       const auto now = std::chrono::steady_clock::now();
       for (const auto &pending_request : pending_requests_)
       {
-        if (pending_request->assigned || pending_request->canceled || pending_request->timed_out || pending_request->client_gone)
+        if (pending_request->assigned.load() ||
+            pending_request->canceled.load() ||
+            pending_request->timed_out.load() ||
+            pending_request->client_gone.load())
         {
           continue;
         }
@@ -1577,7 +1584,9 @@ namespace
               pending_requests_.begin(),
               pending_requests_.end(),
               [](const std::shared_ptr<PendingRequest> &pending_request) {
-                return pending_request->canceled || pending_request->timed_out || pending_request->client_gone;
+                return pending_request->canceled.load() ||
+                       pending_request->timed_out.load() ||
+                       pending_request->client_gone.load();
               }),
           pending_requests_.end());
     }
@@ -1665,7 +1674,7 @@ namespace
       return;
     }
 
-    if (pending_request_->assigned)
+    if (pending_request_->assigned.load())
     {
       transport_.release_channel(pending_request_);
       return;

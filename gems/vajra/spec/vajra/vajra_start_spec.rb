@@ -64,6 +64,14 @@ RSpec.describe Vajra, '.start' do
       expect { described_class.install_optional_railtie }.not_to raise_error
     end
 
+    it 'does not suppress railtie NoMethodError failures' do
+      stub_const('Rails', Module.new)
+      stub_const('Rails::Railtie', Class.new)
+      allow(described_class).to receive(:require_relative).with('vajra/railtie').and_raise(NoMethodError, 'boom')
+
+      expect { described_class.install_optional_railtie }.to raise_error(NoMethodError, /boom/)
+    end
+
     it 'yields the current config target when the block uses an optional argument' do
       yielded_target = nil
 

@@ -40,7 +40,7 @@ module Vajra
     return unless defined?(::Rails::Railtie)
 
     require_relative 'vajra/railtie'
-  rescue LoadError, NoMethodError
+  rescue LoadError
     nil
   end
   install_optional_railtie

@@ -1404,13 +1404,23 @@ namespace
 
     void cancel_request(const std::shared_ptr<PendingRequest> &pending_request) const
     {
+      bool release_assigned_channel = false;
       {
         std::lock_guard<std::mutex> lock(scheduler_mutex_);
-        if (!pending_request->assigned.load())
+        if (pending_request->assigned.load())
+        {
+          release_assigned_channel = true;
+        }
+        else
         {
           pending_request->canceled = true;
           erase_pending_request_locked(pending_request);
         }
+      }
+      if (release_assigned_channel)
+      {
+        release_channel(pending_request);
+        return;
       }
       scheduler_condition_.notify_all();
     }
@@ -1679,12 +1689,6 @@ namespace
 
     canceled_ = true;
     if (live_session_)
-    {
-      transport_.release_channel(pending_request_);
-      return;
-    }
-
-    if (pending_request_->assigned.load())
     {
       transport_.release_channel(pending_request_);
       return;

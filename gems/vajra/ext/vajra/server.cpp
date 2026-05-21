@@ -317,6 +317,7 @@ Vajra::Server::Server(
 Vajra::Server::~Server()
 {
   close_listener_fd(false);
+  join_handler_threads();
 }
 
 void Vajra::Server::close_listener_fd(bool interrupt_accept)
@@ -420,134 +421,144 @@ void Vajra::Server::start()
   lifecycle_.mark_boot_ready();
   log_listening_banner(host_, port_);
 
-  for (;;)
+  try
   {
-    const lifecycle::Snapshot snapshot = lifecycle_.snapshot();
-    if (snapshot.state == lifecycle::State::draining || snapshot.state == lifecycle::State::failed)
+    for (;;)
     {
-      break;
-    }
-
-    if (VajraNative::shutdown_requested())
-    {
-      if (shutdown_begin_callback_)
+      const lifecycle::Snapshot snapshot = lifecycle_.snapshot();
+      if (snapshot.state == lifecycle::State::draining || snapshot.state == lifecycle::State::failed)
       {
-        shutdown_begin_callback_();
-      }
-      lifecycle_.request_stop(lifecycle::StopReason::signal_shutdown);
-      break;
-    }
-
-    const int listener_fd = server_fd_.load();
-    if (listener_fd < 0)
-    {
-      break;
-    }
-
-    pollfd listener_descriptor{listener_fd, POLLIN, 0};
-    const int poll_result = poll(&listener_descriptor, 1, kHandlerReapPollTimeoutMilliseconds);
-    if (poll_result == 0)
-    {
-      reap_completed_handler_threads();
-      continue;
-    }
-    if (poll_result < 0)
-    {
-      if (errno == EINTR)
-      {
-        continue;
-      }
-
-      log_accept_failed(std::strerror(errno));
-      continue;
-    }
-
-    sockaddr_in client_addr{};
-    socklen_t client_len = sizeof(client_addr);
-
-    const int client_fd = accept(listener_fd, reinterpret_cast<sockaddr *>(&client_addr), &client_len);
-    if (client_fd < 0)
-    {
-      if (lifecycle_.snapshot().state == lifecycle::State::draining || VajraNative::shutdown_requested())
-      {
-        if (VajraNative::shutdown_requested())
-        {
-          if (shutdown_begin_callback_)
-          {
-            shutdown_begin_callback_();
-          }
-          lifecycle_.request_stop(lifecycle::StopReason::signal_shutdown);
-        }
         break;
       }
 
-      if (errno == EINTR)
+      if (VajraNative::shutdown_requested())
       {
+        if (shutdown_begin_callback_)
+        {
+          shutdown_begin_callback_();
+        }
+        lifecycle_.request_stop(lifecycle::StopReason::signal_shutdown);
+        break;
+      }
+
+      const int listener_fd = server_fd_.load();
+      if (listener_fd < 0)
+      {
+        break;
+      }
+
+      pollfd listener_descriptor{listener_fd, POLLIN, 0};
+      const int poll_result = poll(&listener_descriptor, 1, kHandlerReapPollTimeoutMilliseconds);
+      if (poll_result == 0)
+      {
+        reap_completed_handler_threads();
+        continue;
+      }
+      if (poll_result < 0)
+      {
+        if (errno == EINTR)
+        {
+          continue;
+        }
+
+        log_accept_failed(std::strerror(errno));
         continue;
       }
 
-      log_accept_failed(std::strerror(errno));
-      continue;
-    }
+      sockaddr_in client_addr{};
+      socklen_t client_len = sizeof(client_addr);
 
-    if (lifecycle_.snapshot().state == lifecycle::State::listening)
-    {
-      lifecycle_.mark_serving();
-    }
-
-    reap_completed_handler_threads();
-
-    if (active_connection_count_.load(std::memory_order_acquire) >= max_connections_)
-    {
-      log_connection_rejected(max_connections_);
-      close(client_fd);
-      continue;
-    }
-
-    const std::shared_ptr<std::atomic<bool>> completed = std::make_shared<std::atomic<bool>>(false);
-    active_connection_count_.fetch_add(1, std::memory_order_acq_rel);
-    try
-    {
-      std::lock_guard<std::mutex> lock(handler_threads_mutex_);
-      handler_threads_.push_back(HandlerThread{std::thread(), completed});
-      HandlerThread &handler_thread = handler_threads_.back();
-      handler_thread.thread = std::thread([this, client_fd, client_addr, completed]() {
-        ActiveConnectionGuard active_connection_guard(active_connection_count_);
-        try
-        {
-          request_processor_.handle(client_fd, socket_context_for(client_fd, client_addr, port_));
-        }
-        catch (const std::exception &error)
-        {
-          log_handler_thread_failure(client_addr, client_fd, error.what());
-          if (fcntl(client_fd, F_GETFD) != -1 || errno != EBADF)
-          {
-            close(client_fd);
-          }
-        }
-        catch (...)
-        {
-          log_handler_thread_failure(client_addr, client_fd, "unknown exception");
-          if (fcntl(client_fd, F_GETFD) != -1 || errno != EBADF)
-          {
-            close(client_fd);
-          }
-        }
-        completed->store(true, std::memory_order_release);
-      });
-    }
-    catch (...)
-    {
-      std::lock_guard<std::mutex> lock(handler_threads_mutex_);
-      if (!handler_threads_.empty() && handler_threads_.back().thread.joinable() == false &&
-          handler_threads_.back().completed == completed)
+      const int client_fd = accept(listener_fd, reinterpret_cast<sockaddr *>(&client_addr), &client_len);
+      if (client_fd < 0)
       {
-        handler_threads_.pop_back();
+        if (lifecycle_.snapshot().state == lifecycle::State::draining || VajraNative::shutdown_requested())
+        {
+          if (VajraNative::shutdown_requested())
+          {
+            if (shutdown_begin_callback_)
+            {
+              shutdown_begin_callback_();
+            }
+            lifecycle_.request_stop(lifecycle::StopReason::signal_shutdown);
+          }
+          break;
+        }
+
+        if (errno == EINTR)
+        {
+          continue;
+        }
+
+        log_accept_failed(std::strerror(errno));
+        continue;
       }
-      active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
-      close(client_fd);
-      throw;
+
+      if (lifecycle_.snapshot().state == lifecycle::State::listening)
+      {
+        lifecycle_.mark_serving();
+      }
+
+      reap_completed_handler_threads();
+
+      if (active_connection_count_.load(std::memory_order_acquire) >= max_connections_)
+      {
+        log_connection_rejected(max_connections_);
+        close(client_fd);
+        continue;
+      }
+
+      const std::shared_ptr<std::atomic<bool>> completed = std::make_shared<std::atomic<bool>>(false);
+      active_connection_count_.fetch_add(1, std::memory_order_acq_rel);
+      try
+      {
+        std::lock_guard<std::mutex> lock(handler_threads_mutex_);
+        handler_threads_.push_back(HandlerThread{std::thread(), completed});
+        HandlerThread &handler_thread = handler_threads_.back();
+        handler_thread.thread = std::thread([this, client_fd, client_addr, completed]() {
+          ActiveConnectionGuard active_connection_guard(active_connection_count_);
+          try
+          {
+            request_processor_.handle(client_fd, socket_context_for(client_fd, client_addr, port_));
+          }
+          catch (const std::exception &error)
+          {
+            log_handler_thread_failure(client_addr, client_fd, error.what());
+            if (fcntl(client_fd, F_GETFD) != -1 || errno != EBADF)
+            {
+              close(client_fd);
+            }
+          }
+          catch (...)
+          {
+            log_handler_thread_failure(client_addr, client_fd, "unknown exception");
+            if (fcntl(client_fd, F_GETFD) != -1 || errno != EBADF)
+            {
+              close(client_fd);
+            }
+          }
+          completed->store(true, std::memory_order_release);
+        });
+      }
+      catch (...)
+      {
+        std::lock_guard<std::mutex> lock(handler_threads_mutex_);
+        if (!handler_threads_.empty() && handler_threads_.back().thread.joinable() == false &&
+            handler_threads_.back().completed == completed)
+        {
+          handler_threads_.pop_back();
+        }
+        active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
+        close(client_fd);
+        throw;
+      }
     }
+  }
+  catch (...)
+  {
+    close_listener_fd(false);
+    join_handler_threads();
+    lifecycle_.finish_stop();
+    throw;
   }
 
   close_listener_fd(false);

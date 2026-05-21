@@ -10,7 +10,10 @@ module Vajra
   VERSION: String
 
   def self.header: () -> String
+  def self.install_optional_railtie: () -> nil
   def self.configure: [T, R] () { (T) -> R } -> R
+                     | [T, R] () { (?T) -> R } -> R
+                     | [T, R] () { (*T) -> R } -> R
                      | [R] () { () -> R } -> R
   def self.start: (
     ?host: String,

@@ -1302,20 +1302,21 @@ namespace VajraNative
           static_cast<std::size_t>(workers),
           max_threads,
           "invalid workers/threads combination: workers * max_threads is too large");
-      const std::size_t request_channel_fds = checked_multiply(
+      const std::size_t boot_request_channel_fds = checked_multiply(
+          max_threads,
+          static_cast<std::size_t>(2),
+          "invalid workers/threads combination: worker boot request channel fd count is too large");
+      const std::size_t boot_readiness_pipe_fds = static_cast<std::size_t>(2);
+      const std::size_t boot_overhead_fds = checked_add(
+          boot_request_channel_fds,
+          boot_readiness_pipe_fds,
+          "invalid workers/threads combination: worker boot fd count is too large");
+      const std::size_t peak_parent_fds = checked_add(
           total_request_channels,
-          static_cast<std::size_t>(2),
-          "invalid workers/threads combination: request channel fd count is too large");
-      const std::size_t readiness_pipe_fds = checked_multiply(
-          static_cast<std::size_t>(workers),
-          static_cast<std::size_t>(2),
-          "invalid workers/threads combination: worker bootstrap fd count is too large");
-      const std::size_t total_runtime_fds = checked_add(
-          request_channel_fds,
-          readiness_pipe_fds,
+          boot_overhead_fds,
           "invalid workers/threads combination: required fd count is too large");
       const std::size_t required_fds = checked_add(
-          total_runtime_fds,
+          peak_parent_fds,
           kRuntimeFdReserve,
           "invalid workers/threads combination: required fd count is too large");
 
@@ -1329,10 +1330,11 @@ namespace VajraNative
       if (required_fds > available_fds)
       {
         throw std::runtime_error(
-            "invalid workers/threads combination: workers * max_threads would allocate " +
-            std::to_string(total_request_channels) + " request channels (" +
-            std::to_string(request_channel_fds) + " request-channel fds plus " +
-            std::to_string(readiness_pipe_fds) + " bootstrap-pipe fds), which exceeds the process fd limit of " +
+            "invalid workers/threads combination: workers * max_threads would keep " +
+            std::to_string(total_request_channels) + " parent request-channel fds open in steady state and peak at " +
+            std::to_string(peak_parent_fds) + " parent fds during worker boot (" +
+            std::to_string(boot_request_channel_fds) + " boot request-channel fds plus " +
+            std::to_string(boot_readiness_pipe_fds) + " readiness-pipe fds), which exceeds the process fd limit of " +
             std::to_string(available_fds) + ". Lower workers or threads, or raise the fd limit.");
       }
     }

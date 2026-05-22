@@ -204,6 +204,131 @@ namespace VajraSpecCpp
       assert_can_rebind(binding.port);
       expect_stopped_snapshot(server, Vajra::lifecycle::StopReason::programmatic_stop);
     }
+
+    void test_stop_interrupts_keep_alive_connection()
+    {
+      const int port = available_port();
+      Vajra::Server server(port, "0.0.0.0", Vajra::request::kDefaultMaxRequestHeadBytes);
+      std::exception_ptr server_error;
+
+      std::thread server_thread([&]() {
+        try
+        {
+          server.start();
+        }
+        catch (...)
+        {
+          server_error = std::current_exception();
+        }
+      });
+
+      wait_until_listening(port);
+      FileDescriptorGuard client_socket(connect_to_listener(port));
+      if (client_socket.get() < 0)
+      {
+        server.stop();
+        server_thread.join();
+        fail("failed to connect keep-alive test client");
+      }
+
+      suppress_sigpipe(client_socket.get());
+      if (!send_all(
+              client_socket.get(),
+              "GET / HTTP/1.1\r\n"
+              "Host: localhost\r\n"
+              "\r\n"))
+      {
+        server.stop();
+        client_socket.close_if_open();
+        server_thread.join();
+        fail("failed to send keep-alive request");
+      }
+      read_http_response(client_socket.get());
+
+      server.stop();
+      const bool peer_closed = peer_closed_within(client_socket.get(), 1000);
+      client_socket.close_if_open();
+      server_thread.join();
+
+      if (server_error)
+      {
+        std::rethrow_exception(server_error);
+      }
+      if (!peer_closed)
+      {
+        fail("server did not interrupt keep-alive client socket during drain");
+      }
+
+      expect_stopped_snapshot(server, Vajra::lifecycle::StopReason::programmatic_stop);
+    }
+
+    void test_stop_interrupts_partial_next_request()
+    {
+      const int port = available_port();
+      Vajra::Server server(port, "0.0.0.0", Vajra::request::kDefaultMaxRequestHeadBytes);
+      std::exception_ptr server_error;
+
+      std::thread server_thread([&]() {
+        try
+        {
+          server.start();
+        }
+        catch (...)
+        {
+          server_error = std::current_exception();
+        }
+      });
+
+      wait_until_listening(port);
+      FileDescriptorGuard client_socket(connect_to_listener(port));
+      if (client_socket.get() < 0)
+      {
+        server.stop();
+        server_thread.join();
+        fail("failed to connect partial-next-request test client");
+      }
+
+      suppress_sigpipe(client_socket.get());
+      if (!send_all(
+              client_socket.get(),
+              "GET / HTTP/1.1\r\n"
+              "Host: localhost\r\n"
+              "\r\n"))
+      {
+        server.stop();
+        client_socket.close_if_open();
+        server_thread.join();
+        fail("failed to send initial keep-alive request");
+      }
+      read_http_response(client_socket.get());
+
+      if (!send_all(
+              client_socket.get(),
+              "GET /next HTTP/1.1\r\n"
+              "Host: localhost\r\n"))
+      {
+        server.stop();
+        client_socket.close_if_open();
+        server_thread.join();
+        fail("failed to send partial next request");
+      }
+
+      server.stop();
+      const bool peer_closed = peer_closed_within(client_socket.get(), 1000);
+      client_socket.close_if_open();
+      server_thread.join();
+
+      if (server_error)
+      {
+        std::rethrow_exception(server_error);
+      }
+      if (!peer_closed)
+      {
+        fail("server did not interrupt partial next request during drain");
+      }
+
+      expect_stopped_snapshot(server, Vajra::lifecycle::StopReason::programmatic_stop);
+    }
   }
 
   void run_server_lifecycle_tests()
@@ -213,5 +338,7 @@ namespace VajraSpecCpp
     test_repeated_start_stop_cycles_remain_reusable();
     test_repeated_stop_requests_are_idempotent();
     test_inherited_listener_start_and_stop_release_listener();
+    test_stop_interrupts_keep_alive_connection();
+    test_stop_interrupts_partial_next_request();
   }
 }

@@ -330,6 +330,11 @@ Vajra::Server::Server(
 Vajra::Server::~Server()
 {
   close_listener_fd(false);
+  const lifecycle::Snapshot snapshot = lifecycle_.snapshot();
+  if (snapshot.state == lifecycle::State::draining || snapshot.state == lifecycle::State::failed)
+  {
+    interrupt_active_client_sockets();
+  }
   join_handler_threads();
 }
 
@@ -367,6 +372,44 @@ void Vajra::Server::join_handler_threads()
     if (thread.joinable())
     {
       thread.join();
+    }
+  }
+}
+
+void Vajra::Server::register_active_client_fd(int client_fd)
+{
+  std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
+  active_client_fds_.insert(client_fd);
+}
+
+void Vajra::Server::unregister_active_client_fd(int client_fd)
+{
+  std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
+  active_client_fds_.erase(client_fd);
+}
+
+void Vajra::Server::interrupt_active_client_sockets()
+{
+  std::vector<int> active_client_fds;
+  {
+    std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
+    active_client_fds.reserve(active_client_fds_.size());
+    for (int client_fd : active_client_fds_)
+    {
+      active_client_fds.push_back(client_fd);
+    }
+  }
+
+  for (int client_fd : active_client_fds)
+  {
+    if (shutdown(client_fd, SHUT_RDWR) == 0)
+    {
+      continue;
+    }
+
+    if (errno == ENOTCONN || errno == EINVAL || errno == EBADF)
+    {
+      continue;
     }
   }
 }
@@ -451,6 +494,7 @@ void Vajra::Server::start()
           shutdown_begin_callback_();
         }
         lifecycle_.request_stop(lifecycle::StopReason::signal_shutdown);
+        interrupt_active_client_sockets();
         break;
       }
 
@@ -513,6 +557,7 @@ void Vajra::Server::start()
               shutdown_begin_callback_();
             }
             lifecycle_.request_stop(lifecycle::StopReason::signal_shutdown);
+            interrupt_active_client_sockets();
           }
           break;
         }
@@ -532,11 +577,13 @@ void Vajra::Server::start()
       }
 
       reap_completed_handler_threads();
+      register_active_client_fd(client_fd);
 
       const std::size_t previous_active_connections = active_connection_count_.fetch_add(1, std::memory_order_acq_rel);
       if (previous_active_connections >= max_connections_)
       {
         active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
+        unregister_active_client_fd(client_fd);
         log_connection_rejected(max_connections_);
         close(client_fd);
         continue;
@@ -562,6 +609,7 @@ void Vajra::Server::start()
           {
             log_handler_thread_failure(client_addr, client_fd, "unknown exception");
           }
+          unregister_active_client_fd(client_fd);
           completed->store(true, std::memory_order_release);
         });
       }
@@ -571,9 +619,10 @@ void Vajra::Server::start()
         if (!handler_threads_.empty() && handler_threads_.back().thread.joinable() == false &&
             handler_threads_.back().completed == completed)
         {
-          handler_threads_.pop_back();
+            handler_threads_.pop_back();
         }
         active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
+        unregister_active_client_fd(client_fd);
         close(client_fd);
         throw;
       }
@@ -582,12 +631,22 @@ void Vajra::Server::start()
   catch (...)
   {
     close_listener_fd(false);
+    const lifecycle::Snapshot snapshot = lifecycle_.snapshot();
+    if (snapshot.state == lifecycle::State::draining || snapshot.state == lifecycle::State::failed)
+    {
+      interrupt_active_client_sockets();
+    }
     join_handler_threads();
     lifecycle_.finish_stop();
     throw;
   }
 
   close_listener_fd(false);
+  const lifecycle::Snapshot snapshot = lifecycle_.snapshot();
+  if (snapshot.state == lifecycle::State::draining || snapshot.state == lifecycle::State::failed)
+  {
+    interrupt_active_client_sockets();
+  }
   join_handler_threads();
   lifecycle_.finish_stop();
 }
@@ -600,6 +659,7 @@ void Vajra::Server::stop()
   }
   lifecycle_.request_stop(lifecycle::StopReason::programmatic_stop);
   close_listener_fd(true);
+  interrupt_active_client_sockets();
 }
 
 Vajra::lifecycle::Snapshot Vajra::Server::lifecycle_snapshot() const

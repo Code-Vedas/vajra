@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <functional>
 #include <atomic>
+#include <unordered_set>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -71,10 +72,15 @@ namespace Vajra
     std::function<void()> shutdown_begin_callback_;
     std::mutex handler_threads_mutex_;
     std::vector<HandlerThread> handler_threads_;
+    std::mutex active_client_fds_mutex_;
+    std::unordered_set<int> active_client_fds_;
 
     void close_listener_fd(bool interrupt_accept);
     void join_handler_threads();
     void reap_completed_handler_threads();
+    void register_active_client_fd(int client_fd);
+    void unregister_active_client_fd(int client_fd);
+    void interrupt_active_client_sockets();
   };
 }
 

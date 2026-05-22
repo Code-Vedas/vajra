@@ -67,6 +67,39 @@ RSpec.describe 'Vajra lifecycle', :e2e, :integration do # rubocop:disable RSpec/
     )
   end
 
+  it 'interrupts an idle keep-alive socket during Ctrl-C drain' do
+    shutdown = keep_alive_shutdown_with_open_socket
+
+    expect(shutdown[:exitstatus]).to eq(0)
+    expect(shutdown[:response]).to include('HTTP/1.1 200 OK')
+    expect(shutdown[:socket_closed]).to be(true)
+    expect(shutdown[:immediate_output]).to include('- Gracefully shutting down workers...')
+    expect(shutdown[:output]).to include(
+      '- Gracefully shutting down workers...',
+      '=== vajra shutdown:',
+      '- Goodbye!'
+    )
+  end
+
+  it 'interrupts a partial next request instead of waiting for request head timeout during Ctrl-C drain' do
+    shutdown = keep_alive_shutdown_with_open_socket(
+      followup_chunks: [
+        "GET /next HTTP/1.1\r\n",
+        "Host: localhost\r\n"
+      ]
+    )
+
+    expect(shutdown[:exitstatus]).to eq(0)
+    expect(shutdown[:response]).to include('HTTP/1.1 200 OK')
+    expect(shutdown[:socket_closed]).to be(true)
+    expect(shutdown[:immediate_output]).to include('- Gracefully shutting down workers...')
+    expect(shutdown[:output]).to include(
+      '- Gracefully shutting down workers...',
+      '=== vajra shutdown:',
+      '- Goodbye!'
+    )
+  end
+
   it 'supports programmatic Vajra.stop and releases the listener' do
     shutdown = programmatic_shutdown
 

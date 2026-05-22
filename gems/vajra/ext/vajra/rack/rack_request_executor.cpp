@@ -1205,7 +1205,6 @@ namespace
 
     const GlobalQueuedWorkerProcessRackExecutionTransport &transport_;
     std::shared_ptr<PendingRequest> pending_request_;
-    std::string buffered_request_body_;
     std::unique_ptr<Vajra::rack::RackExecutionSession> live_session_;
     bool finished_ = false;
     bool canceled_ = false;
@@ -1635,13 +1634,8 @@ namespace
   void QueuedWorkerProcessRackExecutionSession::append_request_body_chunk(const std::string &chunk)
   {
     ensure_request_still_live();
-    if (live_session_)
-    {
-      live_session_->append_request_body_chunk(chunk);
-      return;
-    }
-
-    buffered_request_body_.append(chunk);
+    ensure_live_session_started();
+    live_session_->append_request_body_chunk(chunk);
   }
 
   std::optional<Vajra::response::Response> QueuedWorkerProcessRackExecutionSession::finish()
@@ -1697,11 +1691,6 @@ namespace
           transport_.slot_for(worker_index)->channels.at(channel_index).transport->start(
               pending_request_->env_entries,
               pending_request_->client_fd);
-      if (!buffered_request_body_.empty())
-      {
-        live_session_->append_request_body_chunk(buffered_request_body_);
-        buffered_request_body_.clear();
-      }
     }
     catch (...)
     {

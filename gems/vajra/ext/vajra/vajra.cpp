@@ -157,6 +157,8 @@ namespace
     std::string invalid_option_name;
   };
 
+  std::string trim_ascii_whitespace(std::string value);
+
   void handle_signal(int sig)
   {
     if (sig == SIGINT || sig == SIGTERM)
@@ -835,7 +837,8 @@ namespace
       return default_value;
     }
 
-    return env_value;
+    const std::string trimmed_value = trim_ascii_whitespace(env_value);
+    return trimmed_value.empty() ? default_value : trimmed_value;
   }
 
   std::string configured_string_from_ruby(

@@ -522,6 +522,18 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     expect(failure[:output]).to include('Expected an integer between 1 and 2147483647')
   end
 
+  it 'trims native string environment overrides before validation' do
+    request = request_response_with_env(
+      env: {
+        'VAJRA_SCHEDULER_POLICY' => " least_loaded \n",
+        'VAJRA_LOG_LEVEL' => " debug\t"
+      }
+    )
+
+    expect(request[:exitstatus]).to eq(0)
+    expect(request[:response]).to include('HTTP/1.1 200 OK')
+  end
+
   it 'emits internal lifecycle boot events only when debug logging is enabled' do
     request = request_response_from_inline_start(
       env: {

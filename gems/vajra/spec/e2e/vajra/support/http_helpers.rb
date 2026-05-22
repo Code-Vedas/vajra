@@ -104,6 +104,23 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
     end
   end
 
+  def request_response_with_env(env:, port: disposable_listener_port)
+    Open3.popen2e(vajra_env(port:).merge(env), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      selected_port = wait_for_banner(output)
+
+      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+      socket.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+      response = read_raw_http_response(socket, wait_thread:, output:, request_label: 'request_response_with_env')
+      socket.close
+
+      status = stop_process(wait_thread)
+
+      { exitstatus: status.exitstatus, response: response, port: selected_port, output: output.read }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
   def request_response_from_inline_start(env:, timeout: 15)
     Open3.popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       startup_output = []

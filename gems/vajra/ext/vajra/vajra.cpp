@@ -12,6 +12,7 @@
 #include <csignal>
 #include <signal.h>
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cerrno>
 #include <cctype>

@@ -1348,12 +1348,14 @@ namespace VajraNative
     void clear_worker_runtime()
     {
       std::vector<int> request_channel_fds;
-      const std::lock_guard<std::mutex> lock(server_mutex);
-      request_channel_fds = std::move(worker_request_channel_fds);
-      worker_pids.clear();
-      worker_request_channel_fds.clear();
-      stop_requested = false;
-      worker_startup_in_progress = false;
+      {
+        const std::lock_guard<std::mutex> lock(server_mutex);
+        request_channel_fds = std::move(worker_request_channel_fds);
+        worker_pids.clear();
+        worker_request_channel_fds.clear();
+        stop_requested = false;
+        worker_startup_in_progress = false;
+      }
 
       for (int request_channel_fd : request_channel_fds)
       {

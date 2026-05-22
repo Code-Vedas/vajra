@@ -6,3 +6,9 @@
 # LICENSE file in the root directory of this source tree.
 
 require_relative '../../rackup/handler/vajra'
+
+module Rack
+  module Handler
+    Vajra = Rackup::Handler::Vajra
+  end
+end

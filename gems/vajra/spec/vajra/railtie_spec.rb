@@ -58,6 +58,7 @@ RSpec.describe 'Vajra Rails integration', :aggregate_failures do # rubocop:disab
     require 'rack/handler/vajra'
 
     expect(Rackup::Handler.get(:vajra)).to eq(Rackup::Handler::Vajra)
+    expect(Rack::Handler::Vajra).to eq(Rackup::Handler::Vajra)
   end
 
   it 'exposes rackup handler option help' do

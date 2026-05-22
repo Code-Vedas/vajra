@@ -73,8 +73,8 @@ When `bin/rails server` runs:
 3. Rails loads `config/application.rb` and `config/environment.rb`.
 4. `Rails.application` is installed onto Vajra's Rack seam.
 5. Vajra reads `config/vajra.rb` for server-owned settings.
-6. Vajra starts the native runtime, preloads the Ruby master, forks one worker,
-   and serves requests through worker execution.
+6. Vajra starts the native runtime, preloads the Ruby master, forks the configured
+   workers, defaulting to one, and serves requests through worker execution.
 
 That keeps the Rails operator workflow familiar while moving transport and
 runtime ownership into Vajra.

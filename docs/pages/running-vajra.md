@@ -33,7 +33,7 @@ through the native runtime.
 - logs to stdout and stderr
 - exits on interrupt
 - uses the compiled native extension as the runtime entrypoint
-- uses one Ruby worker for application execution
+- uses the configured Ruby workers for application execution, defaulting to one
 
 ## Boot Chain
 
@@ -47,7 +47,8 @@ The runtime boot path is direct:
 5. the package installs the selected Rack or Rails application.
 6. the package transfers control to `Vajra.start`.
 7. Ruby preload boot runs in the main process.
-8. the main process forks one Ruby worker and waits for worker readiness.
+8. the main process forks the configured Ruby workers, defaulting to one, and waits
+   for worker readiness.
 9. the native runtime opens the listener, accepts connections, and writes the
    response while the worker executes Rack requests.
 

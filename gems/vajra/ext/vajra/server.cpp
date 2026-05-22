@@ -211,6 +211,13 @@ namespace
     log_message("error", message.str(), std::cerr);
   }
 
+  void log_poll_listener_event(short revents)
+  {
+    std::ostringstream message;
+    message << "poll reported listener error: revents=" << revents;
+    log_message("error", message.str(), std::cerr);
+  }
+
   void log_connection_rejected(std::size_t max_connections)
   {
     std::ostringstream message;
@@ -469,6 +476,17 @@ void Vajra::Server::start()
         }
 
         log_poll_failed(std::strerror(errno));
+        continue;
+      }
+      if ((listener_descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
+      {
+        log_poll_listener_event(listener_descriptor.revents);
+        lifecycle_.mark_failed(lifecycle::StopReason::listener_failure);
+        break;
+      }
+      if ((listener_descriptor.revents & POLLIN) == 0)
+      {
+        reap_completed_handler_threads();
         continue;
       }
 

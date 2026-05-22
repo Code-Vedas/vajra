@@ -16,6 +16,23 @@ module VajraE2EHelpers
   LISTENER_HOST = '127.0.0.1'
   LISTENER_BIND_HOST = '0.0.0.0'
   HTTP_RESPONSE_READ_TIMEOUT_SECONDS = 2
+  RUNTIME_ENV_OVERRIDE_KEYS = %w[
+    VAJRA_HOST
+    VAJRA_PORT
+    VAJRA_WORKERS
+    VAJRA_THREADS
+    VAJRA_QUEUE_CAPACITY
+    VAJRA_SCHEDULER_POLICY
+    VAJRA_MAX_REQUEST_HEAD_BYTES
+    VAJRA_REQUEST_TIMEOUT
+    VAJRA_REQUEST_HEAD_TIMEOUT
+    VAJRA_FIRST_DATA_TIMEOUT
+    VAJRA_PERSISTENT_TIMEOUT
+    VAJRA_WORKER_TIMEOUT
+    VAJRA_LOG_LEVEL
+    WEB_CONCURRENCY
+    MAX_THREADS
+  ].freeze
   # Keep this synchronized with kRequestHeadReadTimeoutSeconds in
   # ext/vajra/request/request_head_reader.cpp.
   REQUEST_HEAD_READ_TIMEOUT_SECONDS = 5
@@ -42,11 +59,7 @@ module VajraE2EHelpers
   end
 
   def vajra_env(host: nil, port: nil, max_request_head_bytes: nil)
-    {
-      'VAJRA_HOST' => nil,
-      'VAJRA_PORT' => nil,
-      'VAJRA_MAX_REQUEST_HEAD_BYTES' => nil
-    }.tap do |env|
+    RUNTIME_ENV_OVERRIDE_KEYS.to_h { |key| [key, nil] }.tap do |env|
       env['VAJRA_HOST'] = host unless host.nil?
       env['VAJRA_PORT'] = port.to_s unless port.nil?
       env['VAJRA_MAX_REQUEST_HEAD_BYTES'] = max_request_head_bytes.to_s unless max_request_head_bytes.nil?

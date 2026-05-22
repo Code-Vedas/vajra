@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -1274,6 +1275,68 @@ namespace VajraNative
       }
     }
 
+    std::size_t checked_multiply(std::size_t left, std::size_t right, const char *error_message)
+    {
+      if (left != 0 && right > (std::numeric_limits<std::size_t>::max() / left))
+      {
+        throw std::runtime_error(error_message);
+      }
+
+      return left * right;
+    }
+
+    std::size_t checked_add(std::size_t left, std::size_t right, const char *error_message)
+    {
+      if (right > (std::numeric_limits<std::size_t>::max() - left))
+      {
+        throw std::runtime_error(error_message);
+      }
+
+      return left + right;
+    }
+
+    void validate_worker_channel_capacity(int workers, std::size_t max_threads)
+    {
+      constexpr std::size_t kRuntimeFdReserve = 32;
+      const std::size_t total_request_channels = checked_multiply(
+          static_cast<std::size_t>(workers),
+          max_threads,
+          "invalid workers/threads combination: workers * max_threads is too large");
+      const std::size_t request_channel_fds = checked_multiply(
+          total_request_channels,
+          static_cast<std::size_t>(2),
+          "invalid workers/threads combination: request channel fd count is too large");
+      const std::size_t readiness_pipe_fds = checked_multiply(
+          static_cast<std::size_t>(workers),
+          static_cast<std::size_t>(2),
+          "invalid workers/threads combination: worker bootstrap fd count is too large");
+      const std::size_t total_runtime_fds = checked_add(
+          request_channel_fds,
+          readiness_pipe_fds,
+          "invalid workers/threads combination: required fd count is too large");
+      const std::size_t required_fds = checked_add(
+          total_runtime_fds,
+          kRuntimeFdReserve,
+          "invalid workers/threads combination: required fd count is too large");
+
+      rlimit fd_limit{};
+      if (getrlimit(RLIMIT_NOFILE, &fd_limit) != 0 || fd_limit.rlim_cur == RLIM_INFINITY)
+      {
+        return;
+      }
+
+      const std::size_t available_fds = static_cast<std::size_t>(fd_limit.rlim_cur);
+      if (required_fds > available_fds)
+      {
+        throw std::runtime_error(
+            "invalid workers/threads combination: workers * max_threads would allocate " +
+            std::to_string(total_request_channels) + " request channels (" +
+            std::to_string(request_channel_fds) + " request-channel fds plus " +
+            std::to_string(readiness_pipe_fds) + " bootstrap-pipe fds), which exceeds the process fd limit of " +
+            std::to_string(available_fds) + ". Lower workers or threads, or raise the fd limit.");
+      }
+    }
+
     void set_worker_runtime(pid_t pid, int request_channel_fd)
     {
       const std::lock_guard<std::mutex> lock(server_mutex);
@@ -1694,6 +1757,7 @@ namespace VajraNative
       {
         throw std::runtime_error("unsupported scheduler_policy: " + scheduler_policy);
       }
+      validate_worker_channel_capacity(workers, max_threads);
       const bool debug_logging = debug_logging_enabled(log_level);
       log_runtime_banner_start(host, port, workers, min_threads, max_threads);
       const BootContractResult master_boot_result = run_boot_contract(

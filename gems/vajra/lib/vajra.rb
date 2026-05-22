@@ -119,6 +119,7 @@ module Vajra
 
     alias __native_start__ start
     alias __native_stop__ stop
+    private :__native_start__, :__native_stop__
 
     def configure(&block)
       config_target = CLI.current_config_target

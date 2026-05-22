@@ -480,6 +480,15 @@ void Vajra::Server::start()
       }
       if ((listener_descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
       {
+        const lifecycle::Snapshot error_snapshot = lifecycle_.snapshot();
+        if (error_snapshot.state == lifecycle::State::draining ||
+            error_snapshot.state == lifecycle::State::failed ||
+            server_fd_.load() < 0 ||
+            VajraNative::shutdown_requested())
+        {
+          break;
+        }
+
         log_poll_listener_event(listener_descriptor.revents);
         lifecycle_.mark_failed(lifecycle::StopReason::listener_failure);
         break;

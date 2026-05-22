@@ -429,7 +429,9 @@ void Vajra::Server::interrupt_active_client_sockets()
       {
         continue;
       }
-      if (errno == ENOTCONN || errno == EINVAL || errno == EBADF)
+      // Ignore shutdown-time races where a handler closes the socket or the fd
+      // is recycled before this best-effort interrupt reaches shutdown(2).
+      if (errno == ENOTCONN || errno == EINVAL || errno == EBADF || errno == ENOTSOCK)
       {
         break;
       }

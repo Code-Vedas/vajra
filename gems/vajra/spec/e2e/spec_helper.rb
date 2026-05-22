@@ -33,8 +33,8 @@ module VajraE2EHelpers
     WEB_CONCURRENCY
     MAX_THREADS
   ].freeze
-  # Keep this synchronized with kRequestHeadReadTimeoutSeconds in
-  # ext/vajra/request/request_head_reader.cpp.
+  # Keep this synchronized with the default request_head_timeout in
+  # ext/vajra/vajra.hpp and ext/vajra/request/request_processor.hpp.
   REQUEST_HEAD_READ_TIMEOUT_SECONDS = 5
   IDLE_KEEP_ALIVE_CLOSE_TIMEOUT_SECONDS = REQUEST_HEAD_READ_TIMEOUT_SECONDS + 1
 

@@ -13,15 +13,23 @@
 #include "ruby/encoding.h"
 #include "ruby/thread.h"
 
-#include <array>
+#include <algorithm>
 #include <atomic>
+#include <array>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
+#include <chrono>
+#include <functional>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <poll.h>
 #include <stdexcept>
 #include <string>
+#include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <utility>
@@ -72,13 +80,22 @@ namespace
 
   constexpr std::size_t kInlineBodyChunkBytes =
       static_cast<std::size_t>(Vajra::ipc::kMaxFramePayloadLength) - 1;
-
+  constexpr std::size_t kMillisecondsPerSecond = 1000;
   struct DecodedResponseMetadata
   {
     ResponseMetadataKind kind = ResponseMetadataKind::no_response;
     std::optional<Vajra::response::Response> response;
     std::string error_message;
   };
+
+  int clamp_poll_timeout_milliseconds(std::size_t timeout_seconds)
+  {
+    constexpr std::size_t kMaxPollTimeoutMilliseconds = static_cast<std::size_t>(std::numeric_limits<int>::max());
+    const std::size_t timeout_milliseconds = timeout_seconds > (kMaxPollTimeoutMilliseconds / kMillisecondsPerSecond)
+                                                 ? kMaxPollTimeoutMilliseconds
+                                                 : timeout_seconds * kMillisecondsPerSecond;
+    return static_cast<int>(timeout_milliseconds);
+  }
 
   void write_all_or_throw(int fd, const void *buffer, std::size_t length)
   {
@@ -107,6 +124,71 @@ namespace
     std::size_t read_bytes = 0;
     while (read_bytes < length)
     {
+      const ssize_t result = read(fd, bytes + read_bytes, length - read_bytes);
+      if (result == 0)
+      {
+        if (read_bytes == 0)
+        {
+          return false;
+        }
+
+        throw std::runtime_error("request channel closed unexpectedly");
+      }
+
+      if (result < 0)
+      {
+        if (errno == EINTR)
+        {
+          continue;
+        }
+
+        throw std::runtime_error("request channel read failed");
+      }
+
+      read_bytes += static_cast<std::size_t>(result);
+    }
+
+    return true;
+  }
+
+  bool wait_for_fd_readable(int fd, int timeout_milliseconds)
+  {
+    short events = POLLIN | POLLERR | POLLHUP;
+#ifdef POLLRDHUP
+    events = static_cast<short>(events | POLLRDHUP);
+#endif
+    pollfd descriptor{fd, events, 0};
+    for (;;)
+    {
+      const int result = poll(&descriptor, 1, timeout_milliseconds);
+      if (result > 0)
+      {
+        return true;
+      }
+      if (result == 0)
+      {
+        return false;
+      }
+      if (errno == EINTR)
+      {
+        continue;
+      }
+
+      throw std::runtime_error("request channel readiness poll failed");
+    }
+  }
+
+  bool read_exact_or_eof_with_timeout(int fd, void *buffer, std::size_t length, int timeout_milliseconds)
+  {
+    auto *bytes = static_cast<std::uint8_t *>(buffer);
+    std::size_t read_bytes = 0;
+    while (read_bytes < length)
+    {
+      if (!wait_for_fd_readable(fd, timeout_milliseconds))
+      {
+        return false;
+      }
+
       const ssize_t result = read(fd, bytes + read_bytes, length - read_bytes);
       if (result == 0)
       {
@@ -229,6 +311,86 @@ namespace
 
     header = *decoded_header;
     return true;
+  }
+
+  enum class TimedReadResult
+  {
+    ready,
+    eof,
+    timeout,
+  };
+
+  TimedReadResult read_frame_with_timeout(int fd, Vajra::ipc::FrameHeader &header, std::string &payload, int timeout_milliseconds)
+  {
+    std::array<std::uint8_t, Vajra::ipc::kFrameHeaderSize> encoded_header{};
+    if (!read_exact_or_eof_with_timeout(fd, encoded_header.data(), encoded_header.size(), timeout_milliseconds))
+    {
+      std::uint8_t probe = 0;
+      const ssize_t probe_result = recv(fd, &probe, 1, MSG_PEEK | MSG_DONTWAIT);
+      if (probe_result == 0)
+      {
+        return TimedReadResult::eof;
+      }
+      if (probe_result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+      {
+        return TimedReadResult::timeout;
+      }
+      if (probe_result < 0 && errno == EINTR)
+      {
+        return TimedReadResult::timeout;
+      }
+      return TimedReadResult::eof;
+    }
+
+    Vajra::ipc::HeaderDecodeError error = Vajra::ipc::HeaderDecodeError::none;
+    Vajra::ipc::HeaderDecodeWarning warning = Vajra::ipc::HeaderDecodeWarning::none;
+    const std::optional<Vajra::ipc::FrameHeader> decoded_header =
+        Vajra::ipc::decode_frame_header(encoded_header, error, warning);
+    if (!decoded_header.has_value())
+    {
+      throw std::runtime_error("request channel received an invalid frame header");
+    }
+
+    if (warning != Vajra::ipc::HeaderDecodeWarning::none)
+    {
+      throw std::runtime_error("request channel received an unsupported frame header");
+    }
+
+    payload.assign(decoded_header->payload_length, '\0');
+    if (decoded_header->payload_length > 0 &&
+        !read_exact_or_eof_with_timeout(fd, payload.data(), decoded_header->payload_length, timeout_milliseconds))
+    {
+      throw std::runtime_error("request channel timed out or closed before payload body");
+    }
+
+    header = *decoded_header;
+    return TimedReadResult::ready;
+  }
+
+  bool client_disconnected(int client_fd)
+  {
+    if (client_fd < 0)
+    {
+      return false;
+    }
+
+    char byte = 0;
+    const ssize_t result = recv(client_fd, &byte, sizeof(byte), MSG_PEEK | MSG_DONTWAIT);
+    if (result == 0)
+    {
+      return true;
+    }
+    if (result < 0)
+    {
+      if (errno == EINTR)
+      {
+        return false;
+      }
+
+      return errno != EAGAIN && errno != EWOULDBLOCK;
+    }
+
+    return false;
   }
 
   std::string exception_message(VALUE exception);
@@ -849,9 +1011,15 @@ namespace
   class WorkerProcessRackExecutionSession final : public Vajra::rack::RackExecutionSession
   {
   public:
-    WorkerProcessRackExecutionSession(int channel_fd, std::mutex &channel_mutex)
+    WorkerProcessRackExecutionSession(
+        int channel_fd,
+        std::mutex &channel_mutex,
+        std::size_t worker_timeout_seconds,
+        std::function<void()> timeout_handler)
         : channel_fd_(channel_fd),
-          channel_lock_(channel_mutex)
+          channel_lock_(channel_mutex),
+          worker_timeout_milliseconds_(clamp_poll_timeout_milliseconds(worker_timeout_seconds)),
+          timeout_handler_(std::move(timeout_handler))
     {
     }
 
@@ -901,9 +1069,15 @@ namespace
 
       Vajra::ipc::FrameHeader header{};
       std::string payload;
-      if (!read_frame(channel_fd_, header, payload))
+      const TimedReadResult metadata_result =
+          read_frame_with_timeout(channel_fd_, header, payload, worker_timeout_milliseconds_);
+      if (metadata_result != TimedReadResult::ready)
       {
-        throw std::runtime_error("worker request channel closed before response metadata");
+        timeout_handler_();
+        throw std::runtime_error(
+            metadata_result == TimedReadResult::timeout
+                ? "worker request channel timed out before response metadata"
+                : "worker request channel closed before response metadata");
       }
       if (header.family != Vajra::ipc::FrameFamily::response_metadata_result)
       {
@@ -926,9 +1100,15 @@ namespace
       std::optional<Vajra::response::Response> response = std::move(metadata.response);
       for (;;)
       {
-        if (!read_frame(channel_fd_, header, payload))
+        const TimedReadResult body_result =
+            read_frame_with_timeout(channel_fd_, header, payload, worker_timeout_milliseconds_);
+        if (body_result != TimedReadResult::ready)
         {
-          throw std::runtime_error("worker request channel closed before response body completion");
+          timeout_handler_();
+          throw std::runtime_error(
+              body_result == TimedReadResult::timeout
+                  ? "worker request channel timed out before response body completion"
+                  : "worker request channel closed before response body completion");
         }
         if (header.family != Vajra::ipc::FrameFamily::response_body_continuation)
         {
@@ -949,21 +1129,33 @@ namespace
   private:
     int channel_fd_;
     std::unique_lock<std::mutex> channel_lock_;
+    int worker_timeout_milliseconds_;
+    std::function<void()> timeout_handler_;
     bool finished_ = false;
   };
 
   class WorkerProcessRackExecutionTransport final : public Vajra::rack::RackExecutionTransport
   {
   public:
-    explicit WorkerProcessRackExecutionTransport(int channel_fd)
-        : channel_fd_(channel_fd)
+    WorkerProcessRackExecutionTransport(
+        int channel_fd,
+        std::size_t worker_timeout_seconds,
+        std::function<void()> timeout_handler)
+        : channel_fd_(channel_fd),
+          worker_timeout_seconds_(worker_timeout_seconds),
+          timeout_handler_(std::move(timeout_handler))
     {
     }
 
     std::unique_ptr<Vajra::rack::RackExecutionSession> start(
-        const std::vector<Vajra::request::RackEnvEntry> &env_entries) const override
+        const std::vector<Vajra::request::RackEnvEntry> &env_entries,
+        int) const override
     {
-      auto session = std::make_unique<WorkerProcessRackExecutionSession>(channel_fd_, channel_mutex_);
+      auto session = std::make_unique<WorkerProcessRackExecutionSession>(
+          channel_fd_,
+          channel_mutex_,
+          worker_timeout_seconds_,
+          timeout_handler_);
       session->send_request_start(env_entries);
       return session;
     }
@@ -977,8 +1169,777 @@ namespace
 
   private:
     int channel_fd_;
+    std::size_t worker_timeout_seconds_;
+    std::function<void()> timeout_handler_;
     mutable std::mutex channel_mutex_;
   };
+
+  void log_scheduler_debug_event(const std::string &message, bool debug_logging)
+  {
+    if (!debug_logging)
+    {
+      return;
+    }
+
+    std::cout << "[Vajra][scheduler] " << message << std::endl;
+  }
+
+  struct PendingRequest;
+  class GlobalQueuedWorkerProcessRackExecutionTransport;
+
+  class QueuedWorkerProcessRackExecutionSession final : public Vajra::rack::RackExecutionSession
+  {
+  public:
+    QueuedWorkerProcessRackExecutionSession(
+        const GlobalQueuedWorkerProcessRackExecutionTransport &transport,
+        std::shared_ptr<PendingRequest> pending_request);
+    ~QueuedWorkerProcessRackExecutionSession() override;
+
+    void append_request_body_chunk(const std::string &chunk) override;
+    std::optional<Vajra::response::Response> finish() override;
+
+  private:
+    void cancel() noexcept;
+    void ensure_live_session_started();
+    void ensure_request_still_live() const;
+
+    const GlobalQueuedWorkerProcessRackExecutionTransport &transport_;
+    std::shared_ptr<PendingRequest> pending_request_;
+    std::unique_ptr<Vajra::rack::RackExecutionSession> live_session_;
+    bool finished_ = false;
+    bool canceled_ = false;
+  };
+
+  struct PendingRequest
+  {
+    std::uint64_t request_id = 0;
+    int client_fd = -1;
+    std::vector<Vajra::request::RackEnvEntry> env_entries;
+    std::chrono::steady_clock::time_point deadline;
+    std::atomic_bool assigned = false;
+    std::atomic_bool released = false;
+    std::atomic_bool canceled = false;
+    std::atomic_bool timed_out = false;
+    std::atomic_bool client_gone = false;
+    std::size_t worker_index = 0;
+    std::size_t channel_index = 0;
+  };
+
+  class GlobalQueuedWorkerProcessRackExecutionTransport final : public Vajra::rack::RackExecutionTransport
+  {
+  public:
+    struct WorkerChannel
+    {
+      WorkerChannel(int fd, std::size_t worker_timeout_seconds, const std::function<void()> &timeout_handler)
+          : transport(std::make_shared<WorkerProcessRackExecutionTransport>(
+                fd,
+                worker_timeout_seconds,
+                timeout_handler))
+      {
+      }
+
+      std::shared_ptr<WorkerProcessRackExecutionTransport> transport;
+      bool busy = false;
+    };
+
+    struct WorkerSlot
+    {
+      WorkerSlot(std::vector<WorkerChannel> worker_channels, int worker_pid, std::size_t min_channel_count)
+          : channels(std::move(worker_channels)),
+            pid(worker_pid),
+            min_channels(std::min(min_channel_count, channels.size())),
+            active_channels(std::min(min_channel_count, channels.size()))
+      {
+      }
+
+      std::vector<WorkerChannel> channels;
+      int pid;
+      std::size_t min_channels;
+      std::size_t active_channels;
+      bool alive = true;
+    };
+
+    GlobalQueuedWorkerProcessRackExecutionTransport(
+        const std::vector<std::vector<int>> &worker_channel_fds,
+        const std::vector<int> &worker_pids,
+        std::size_t min_threads,
+        std::size_t queue_capacity,
+        std::size_t request_timeout_seconds,
+        std::size_t worker_timeout_seconds,
+        bool debug_logging)
+        : queue_capacity_(queue_capacity),
+          request_timeout_(std::chrono::seconds(request_timeout_seconds)),
+          debug_logging_(debug_logging)
+    {
+      if (worker_channel_fds.empty())
+      {
+        throw std::logic_error("worker request transport requires at least one channel");
+      }
+      if (worker_channel_fds.size() != worker_pids.size())
+      {
+        throw std::logic_error("worker request transport requires one pid per worker");
+      }
+
+      slots_.reserve(worker_channel_fds.size());
+      for (std::size_t worker_index = 0; worker_index < worker_channel_fds.size(); ++worker_index)
+      {
+        const std::vector<int> &channel_fds = worker_channel_fds[worker_index];
+        if (channel_fds.empty())
+        {
+          throw std::logic_error("worker request transport requires at least one channel per worker");
+        }
+
+        std::vector<WorkerChannel> worker_channels;
+        worker_channels.reserve(channel_fds.size());
+        for (int channel_fd : channel_fds)
+        {
+          worker_channels.emplace_back(
+              channel_fd,
+              worker_timeout_seconds,
+              [this, worker_index]() { mark_worker_timed_out(worker_index); });
+        }
+
+        slots_.push_back(std::make_shared<WorkerSlot>(
+            std::move(worker_channels),
+            worker_pids[worker_index],
+            min_threads));
+      }
+    }
+
+    std::unique_ptr<Vajra::rack::RackExecutionSession> start(
+        const std::vector<Vajra::request::RackEnvEntry> &env_entries,
+        int client_fd) const override
+    {
+      const std::shared_ptr<PendingRequest> pending_request = admit_request(env_entries, client_fd);
+      log_scheduler_debug_event(
+          "event=request_admitted policy=least_loaded request_id=" + std::to_string(pending_request->request_id) +
+              " queue_depth=" + std::to_string(queue_depth()) +
+              " queue_capacity=" + std::to_string(queue_capacity_),
+          debug_logging_);
+
+      return std::make_unique<QueuedWorkerProcessRackExecutionSession>(*this, pending_request);
+    }
+
+    std::optional<Vajra::response::Response> execute(
+        const std::vector<Vajra::request::RackEnvEntry> &env_entries,
+        const std::string &request_body) const override
+    {
+      std::unique_ptr<Vajra::rack::RackExecutionSession> session = start(env_entries, -1);
+      session->append_request_body_chunk(request_body);
+      return session->finish();
+    }
+
+    std::shared_ptr<WorkerSlot> slot_for(std::size_t worker_index) const
+    {
+      return slots_.at(worker_index);
+    }
+
+    std::pair<std::size_t, std::size_t> await_assignment(const std::shared_ptr<PendingRequest> &pending_request) const
+    {
+      std::unique_lock<std::mutex> lock(scheduler_mutex_);
+      while (!pending_request->assigned.load() &&
+             !pending_request->timed_out.load() &&
+             !pending_request->client_gone.load() &&
+             !pending_request->canceled.load())
+      {
+        prune_queue_locked();
+        if (pending_request->assigned.load() ||
+            pending_request->timed_out.load() ||
+            pending_request->client_gone.load() ||
+            pending_request->canceled.load())
+        {
+          break;
+        }
+
+        if (!pending_requests_.empty() && pending_requests_.front() == pending_request)
+        {
+          const std::optional<std::pair<std::size_t, std::size_t>> assignment = least_busy_channel_locked();
+          if (assignment.has_value())
+          {
+            const std::shared_ptr<WorkerSlot> slot = slot_for(assignment->first);
+            slot->channels[assignment->second].busy = true;
+            pending_request->assigned = true;
+            pending_request->worker_index = assignment->first;
+            pending_request->channel_index = assignment->second;
+            log_scheduler_debug_event(
+                "event=request_assigned policy=least_loaded request_id=" + std::to_string(pending_request->request_id) +
+                    " selected_worker=" + std::to_string(assignment->first) +
+                    " channel=" + std::to_string(assignment->second) +
+                    " inflight=" + std::to_string(inflight_count_locked(*slot)) +
+                    " queue_depth=" + std::to_string(pending_requests_.size() - 1),
+                debug_logging_);
+            pending_requests_.pop_front();
+            break;
+          }
+        }
+
+        if (pending_request->deadline <= std::chrono::steady_clock::now())
+        {
+          pending_request->timed_out = true;
+          log_scheduler_debug_event(
+              "event=request_wait_timeout request_id=" + std::to_string(pending_request->request_id),
+              debug_logging_);
+          erase_pending_request_locked(pending_request);
+          break;
+        }
+
+        scheduler_condition_.wait_until(lock, pending_request->deadline);
+      }
+
+      if (pending_request->timed_out.load())
+      {
+        throw Vajra::request::RequestTimeoutError("request timed out while waiting in the global queue");
+      }
+      if (pending_request->client_gone.load() || pending_request->canceled.load())
+      {
+        throw Vajra::request::RequestTimeoutError("request left the global queue before execution started");
+      }
+
+      return {pending_request->worker_index, pending_request->channel_index};
+    }
+
+    void release_channel(const std::shared_ptr<PendingRequest> &pending_request) const
+    {
+      bool expected = false;
+      if (!pending_request->released.compare_exchange_strong(expected, true))
+      {
+        return;
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(scheduler_mutex_);
+        const std::shared_ptr<WorkerSlot> slot = slot_for(pending_request->worker_index);
+        slot->channels.at(pending_request->channel_index).busy = false;
+        pending_request->assigned = false;
+        while (slot->active_channels > slot->min_channels &&
+               !slot->channels[slot->active_channels - 1].busy &&
+               pending_requests_.empty())
+        {
+          --slot->active_channels;
+        }
+      }
+      scheduler_condition_.notify_all();
+    }
+
+    void cancel_request(const std::shared_ptr<PendingRequest> &pending_request) const
+    {
+      bool release_assigned_channel = false;
+      {
+        std::lock_guard<std::mutex> lock(scheduler_mutex_);
+        if (pending_request->assigned.load())
+        {
+          release_assigned_channel = true;
+        }
+        else
+        {
+          pending_request->canceled = true;
+          erase_pending_request_locked(pending_request);
+        }
+      }
+      if (release_assigned_channel)
+      {
+        release_channel(pending_request);
+        return;
+      }
+      scheduler_condition_.notify_all();
+    }
+
+  private:
+    static std::optional<std::size_t> first_available_channel_index_locked(const WorkerSlot &slot)
+    {
+      for (std::size_t index = 0; index < slot.active_channels; ++index)
+      {
+        if (!slot.channels[index].busy)
+        {
+          return index;
+        }
+      }
+
+      return std::nullopt;
+    }
+
+    static std::size_t inflight_count_locked(const WorkerSlot &slot)
+    {
+      return static_cast<std::size_t>(std::count_if(
+          slot.channels.begin(),
+          slot.channels.end(),
+          [](const WorkerChannel &channel) { return channel.busy; }));
+    }
+
+    std::shared_ptr<PendingRequest> admit_request(
+        const std::vector<Vajra::request::RackEnvEntry> &env_entries,
+        int client_fd) const
+    {
+      std::lock_guard<std::mutex> lock(scheduler_mutex_);
+      prune_queue_locked();
+      if (pending_requests_.size() >= queue_capacity_)
+      {
+        log_scheduler_debug_event(
+            "event=queue_capacity_reached policy=least_loaded queue_capacity=" + std::to_string(queue_capacity_),
+            debug_logging_);
+        throw Vajra::request::QueueCapacityError(
+            "request admission rejected because the global queue reached its hard capacity");
+      }
+
+      auto pending_request = std::make_shared<PendingRequest>();
+      pending_request->request_id = next_request_id_++;
+      pending_request->client_fd = client_fd;
+      pending_request->env_entries = env_entries;
+      pending_request->deadline = std::chrono::steady_clock::now() + request_timeout_;
+      pending_requests_.push_back(pending_request);
+      scheduler_condition_.notify_all();
+      return pending_request;
+    }
+
+    void mark_worker_timed_out(std::size_t worker_index) const
+    {
+      std::lock_guard<std::mutex> lock(scheduler_mutex_);
+      const std::shared_ptr<WorkerSlot> slot = slot_for(worker_index);
+      if (!slot->alive)
+      {
+        return;
+      }
+
+      slot->alive = false;
+      log_scheduler_debug_event(
+          "event=worker_timeout worker_index=" + std::to_string(worker_index) +
+              " worker_pid=" + std::to_string(slot->pid),
+          debug_logging_);
+      kill(slot->pid, SIGKILL);
+      scheduler_condition_.notify_all();
+    }
+
+    std::optional<std::pair<std::size_t, std::size_t>> least_busy_channel_locked() const
+    {
+      std::optional<std::pair<std::size_t, std::size_t>> best_assignment;
+      std::size_t best_worker_load = std::numeric_limits<std::size_t>::max();
+      const std::size_t worker_count = slots_.size();
+
+      for (std::size_t offset = 0; offset < worker_count; ++offset)
+      {
+        const std::size_t worker_index = (next_preferred_worker_ + offset) % worker_count;
+        const std::shared_ptr<WorkerSlot> slot = slots_[worker_index];
+        if (!slot->alive)
+        {
+          continue;
+        }
+
+        std::optional<std::size_t> channel_index = first_available_channel_index_locked(*slot);
+        if (!channel_index.has_value() && slot->active_channels < slot->channels.size())
+        {
+          ++slot->active_channels;
+          channel_index = first_available_channel_index_locked(*slot);
+        }
+        if (!channel_index.has_value())
+        {
+          continue;
+        }
+
+        const std::size_t worker_load = inflight_count_locked(*slot);
+        if (!best_assignment.has_value() || worker_load < best_worker_load)
+        {
+          best_assignment = std::make_pair(worker_index, *channel_index);
+          best_worker_load = worker_load;
+        }
+      }
+
+      if (best_assignment.has_value())
+      {
+        next_preferred_worker_ = (best_assignment->first + 1) % worker_count;
+      }
+
+      return best_assignment;
+    }
+
+    void prune_queue_locked() const
+    {
+      const auto now = std::chrono::steady_clock::now();
+      for (const auto &pending_request : pending_requests_)
+      {
+        if (pending_request->assigned.load() ||
+            pending_request->canceled.load() ||
+            pending_request->timed_out.load() ||
+            pending_request->client_gone.load())
+        {
+          continue;
+        }
+        if (pending_request->deadline <= now)
+        {
+          pending_request->timed_out = true;
+          log_scheduler_debug_event(
+              "event=request_wait_timeout request_id=" + std::to_string(pending_request->request_id),
+              debug_logging_);
+          continue;
+        }
+        if (client_disconnected(pending_request->client_fd))
+        {
+          pending_request->client_gone = true;
+          log_scheduler_debug_event(
+              "event=request_client_disconnected request_id=" + std::to_string(pending_request->request_id),
+              debug_logging_);
+        }
+      }
+
+      pending_requests_.erase(
+          std::remove_if(
+              pending_requests_.begin(),
+              pending_requests_.end(),
+              [](const std::shared_ptr<PendingRequest> &pending_request) {
+                return pending_request->canceled.load() ||
+                       pending_request->timed_out.load() ||
+                       pending_request->client_gone.load();
+              }),
+          pending_requests_.end());
+    }
+
+    void erase_pending_request_locked(const std::shared_ptr<PendingRequest> &pending_request) const
+    {
+      pending_requests_.erase(
+          std::remove(pending_requests_.begin(), pending_requests_.end(), pending_request),
+          pending_requests_.end());
+    }
+
+    std::size_t queue_depth() const
+    {
+      std::lock_guard<std::mutex> lock(scheduler_mutex_);
+      return pending_requests_.size();
+    }
+
+    std::vector<std::shared_ptr<WorkerSlot>> slots_;
+    std::size_t queue_capacity_;
+    std::chrono::steady_clock::duration request_timeout_;
+    bool debug_logging_;
+    mutable std::mutex scheduler_mutex_;
+    mutable std::condition_variable scheduler_condition_;
+    mutable std::deque<std::shared_ptr<PendingRequest>> pending_requests_;
+    mutable std::uint64_t next_request_id_ = 0;
+    mutable std::size_t next_preferred_worker_ = 0;
+
+    friend class QueuedWorkerProcessRackExecutionSession;
+  };
+
+  QueuedWorkerProcessRackExecutionSession::QueuedWorkerProcessRackExecutionSession(
+      const GlobalQueuedWorkerProcessRackExecutionTransport &transport,
+      std::shared_ptr<PendingRequest> pending_request)
+      : transport_(transport),
+        pending_request_(std::move(pending_request))
+  {
+  }
+
+  QueuedWorkerProcessRackExecutionSession::~QueuedWorkerProcessRackExecutionSession()
+  {
+    cancel();
+  }
+
+  void QueuedWorkerProcessRackExecutionSession::append_request_body_chunk(const std::string &chunk)
+  {
+    ensure_request_still_live();
+    ensure_live_session_started();
+    live_session_->append_request_body_chunk(chunk);
+  }
+
+  std::optional<Vajra::response::Response> QueuedWorkerProcessRackExecutionSession::finish()
+  {
+    ensure_live_session_started();
+    finished_ = true;
+
+    try
+    {
+      std::optional<Vajra::response::Response> response = live_session_->finish();
+      live_session_.reset();
+      transport_.release_channel(pending_request_);
+      return response;
+    }
+    catch (...)
+    {
+      live_session_.reset();
+      transport_.release_channel(pending_request_);
+      throw;
+    }
+  }
+
+  void QueuedWorkerProcessRackExecutionSession::cancel() noexcept
+  {
+    if (finished_ || canceled_)
+    {
+      return;
+    }
+
+    canceled_ = true;
+    if (live_session_)
+    {
+      live_session_.reset();
+      transport_.release_channel(pending_request_);
+      return;
+    }
+
+    transport_.cancel_request(pending_request_);
+  }
+
+  void QueuedWorkerProcessRackExecutionSession::ensure_live_session_started()
+  {
+    if (live_session_)
+    {
+      return;
+    }
+
+    const auto [worker_index, channel_index] = transport_.await_assignment(pending_request_);
+
+    try
+    {
+      live_session_ =
+          transport_.slot_for(worker_index)->channels.at(channel_index).transport->start(
+              pending_request_->env_entries,
+              pending_request_->client_fd);
+    }
+    catch (...)
+    {
+      if (!live_session_)
+      {
+        transport_.release_channel(pending_request_);
+      }
+      throw;
+    }
+  }
+
+  void QueuedWorkerProcessRackExecutionSession::ensure_request_still_live() const
+  {
+    if (pending_request_->timed_out.load())
+    {
+      throw Vajra::request::RequestTimeoutError("request timed out while waiting in the global queue");
+    }
+    if (pending_request_->client_gone.load())
+    {
+      throw Vajra::request::RequestTimeoutError("client disconnected before request execution started");
+    }
+  }
+
+  struct ChannelRequestReadResult
+  {
+    int channel_fd;
+    bool eof = false;
+    bool request_canceled = false;
+    std::vector<Vajra::request::RackEnvEntry> env_entries;
+    std::string request_body;
+    std::string error_message;
+  };
+
+  void *read_worker_request_from_channel_without_gvl(void *data)
+  {
+    auto *result = static_cast<ChannelRequestReadResult *>(data);
+    try
+    {
+      Vajra::ipc::FrameHeader header{};
+      std::string payload;
+      if (!read_frame(result->channel_fd, header, payload))
+      {
+        result->eof = true;
+        return nullptr;
+      }
+
+      if (header.family != Vajra::ipc::FrameFamily::request_execution_input)
+      {
+        throw std::runtime_error("worker request loop expected request execution input");
+      }
+
+      result->env_entries = decode_request_execution_input(payload);
+      result->request_body.clear();
+      result->request_canceled = false;
+
+      for (;;)
+      {
+        if (!read_frame(result->channel_fd, header, payload))
+        {
+          throw std::runtime_error("worker request loop closed before request body completion");
+        }
+
+        if (header.family != Vajra::ipc::FrameFamily::request_body_continuation)
+        {
+          throw std::runtime_error("worker request loop expected request body continuation");
+        }
+
+        std::string chunk;
+        const RequestBodyEvent event = decode_request_body_event(payload, chunk);
+        if (event == RequestBodyEvent::cancel)
+        {
+          result->request_canceled = true;
+          return nullptr;
+        }
+        if (event == RequestBodyEvent::complete)
+        {
+          return nullptr;
+        }
+
+        result->request_body.append(chunk);
+      }
+    }
+    catch (const std::exception &error)
+    {
+      result->error_message = error.what();
+    }
+
+    return nullptr;
+  }
+
+  struct WorkerChannelThreadContext
+  {
+    int channel_fd = -1;
+    int completion_signal_fd = -1;
+    std::atomic_bool completed{false};
+    std::atomic_bool failed{false};
+    mutable std::mutex error_mutex;
+    std::string error_message;
+  };
+
+  struct WorkerChannelSignalReadContext
+  {
+    int fd = -1;
+    bool eof = false;
+    int error_number = 0;
+  };
+
+  std::optional<std::string> take_worker_channel_error(const WorkerChannelThreadContext &context)
+  {
+    if (!context.failed.load(std::memory_order_acquire))
+    {
+      return std::nullopt;
+    }
+
+    const std::lock_guard<std::mutex> lock(context.error_mutex);
+    return context.error_message;
+  }
+
+  void notify_worker_channel_thread_completion(
+      WorkerChannelThreadContext *context,
+      const std::optional<std::string> &error_message = std::nullopt)
+  {
+    if (error_message)
+    {
+      {
+        const std::lock_guard<std::mutex> lock(context->error_mutex);
+        context->error_message = *error_message;
+      }
+      context->failed.store(true, std::memory_order_release);
+    }
+
+    context->completed.store(true, std::memory_order_release);
+
+    const std::uint8_t signal_byte = 1;
+    for (;;)
+    {
+      const ssize_t result = write(context->completion_signal_fd, &signal_byte, sizeof(signal_byte));
+      if (result >= 0)
+      {
+        return;
+      }
+      if (errno == EINTR)
+      {
+        continue;
+      }
+      return;
+    }
+  }
+
+  void *wait_for_worker_channel_signal_without_gvl(void *data)
+  {
+    auto *context = static_cast<WorkerChannelSignalReadContext *>(data);
+    std::uint8_t signal_byte = 0;
+
+    for (;;)
+    {
+      const ssize_t result = read(context->fd, &signal_byte, sizeof(signal_byte));
+      if (result > 0)
+      {
+        return nullptr;
+      }
+      if (result == 0)
+      {
+        context->eof = true;
+        return nullptr;
+      }
+      if (errno == EINTR)
+      {
+        continue;
+      }
+
+      context->error_number = errno;
+      return nullptr;
+    }
+  }
+
+  VALUE run_worker_request_channel_thread(void *data)
+  {
+    auto *context = static_cast<WorkerChannelThreadContext *>(data);
+    CurrentThreadRackExecutionTransport transport;
+
+    for (;;)
+    {
+      ChannelRequestReadResult read_result{context->channel_fd, false, false, {}, "", ""};
+      rb_thread_call_without_gvl(
+          read_worker_request_from_channel_without_gvl,
+          &read_result,
+          RUBY_UBF_IO,
+          nullptr);
+
+      if (!read_result.error_message.empty())
+      {
+        notify_worker_channel_thread_completion(context, read_result.error_message);
+        return Qnil;
+      }
+      if (read_result.eof)
+      {
+        notify_worker_channel_thread_completion(context);
+        return Qnil;
+      }
+      if (read_result.request_canceled)
+      {
+        continue;
+      }
+
+      try
+      {
+        const std::optional<Vajra::response::Response> response =
+            transport.execute(read_result.env_entries, read_result.request_body);
+        write_frame(
+            context->channel_fd,
+            Vajra::ipc::FrameFamily::response_metadata_result,
+            encode_response_metadata(response));
+        if (!response)
+        {
+          continue;
+        }
+
+        std::size_t cursor = 0;
+        while (cursor < response->body.size())
+        {
+          const std::size_t length = std::min(kInlineBodyChunkBytes, response->body.size() - cursor);
+          write_frame(
+              context->channel_fd,
+              Vajra::ipc::FrameFamily::response_body_continuation,
+              encode_response_body_event(ResponseBodyEvent::chunk, response->body.substr(cursor, length)));
+          cursor += length;
+        }
+        write_frame(
+            context->channel_fd,
+            Vajra::ipc::FrameFamily::response_body_continuation,
+            encode_response_body_event(ResponseBodyEvent::complete, ""));
+      }
+      catch (const Vajra::request::HeadError &error)
+      {
+        write_frame(
+            context->channel_fd,
+            Vajra::ipc::FrameFamily::response_metadata_result,
+            encode_response_error(ResponseMetadataKind::head_error, error.what()));
+      }
+      catch (const std::exception &error)
+      {
+        write_frame(
+            context->channel_fd,
+            Vajra::ipc::FrameFamily::response_metadata_result,
+            encode_response_error(ResponseMetadataKind::execution_error, error.what()));
+      }
+    }
+  }
 
   class RequestExecutionBridgeSession final : public Vajra::request::RequestExecutionSession
   {
@@ -1020,11 +1981,34 @@ void Vajra::rack::set_rack_execution_callback(VALUE callback)
 
 std::shared_ptr<const Vajra::rack::RackExecutionTransport> Vajra::rack::request_channel_transport(int channel_fd)
 {
-  return std::make_shared<WorkerProcessRackExecutionTransport>(channel_fd);
+  return std::make_shared<WorkerProcessRackExecutionTransport>(
+      channel_fd,
+      60,
+      []() {});
+}
+
+std::shared_ptr<const Vajra::rack::RackExecutionTransport> Vajra::rack::request_channel_transport(
+    const std::vector<std::vector<int>> &worker_channel_fds,
+    const std::vector<int> &worker_pids,
+    std::size_t min_threads,
+    std::size_t queue_capacity,
+    std::size_t request_timeout_seconds,
+    std::size_t worker_timeout_seconds,
+    bool debug_logging)
+{
+  return std::make_shared<GlobalQueuedWorkerProcessRackExecutionTransport>(
+      worker_channel_fds,
+      worker_pids,
+      min_threads,
+      queue_capacity,
+      request_timeout_seconds,
+      worker_timeout_seconds,
+      debug_logging);
 }
 
 std::unique_ptr<Vajra::rack::RackExecutionSession> Vajra::rack::RackExecutionTransport::start(
-    const std::vector<request::RackEnvEntry> &env_entries) const
+    const std::vector<request::RackEnvEntry> &env_entries,
+    int) const
 {
   return std::make_unique<BufferedRackExecutionSession>(*this, env_entries);
 }
@@ -1049,7 +2033,7 @@ std::unique_ptr<Vajra::request::RequestExecutionSession> Vajra::rack::RackReques
 {
   request::RackEnvBuilder builder;
   const std::vector<request::RackEnvEntry> env_entries = builder.build(request_context);
-  return std::make_unique<RequestExecutionBridgeSession>(transport_->start(env_entries));
+  return std::make_unique<RequestExecutionBridgeSession>(transport_->start(env_entries, request_context.client_fd));
 }
 
 std::optional<Vajra::response::Response> Vajra::rack::RackRequestExecutor::execute(
@@ -1060,100 +2044,89 @@ std::optional<Vajra::response::Response> Vajra::rack::RackRequestExecutor::execu
   return transport_->execute(env_entries, request_context.request_body);
 }
 
-void Vajra::rack::run_worker_request_execution_loop(int channel_fd)
+void Vajra::rack::run_worker_request_execution_loop(
+    const std::vector<int> &channel_fds,
+    std::size_t max_threads)
 {
-  CurrentThreadRackExecutionTransport transport;
-
-  for (;;)
+  if (channel_fds.size() != max_threads)
   {
-    Vajra::ipc::FrameHeader header{};
-    std::string payload;
-    if (!read_frame(channel_fd, header, payload))
+    throw std::runtime_error("worker request channel count must match max_threads");
+  }
+
+  int completion_signal_pipe[2] = {-1, -1};
+  if (pipe(completion_signal_pipe) != 0)
+  {
+    throw std::runtime_error("worker request completion signal pipe failed");
+  }
+
+  std::vector<std::unique_ptr<WorkerChannelThreadContext>> contexts;
+  contexts.reserve(channel_fds.size());
+  std::vector<VALUE> threads;
+  threads.reserve(channel_fds.size());
+
+  for (int channel_fd : channel_fds)
+  {
+    auto context = std::make_unique<WorkerChannelThreadContext>();
+    context->channel_fd = channel_fd;
+    context->completion_signal_fd = completion_signal_pipe[1];
+    contexts.push_back(std::move(context));
+    threads.push_back(rb_thread_create(run_worker_request_channel_thread, contexts.back().get()));
+  }
+
+  ID id_join = rb_intern("join");
+  std::vector<bool> joined(threads.size(), false);
+  std::size_t joined_count = 0;
+
+  while (joined_count < threads.size())
+  {
+    WorkerChannelSignalReadContext signal_read_context{completion_signal_pipe[0], false, 0};
+    rb_thread_call_without_gvl(
+        wait_for_worker_channel_signal_without_gvl,
+        &signal_read_context,
+        RUBY_UBF_IO,
+        nullptr);
+    if (signal_read_context.error_number != 0)
     {
-      return;
+      close(completion_signal_pipe[0]);
+      close(completion_signal_pipe[1]);
+      throw std::runtime_error("worker request completion signal wait failed");
+    }
+    if (signal_read_context.eof)
+    {
+      break;
     }
 
-    if (header.family != Vajra::ipc::FrameFamily::request_execution_input)
+    for (std::size_t index = 0; index < threads.size(); ++index)
     {
-      throw std::runtime_error("worker request loop expected request execution input");
-    }
-
-    std::vector<request::RackEnvEntry> env_entries = decode_request_execution_input(payload);
-    std::string request_body;
-    bool request_canceled = false;
-
-    for (;;)
-    {
-      if (!read_frame(channel_fd, header, payload))
+      if (joined[index])
       {
-        throw std::runtime_error("worker request loop closed before request body completion");
+        continue;
       }
-
-      if (header.family != Vajra::ipc::FrameFamily::request_body_continuation)
-      {
-        throw std::runtime_error("worker request loop expected request body continuation");
-      }
-
-      std::string chunk;
-      const RequestBodyEvent event = decode_request_body_event(payload, chunk);
-      if (event == RequestBodyEvent::cancel)
-      {
-        request_canceled = true;
-        break;
-      }
-      if (event == RequestBodyEvent::complete)
-      {
-        break;
-      }
-
-      request_body.append(chunk);
-    }
-
-    if (request_canceled)
-    {
-      continue;
-    }
-
-    try
-    {
-      const std::optional<Vajra::response::Response> response = transport.execute(env_entries, request_body);
-      write_frame(
-          channel_fd,
-          Vajra::ipc::FrameFamily::response_metadata_result,
-          encode_response_metadata(response));
-      if (!response)
+      if (!contexts[index]->completed.load(std::memory_order_acquire))
       {
         continue;
       }
 
-      std::size_t cursor = 0;
-      while (cursor < response->body.size())
+      rb_funcall(threads[index], id_join, 0);
+      joined[index] = true;
+      ++joined_count;
+      if (const std::optional<std::string> error_message = take_worker_channel_error(*contexts[index]))
       {
-        const std::size_t length = std::min(kInlineBodyChunkBytes, response->body.size() - cursor);
-        write_frame(
-            channel_fd,
-            Vajra::ipc::FrameFamily::response_body_continuation,
-            encode_response_body_event(ResponseBodyEvent::chunk, response->body.substr(cursor, length)));
-        cursor += length;
+        close(completion_signal_pipe[0]);
+        close(completion_signal_pipe[1]);
+        throw std::runtime_error(*error_message);
       }
-      write_frame(
-          channel_fd,
-          Vajra::ipc::FrameFamily::response_body_continuation,
-          encode_response_body_event(ResponseBodyEvent::complete, ""));
     }
-    catch (const Vajra::request::HeadError &error)
+  }
+
+  close(completion_signal_pipe[0]);
+  close(completion_signal_pipe[1]);
+
+  for (const std::unique_ptr<WorkerChannelThreadContext> &context : contexts)
+  {
+    if (const std::optional<std::string> error_message = take_worker_channel_error(*context))
     {
-      write_frame(
-          channel_fd,
-          Vajra::ipc::FrameFamily::response_metadata_result,
-          encode_response_error(ResponseMetadataKind::head_error, error.what()));
-    }
-    catch (const std::exception &error)
-    {
-      write_frame(
-          channel_fd,
-          Vajra::ipc::FrameFamily::response_metadata_result,
-          encode_response_error(ResponseMetadataKind::execution_error, error.what()));
+      throw std::runtime_error(*error_message);
     }
   }
 }

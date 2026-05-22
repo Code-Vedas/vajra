@@ -19,7 +19,7 @@ Vajra’s integration surface is organized around two immediate reader needs:
 The integration story is explicit:
 
 - Rack is the generic application contract
-- Rails is the first framework-specific path documented here
+- Rails is the framework-native server path documented here
 - additional framework integrations belong to their own documented contracts
 
 ## Shared Integration Principles
@@ -84,9 +84,21 @@ The Rails path builds on the same ownership split:
 Rails integration defines:
 
 - application boot expectations
+- the `config/vajra.rb` adapter directive
 - preload and worker lifecycle assumptions
 - common Rails boot failure diagnostics
 - where framework-specific behavior ends and server-owned behavior begins
+
+## Representative Rack Frameworks
+
+Vajra also validates representative Rack frameworks through the same ownership
+split:
+
+- the framework keeps routing, middleware, and application execution
+- Vajra keeps listener lifecycle, request parsing, and response transport
+- worker-side request execution stays on the shared Rack seam
+- the standard rackup entrypoint remains `config.ru`
+- the standard server command remains `bundle exec vajra`
 
 ## Configuration Expectations
 

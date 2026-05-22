@@ -23,8 +23,11 @@ repository.
 The observability surface includes:
 
 - structured logs for boot, worker readiness, shutdown, and failures
+- debug scheduler logs for request admission, global queue depth, least-busy worker selection, queue-capacity hits, and queued-request timeouts
 - startup and bind diagnostics
 - request-path visibility through e2e-verifiable HTTP behavior
+- metrics, stats, and control surfaces configured through Vajra's runtime
+  settings
 
 ## Why These Signals Matter
 
@@ -46,12 +49,28 @@ Good local observability for Vajra means:
 
 ## Integrations
 
-The supported observability contract is log-first:
+Vajra's observability contract is log-first:
 
 - stdout and stderr carry lifecycle and failure signals
 - startup and shutdown emit explicit lifecycle events
 - load, boot, bind, and request-execution failures stay diagnosable without
   attaching a debugger
+
+## Lifecycle Field Meanings
+
+The lifecycle log vocabulary is intentionally split:
+
+- `process_role` identifies the process emitting the lifecycle event
+- `request_execution_role` identifies the role executing application requests
+- `mode` identifies the topology such as single-process or master-worker
+- `listener_owned` identifies whether the emitting process owns the active listener
+- scheduler debug events expose `selected_worker`, `queue_depth`, `inflight`, and `queue_capacity`
+- queue depth refers to the one global FIFO queue, not a worker-local backlog
+
+This prevents operator confusion between:
+
+- the process that owns the socket
+- the worker that executes the Rack or Rails request
 
 ## Related Reading
 

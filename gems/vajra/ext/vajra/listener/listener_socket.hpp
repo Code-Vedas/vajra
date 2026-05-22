@@ -6,6 +6,8 @@
 #ifndef VAJRA_LISTENER_SOCKET_HPP
 #define VAJRA_LISTENER_SOCKET_HPP
 
+#include <string>
+
 namespace Vajra
 {
   namespace listener
@@ -19,7 +21,7 @@ namespace Vajra
     class Socket
     {
     public:
-      SocketBinding open(int port) const;
+      SocketBinding open(const std::string &host, int port) const;
     };
   }
 }

@@ -6,14 +6,25 @@ permalink: /running-vajra/
 
 # Running Vajra
 
-Use the package-local executable from `gems/vajra`.
+Use the launcher that matches the host framework.
 
 ```bash
-cd gems/vajra
-bundle exec exe/vajra
+bundle exec vajra
 ```
 
-Vajra binds to port `3000` and serves a basic serialized HTTP/1.1 response path.
+For Rails, the normal entrypoint is:
+
+```bash
+bin/rails server
+```
+
+The launcher contract is:
+
+- Rails: `bin/rails server`
+- Sinatra, Roda, Hanami, and generic Rack apps: `bundle exec vajra`
+
+Vajra binds to port `3000` by default and serves an HTTP/1.1 response path
+through the native runtime.
 
 ## Runtime Expectations
 
@@ -22,18 +33,23 @@ Vajra binds to port `3000` and serves a basic serialized HTTP/1.1 response path.
 - logs to stdout and stderr
 - exits on interrupt
 - uses the compiled native extension as the runtime entrypoint
-- uses one Ruby worker for application execution
+- uses the configured Ruby workers for application execution, defaulting to one
 
 ## Boot Chain
 
 The runtime boot path is direct:
 
-1. Ruby starts the `exe/vajra` entrypoint.
+1. Ruby starts the selected launcher entrypoint.
 2. `require "vajra"` loads the gem and validates the native extension contract.
-3. The package transfers control to `Vajra.start`.
-4. Ruby preload boot runs in the main process.
-5. The main process forks one Ruby worker and waits for worker readiness.
-6. The native runtime opens the listener, accepts connections, and writes the
+3. the launcher loads `config/vajra.rb` when present.
+4. if no explicit Vajra config file is present, the standalone executable falls back to
+   `config.ru`.
+5. the package installs the selected Rack or Rails application.
+6. the package transfers control to `Vajra.start`.
+7. Ruby preload boot runs in the main process.
+8. the main process forks the configured Ruby workers, defaulting to one, and waits
+   for worker readiness.
+9. the native runtime opens the listener, accepts connections, and writes the
    response while the worker executes Rack requests.
 
 That narrow chain matters because build verification, executable smoke tests,

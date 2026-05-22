@@ -1,0 +1,23 @@
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+module Rackup
+  module Handler
+    module Vajra
+      CONFIG_PATH: String
+
+      def self.run: (
+        Vajra::CLI::_RackApplication app,
+        ?Host: String,
+        ?Port: Integer,
+        ?max_request_head_bytes: Integer,
+        ?user_supplied_options: Array[Symbol]
+      ) -> nil
+
+      def self.shutdown: () -> nil
+      def self.valid_options: () -> Hash[String, String]
+    end
+  end
+end

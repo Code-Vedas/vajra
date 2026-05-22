@@ -1,0 +1,87 @@
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+module Vajra
+  module CLI
+    class Error < Vajra::Error
+    end
+
+    interface _RackApplication
+      def call: (
+        Hash[String, String | bool | IO | StringIO | Array[Integer]]
+      ) -> [
+        Integer | String,
+        Hash[String | Symbol, Vajra::Internal::RackExecution::_RackHeaderValue] |
+          Array[[String | Symbol, Vajra::Internal::RackExecution::_RackHeaderValue]] |
+          Vajra::Internal::RackExecution::_RackHeaders,
+        Array[String] | Vajra::Internal::RackExecution::_RackBody
+      ]
+    end
+
+    def self.with_config_target: [T, R] (T target) { () -> R } -> R
+    def self.current_config_target: [T] () -> T?
+    def self.start: (?argv: Array[String], ?root: String, ?stdout: IO) -> nil
+
+    class Launcher
+      attr_reader start_options: Hash[Symbol, Integer | String | bool | Array[String] | Array[Integer]]
+
+      def initialize: (root: String) -> void
+      def load: (config_path: String?, default_config_path: String) -> Launcher
+      def start: () -> nil
+      def rackup: (?String path) -> Proc
+      def app: (?_RackApplication rack_app) ?{ () -> _RackApplication } -> Proc
+      def rails: (?String environment_path) -> Proc
+      def host: (String) -> String
+      def port: (Integer) -> Integer
+      def bind: (String) -> String
+      def unix_socket: (String) -> String
+      def backlog: (Integer) -> Integer
+      def reuse_port: (?bool) -> bool
+      def workers: (Integer) -> Integer
+      def threads: (Integer | Array[Integer], ?Integer) -> Array[Integer]
+      def preload_app: (?bool) -> bool
+      def worker_boot_timeout: (Integer) -> Integer
+      def worker_shutdown_timeout: (Integer) -> Integer
+      def worker_timeout: (Integer) -> Integer
+      def max_request_head_bytes: (Integer) -> Integer
+      def request_timeout: (Integer) -> Integer
+      def first_data_timeout: (Integer) -> Integer
+      def persistent_timeout: (Integer) -> Integer
+      def max_request_body_bytes: (Integer) -> Integer
+      def request_head_timeout: (Integer) -> Integer
+      def request_body_timeout: (Integer) -> Integer
+      def max_keepalive_requests: (Integer) -> Integer
+      def linger_timeout: (Integer) -> Integer
+      def max_connections: (Integer) -> Integer
+      def queue_capacity: (Integer) -> Integer
+      def max_requests_per_worker: (Integer) -> Integer
+      def scheduler_policy: (String) -> String
+      def tls: (?bool) -> bool
+      def tls_certificate: (String) -> String
+      def tls_private_key: (String) -> String
+      def tls_ca_certificate: (String) -> String
+      def tls_verify_mode: (String) -> String
+      def tls_min_version: (String) -> String
+      def alpn_protocols: (String | Symbol | Array[String | Symbol], *(String | Symbol)) -> Array[String]
+      def http2: (?bool) -> bool
+      def http2_max_concurrent_streams: (Integer) -> Integer
+      def http2_initial_window_size: (Integer) -> Integer
+      def http2_max_frame_size: (Integer) -> Integer
+      def http2_header_table_size: (Integer) -> Integer
+      def log_level: (String) -> String
+      def access_log: (String) -> String
+      def error_log: (String) -> String
+      def structured_logs: (?bool) -> bool
+      def stats_path: (String) -> String
+      def metrics_endpoint: (String) -> String
+      def pidfile: (String) -> String
+      def state_path: (String) -> String
+      def control_socket: (String) -> String
+      def drain_timeout: (Integer) -> Integer
+      def shutdown_timeout: (Integer) -> Integer
+      def phased_restart: (?bool) -> bool
+    end
+  end
+end

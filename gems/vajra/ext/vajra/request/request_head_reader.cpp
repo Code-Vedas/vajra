@@ -16,17 +16,21 @@ namespace
 {
   constexpr const char *kHeaderBoundary = "\r\n\r\n";
   constexpr std::size_t kHeaderBoundaryLength = 4;
-  constexpr int kRequestHeadReadTimeoutSeconds = 5;
 }
 
-Vajra::request::HeadReader::HeadReader(std::size_t max_request_head_bytes)
-    : request_head_size_validator_(max_request_head_bytes)
+Vajra::request::HeadReader::HeadReader(std::size_t max_request_head_bytes, int continuation_timeout_seconds)
+    : request_head_size_validator_(max_request_head_bytes),
+      continuation_timeout_seconds_(continuation_timeout_seconds)
 {
 }
 
-Vajra::request::HeadReadResult Vajra::request::HeadReader::read(int client_fd, std::string buffered_bytes) const
+Vajra::request::HeadReadResult Vajra::request::HeadReader::read(
+    int client_fd,
+    std::string buffered_bytes,
+    int initial_timeout_seconds) const
 {
-  if (!configure_read_timeout(client_fd))
+  int next_timeout_seconds = buffered_bytes.empty() ? initial_timeout_seconds : continuation_timeout_seconds_;
+  if (!configure_read_timeout(client_fd, next_timeout_seconds))
   {
     return HeadReadResult{false, "", ""};
   }
@@ -54,6 +58,11 @@ Vajra::request::HeadReadResult Vajra::request::HeadReader::read(int client_fd, s
       next_header_boundary_search_start = request_head.size() - (kHeaderBoundaryLength - 1);
     }
 
+    if (!configure_read_timeout(client_fd, next_timeout_seconds))
+    {
+      return HeadReadResult{false, request_head, ""};
+    }
+
     const ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer), 0);
     if (bytes_read < 0)
     {
@@ -76,13 +85,14 @@ Vajra::request::HeadReadResult Vajra::request::HeadReader::read(int client_fd, s
       return HeadReadResult{false, request_head, ""};
     }
     request_head.append(buffer, bytes_read);
+    next_timeout_seconds = continuation_timeout_seconds_;
   }
 }
 
-bool Vajra::request::HeadReader::configure_read_timeout(int client_fd) const
+bool Vajra::request::HeadReader::configure_read_timeout(int client_fd, int timeout_seconds) const
 {
   timeval timeout{};
-  timeout.tv_sec = kRequestHeadReadTimeoutSeconds;
+  timeout.tv_sec = timeout_seconds;
   timeout.tv_usec = 0;
   if (setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0)
   {

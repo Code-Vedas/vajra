@@ -6,78 +6,121 @@ permalink: /configuration/
 
 # Configuration
 
-Vajra uses an explicit configuration surface with documented precedence and
-clear ownership boundaries.
+Vajra uses one canonical server configuration file:
 
-## Configuration Principles
+- `config/vajra.rb`
 
-- prefer explicit startup inputs over hidden global behavior
-- keep package-local commands authoritative for build and validation
-- keep native-runtime configuration understandable from the executable path
-- avoid duplicate configuration surfaces that describe the same behavior in
-  different ways
-- keep precedence rules explicit enough that operators can explain why a value
-  won
+The normal file shape is one explicit block:
 
-## Current Inputs
+```ruby
+Vajra.configure do |config|
+  # Application selection
+  config.rails
+  config.rackup "config.ru"
+  config.app MyRackApp
+  config.app { MyRackApp.new }
 
-- Ruby toolchain and Bundler environment
-- native compilation toolchain
-- executable startup from `gems/vajra`
-- listener port
-- maximum request-head size
+  # Listener
+  config.host "127.0.0.1"
+  config.port 3000
 
-## Build-Time Configuration
+  # Runtime topology
+  config.workers 4
+  config.threads 5, 5
 
-The build contract is driven through:
+  # Request and connection limits
+  config.max_request_head_bytes 32_768
+  config.request_timeout 25
+  config.request_head_timeout 5
+  config.first_data_timeout 30
+  config.persistent_timeout 30
+  config.worker_timeout 60
 
-- `gems/vajra/Gemfile`
-- `gems/vajra/ext/vajra/extconf.rb`
-- `bundle exec rake compile`
+  # Scheduling and admission
+  config.max_connections 256
+  config.queue_capacity 100_000
+  config.scheduler_policy "least_loaded"
 
-Those files and commands define how the extension is compiled and where the
-compiled artifact lives.
+  # Observability
+  config.log_level "info"
+end
+```
 
-## Runtime Configuration Families
+The example above shows the current native-backed startup subset plus the
+application selectors handled by the Ruby launcher.
 
-The supported configuration story is organized around these families:
+The table below lists the full `Vajra.configure` DSL. Application selectors
+such as `rails`, `rackup`, and `app` are handled by the Ruby launcher.
+`Vajra.start` accepts only the native-backed runtime subset today. Passing a
+documented runtime directive that is not yet native-backed raises
+`start option not implemented yet: ...`.
 
-- listener and socket behavior
-- request parsing limits
-- documented environment overrides for runtime-owned values
+Vajra uses one pending request queue. That queue is global and FIFO.
+`queue_capacity` applies to that one global queue. The scheduler assigns the
+oldest live queued request to the least-busy worker.
 
-## Runtime Configuration Posture
+## Configuration Reference
 
-Runtime inputs stay discoverable from the executable and from this docs site
-rather than being spread across undocumented environment conventions.
+| Setting | Default | Native environment override | Example | Purpose |
+| --- | --- | --- | --- | --- |
+| `rails` | `config/environment` | none | `config.rails` | load Rails and install `Rails.application` |
+| `rails PATH` | `config/environment` | none | `config.rails "config/environment"` | load a non-default Rails environment file |
+| `rackup` | `config.ru` | none | `config.rackup` | load `config.ru` |
+| `rackup PATH` | `config.ru` | none | `config.rackup "config.ru"` | load a specific rackup file |
+| `app OBJECT` | none | none | `config.app MyRackApp` | install an explicit Rack application object |
+| `app { ... }` | none | none | `config.app { MyRackApp.new }` | install an app through a block loader |
+| `host` | `"0.0.0.0"` | `VAJRA_HOST` | `config.host "127.0.0.1"` | bind address for TCP listeners |
+| `port` | `3000` | `VAJRA_PORT` | `config.port 3000` | TCP port |
+| `bind` | none | none | `config.bind "tcp://127.0.0.1:3000"` | explicit bind target |
+| `unix_socket` | none | none | `config.unix_socket "tmp/vajra.sock"` | Unix-domain listener path |
+| `backlog` | framework and runtime controlled | none | `config.backlog 1024` | accepted pending-connection backlog |
+| `reuse_port` | `false` | none | `config.reuse_port true` | enable multi-process port reuse |
+| `workers` | `1` | `VAJRA_WORKERS`, `WEB_CONCURRENCY` | `config.workers 4` | number of Ruby worker processes |
+| `threads` | `1, 1` | `VAJRA_THREADS`, `MAX_THREADS` | `config.threads 5, 5` | min and max worker threads |
+| `preload_app` | `true` | none | `config.preload_app true` | preload before worker fork |
+| `worker_boot_timeout` | `30` | none | `config.worker_boot_timeout 30` | worker readiness deadline |
+| `worker_shutdown_timeout` | `30` | none | `config.worker_shutdown_timeout 30` | graceful worker stop deadline |
+| `phased_restart` | `false` | none | `config.phased_restart true` | rolling worker replacement behavior |
+| `max_request_head_bytes` | `16_384` | `VAJRA_MAX_REQUEST_HEAD_BYTES` | `config.max_request_head_bytes 32_768` | maximum HTTP request head size |
+| `max_request_body_bytes` | runtime controlled | none | `config.max_request_body_bytes 104_857_600` | maximum accepted request-body size |
+| `request_timeout` | `25` | `VAJRA_REQUEST_TIMEOUT` | `config.request_timeout 25` | total queue wait budget before execution starts |
+| `request_head_timeout` | `5` | `VAJRA_REQUEST_HEAD_TIMEOUT` | `config.request_head_timeout 5` | header read timeout |
+| `first_data_timeout` | `30` | `VAJRA_FIRST_DATA_TIMEOUT` | `config.first_data_timeout 30` | time allowed before the first request data arrives |
+| `persistent_timeout` | `30` | `VAJRA_PERSISTENT_TIMEOUT` | `config.persistent_timeout 30` | idle keepalive timeout between requests |
+| `worker_timeout` | `60` | `VAJRA_WORKER_TIMEOUT` | `config.worker_timeout 60` | stuck worker lifecycle timeout |
+| `max_keepalive_requests` | `1000` | none | `config.max_keepalive_requests 1000` | maximum sequential requests per connection |
+| `linger_timeout` | `5` | none | `config.linger_timeout 5` | close and linger behavior after response completion |
+| `max_connections` | `256` | none | `config.max_connections 256` | global accepted-connection ceiling and native handler-thread cap |
+| `queue_capacity` | signed `long` max | `VAJRA_QUEUE_CAPACITY` | `config.queue_capacity 100_000` | global pending request-queue limit |
+| `max_requests_per_worker` | `10_000` | none | `config.max_requests_per_worker 10_000` | worker recycle threshold |
+| `scheduler_policy` | `"least_loaded"` | `VAJRA_SCHEDULER_POLICY` | `config.scheduler_policy "least_loaded"` | worker selection policy |
+| `tls` | `false` | none | `config.tls true` | enable TLS on the listener |
+| `tls_certificate` | none | none | `config.tls_certificate "config/certs/server.crt"` | certificate chain path |
+| `tls_private_key` | none | none | `config.tls_private_key "config/certs/server.key"` | private-key path |
+| `tls_ca_certificate` | none | none | `config.tls_ca_certificate "config/certs/ca.crt"` | client CA bundle |
+| `tls_verify_mode` | `"none"` | none | `config.tls_verify_mode "peer"` | peer verification behavior |
+| `tls_min_version` | `"TLSv1_2"` | none | `config.tls_min_version "TLSv1_2"` | minimum TLS protocol version |
+| `alpn_protocols` | `["http/1.1"]` | none | `config.alpn_protocols %w[h2 http/1.1]` | advertised ALPN protocols |
+| `http2` | `false` | none | `config.http2 true` | enable HTTP/2 support |
+| `http2_max_concurrent_streams` | `128` | none | `config.http2_max_concurrent_streams 128` | per-connection stream concurrency |
+| `http2_initial_window_size` | `65_535` | none | `config.http2_initial_window_size 65_535` | stream flow-control window |
+| `http2_max_frame_size` | `16_384` | none | `config.http2_max_frame_size 16_384` | HTTP/2 frame size limit |
+| `http2_header_table_size` | `4096` | none | `config.http2_header_table_size 4096` | HPACK dynamic table size |
+| `log_level` | `"info"` | `VAJRA_LOG_LEVEL` | `config.log_level "info"` | lifecycle and runtime log level |
+| `access_log` | none | none | `config.access_log "log/vajra-access.log"` | access-log target |
+| `error_log` | none | none | `config.error_log "log/vajra-error.log"` | error-log target |
+| `structured_logs` | `false` | none | `config.structured_logs true` | structured log output |
+| `stats_path` | none | none | `config.stats_path "/__vajra/stats"` | in-process stats endpoint |
+| `metrics_endpoint` | none | none | `config.metrics_endpoint "/metrics"` | metrics scrape path |
+| `pidfile` | none | none | `config.pidfile "tmp/pids/vajra.pid"` | runtime PID file |
+| `state_path` | none | none | `config.state_path "tmp/vajra.state"` | persistent runtime state path |
+| `control_socket` | none | none | `config.control_socket "tmp/vajra-control.sock"` | control-plane attachment point |
+| `drain_timeout` | `30` | none | `config.drain_timeout 30` | graceful drain deadline |
+| `shutdown_timeout` | `60` | none | `config.shutdown_timeout 60` | full shutdown deadline |
 
-## Integration Configuration Direction
+## Related Reading
 
-Framework integration follows an explicit-config-first model:
-
-- application entrypoint and adapter selection should be explicit
-- `VAJRA_`-prefixed environment overrides are part of the supported config path
-- application-owned behavior stays in the application, not in hidden server
-  toggles
-
-## Precedence Model
-
-The precedence model is:
-
-1. explicit server/application configuration
-2. documented `VAJRA_` environment overrides
-3. implementation defaults for supported runtime-owned settings
-
-Operators can reason about effective configuration without reverse-engineering
-source.
-
-## Supported Runtime Settings
-
-The supported runtime-owned settings are:
-
-- `port` via `Vajra.start(port: ...)`
-- `max_request_head_bytes` via `Vajra.start(max_request_head_bytes: ...)`
-- `VAJRA_PORT`
-- `VAJRA_MAX_REQUEST_HEAD_BYTES`
-
-The environment variables override the corresponding Ruby startup options.
+- [Frameworks](/frameworks/)
+- [Running Vajra](/running-vajra/)
+- [Runtime Model](/runtime-model/)
+- [Operations](/operations/)

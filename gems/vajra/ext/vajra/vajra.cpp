@@ -11,8 +11,11 @@
 
 #include <csignal>
 #include <signal.h>
+#include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cerrno>
+#include <cctype>
 #include <chrono>
 #include <exception>
 #include <iomanip>
@@ -26,6 +29,8 @@
 #include <cstring>
 #include <cstdint>
 #include <string>
+#include <vector>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -33,28 +38,53 @@
 namespace
 {
   volatile std::sig_atomic_t shutting_down = 0;
+  bool runtime_shutdown_started = false;
   std::mutex server_mutex;
-  std::unique_ptr<Vajra::Server> server_instance;
-  pid_t worker_pid = -1;
-  int worker_request_channel_fd = -1;
+  std::shared_ptr<Vajra::Server> server_instance;
+  std::vector<pid_t> worker_pids;
+  std::vector<int> worker_request_channel_fds;
   bool stop_requested = false;
   bool worker_startup_in_progress = false;
   ID id_port;
+  ID id_host;
+  ID id_workers;
+  ID id_threads;
   ID id_max_request_head_bytes;
+  ID id_max_connections;
+  ID id_queue_capacity;
+  ID id_scheduler_policy;
+  ID id_request_timeout;
+  ID id_request_head_timeout;
+  ID id_first_data_timeout;
+  ID id_persistent_timeout;
+  ID id_worker_timeout;
+  ID id_log_level;
   ID id_runtime_role;
   std::mutex boot_callback_mutex;
   VALUE boot_callback = Qnil;
   constexpr const char *kMasterPreloadRuntimeRole = "ruby_master_preload";
-  constexpr const char *kMasterControlRuntimeRole = "ruby_master_control";
+  constexpr const char *kNativeRuntimeControlRole = "native_runtime_control";
   constexpr const char *kWorkerBootstrapRuntimeRole = "ruby_worker_bootstrap";
   constexpr const char *kMasterWorkerMode = "master_worker";
-  constexpr int kWorkerProcessCount = 1;
   constexpr std::size_t kMaxWorkerBootstrapStringPayloadBytes = 64 * 1024;
 
   struct RuntimeConfig
   {
+    std::string host;
     int port;
+    int workers;
+    std::size_t min_threads;
+    std::size_t max_threads;
+    std::size_t max_connections;
+    std::size_t queue_capacity;
+    std::string scheduler_policy;
     std::size_t max_request_head_bytes;
+    std::size_t request_timeout_seconds;
+    int request_head_timeout_seconds;
+    int first_data_timeout_seconds;
+    int persistent_timeout_seconds;
+    int worker_timeout_seconds;
+    std::string log_level;
   };
 
   struct BootContractConfig
@@ -117,7 +147,7 @@ namespace
 
   struct WorkerWaitContext
   {
-    pid_t pid;
+    std::vector<pid_t> pids;
     std::string error_message;
   };
 
@@ -126,6 +156,8 @@ namespace
     bool valid;
     std::string invalid_option_name;
   };
+
+  std::string trim_ascii_whitespace(std::string value);
 
   void handle_signal(int sig)
   {
@@ -145,6 +177,70 @@ namespace
     std::ostringstream timestamp;
     timestamp << std::put_time(&utc_time, "%Y-%m-%dT%H:%M:%SZ");
     return timestamp.str();
+  }
+
+  std::string runtime_environment_name()
+  {
+    if (const char *rails_env = std::getenv("RAILS_ENV"); rails_env != nullptr && rails_env[0] != '\0')
+    {
+      return rails_env;
+    }
+    if (const char *rack_env = std::getenv("RACK_ENV"); rack_env != nullptr && rack_env[0] != '\0')
+    {
+      return rack_env;
+    }
+
+    return "development";
+  }
+
+  void log_runtime_banner_start(
+      const std::string &host,
+      int port,
+      int workers,
+      std::size_t min_threads,
+      std::size_t max_threads)
+  {
+    const pid_t pid = getpid();
+    std::cout << "[" << pid << "] === vajra boot: " << utc_timestamp() << " ===" << std::endl;
+    std::cout << "[" << pid << "] Vajra starting in master-worker mode..." << std::endl;
+    std::cout << "[" << pid << "] * Environment: " << runtime_environment_name() << std::endl;
+    std::cout << "[" << pid << "] * Master PID: " << pid << std::endl;
+    std::cout << "[" << pid << "] * Workers: " << workers << std::endl;
+    std::cout << "[" << pid << "] * Min threads: " << min_threads << std::endl;
+    std::cout << "[" << pid << "] * Max threads: " << max_threads << std::endl;
+    std::cout << "[" << pid << "] * Bind: http://" << host << ":" << port << std::endl;
+  }
+
+  void log_worker_booted(int worker_index, pid_t pid, double boot_seconds)
+  {
+    std::ostringstream message;
+    message << "[" << getppid() << "] - Worker " << worker_index
+            << " (PID: " << pid << ") booted in "
+            << std::fixed << std::setprecision(2) << boot_seconds << "s";
+    std::cout << message.str() << std::endl;
+  }
+
+  void log_runtime_shutdown_begin()
+  {
+    std::cout << "[" << getpid() << "] - Gracefully shutting down workers..." << std::endl;
+  }
+
+  void log_runtime_shutdown_complete()
+  {
+    std::cout << "[" << getpid() << "] === vajra shutdown: " << utc_timestamp() << " ===" << std::endl;
+    std::cout << "[" << getpid() << "] - Goodbye!" << std::endl;
+  }
+
+  void begin_runtime_shutdown()
+  {
+    std::lock_guard<std::mutex> lock(server_mutex);
+    if (runtime_shutdown_started)
+    {
+      return;
+    }
+
+    runtime_shutdown_started = true;
+    log_runtime_shutdown_begin();
   }
 
   class SignalHandlerGuard
@@ -576,11 +672,23 @@ namespace
     }
 
     const ID key_id = SYM2ID(key);
-    if (key_id == id_port || key_id == id_max_request_head_bytes)
+    if (key_id == id_port ||
+        key_id == id_host ||
+        key_id == id_workers ||
+        key_id == id_threads ||
+        key_id == id_max_connections ||
+        key_id == id_queue_capacity ||
+        key_id == id_scheduler_policy ||
+        key_id == id_max_request_head_bytes ||
+        key_id == id_request_timeout ||
+        key_id == id_request_head_timeout ||
+        key_id == id_first_data_timeout ||
+        key_id == id_persistent_timeout ||
+        key_id == id_worker_timeout ||
+        key_id == id_log_level)
     {
       return ST_CONTINUE;
     }
-
     context->valid = false;
     context->invalid_option_name = rb_id2name(key_id);
     return ST_STOP;
@@ -721,11 +829,253 @@ namespace
     }
   }
 
+  std::string configured_string_from_env(const char *name, const std::string &default_value)
+  {
+    const char *env_value = std::getenv(name);
+    if (env_value == nullptr || env_value[0] == '\0')
+    {
+      return default_value;
+    }
+
+    const std::string trimmed_value = trim_ascii_whitespace(env_value);
+    return trimmed_value.empty() ? default_value : trimmed_value;
+  }
+
+  std::string configured_string_from_ruby(
+      VALUE options,
+      ID key,
+      const char *name,
+      const std::string &default_value)
+  {
+    if (NIL_P(options))
+    {
+      return default_value;
+    }
+
+    VALUE lookup_args[2] = {options, ID2SYM(key)};
+    const VALUE option_value = protected_ruby_call_value(
+        protected_rb_hash_lookup,
+        reinterpret_cast<VALUE>(lookup_args),
+        "failed to read Ruby start options");
+    if (NIL_P(option_value))
+    {
+      return default_value;
+    }
+
+    ProtectedStringConversion string_conversion{option_value, Qnil};
+    VALUE option_string = protected_ruby_call_value(
+        protected_rb_obj_as_string,
+        reinterpret_cast<VALUE>(&string_conversion),
+        ("invalid " + std::string(name)).c_str());
+    const char *string_value = StringValueCStr(option_string);
+    if (string_value[0] == '\0')
+    {
+      throw std::runtime_error("invalid " + std::string(name) + ": value must not be empty");
+    }
+
+    return string_value;
+  }
+
+  std::string trim_ascii_whitespace(std::string value)
+  {
+    const auto is_not_space = [](unsigned char character) {
+      return !std::isspace(character);
+    };
+
+    value.erase(
+        value.begin(),
+        std::find_if(value.begin(), value.end(), is_not_space));
+    value.erase(
+        std::find_if(value.rbegin(), value.rend(), is_not_space).base(),
+        value.end());
+    return value;
+  }
+
+  std::pair<std::size_t, std::size_t> default_thread_range()
+  {
+    return {1, 1};
+  }
+
+  std::pair<std::size_t, std::size_t> validated_thread_range(long min_threads, long max_threads, const char *name)
+  {
+    if (min_threads < 1 || max_threads < 1 || min_threads > max_threads)
+    {
+      throw std::runtime_error(
+          "invalid " + std::string(name) + ": expected thread range with 1 <= min <= max");
+    }
+
+    return {
+        static_cast<std::size_t>(min_threads),
+        static_cast<std::size_t>(max_threads)};
+  }
+
+  std::pair<std::size_t, std::size_t> configured_threads_from_ruby(VALUE options)
+  {
+    if (NIL_P(options))
+    {
+      return default_thread_range();
+    }
+
+    VALUE lookup_args[2] = {options, ID2SYM(id_threads)};
+    const VALUE option_value = protected_ruby_call_value(
+        protected_rb_hash_lookup,
+        reinterpret_cast<VALUE>(lookup_args),
+        "failed to read Ruby start options");
+    if (NIL_P(option_value))
+    {
+      return default_thread_range();
+    }
+    if (RB_TYPE_P(option_value, T_ARRAY) == 0)
+    {
+      throw std::runtime_error("invalid threads option: expected an Array with one or two integer values");
+    }
+
+    const long length = RARRAY_LEN(option_value);
+    if (length < 1 || length > 2)
+    {
+      throw std::runtime_error("invalid threads option: expected one or two integer values");
+    }
+
+    VALUE min_value = rb_ary_entry(option_value, 0);
+    VALUE max_value = length == 2 ? rb_ary_entry(option_value, 1) : min_value;
+    ProtectedIntegerConversion min_conversion{min_value, Qnil};
+    ProtectedIntegerConversion max_conversion{max_value, Qnil};
+    VALUE min_integer = protected_ruby_call_value(
+        protected_rb_integer,
+        reinterpret_cast<VALUE>(&min_conversion),
+        "invalid threads option");
+    VALUE max_integer = protected_ruby_call_value(
+        protected_rb_integer,
+        reinterpret_cast<VALUE>(&max_conversion),
+        "invalid threads option");
+    VALUE min_copy = min_integer;
+    VALUE max_copy = max_integer;
+    return validated_thread_range(
+        protected_ruby_call_long(protected_rb_num2long, reinterpret_cast<VALUE>(&min_copy), "invalid threads option"),
+        protected_ruby_call_long(protected_rb_num2long, reinterpret_cast<VALUE>(&max_copy), "invalid threads option"),
+        "threads option");
+  }
+
+  std::pair<std::size_t, std::size_t> configured_threads_from_env(
+      const std::pair<std::size_t, std::size_t> &default_value)
+  {
+    const char *env_value = std::getenv("VAJRA_THREADS");
+    if (env_value == nullptr || env_value[0] == '\0')
+    {
+      const char *max_threads_env = std::getenv("MAX_THREADS");
+      if (max_threads_env == nullptr || max_threads_env[0] == '\0')
+      {
+        return default_value;
+      }
+
+      const long max_threads = parse_integer_value("MAX_THREADS", max_threads_env, 1, 1'024);
+      return validated_thread_range(
+          static_cast<long>(default_value.first),
+          max_threads,
+          "MAX_THREADS");
+    }
+
+    std::stringstream stream(env_value);
+    std::string first_token;
+    std::string second_token;
+    if (!std::getline(stream, first_token, ','))
+    {
+      throw std::runtime_error("invalid VAJRA_THREADS: expected one or two integer values");
+    }
+    const std::string trimmed_first = trim_ascii_whitespace(first_token);
+    if (trimmed_first.empty())
+    {
+      throw std::runtime_error("invalid VAJRA_THREADS: expected one or two integer values");
+    }
+
+    long min_threads = parse_integer_value("VAJRA_THREADS", trimmed_first, 1, 1'024);
+    long max_threads = min_threads;
+    if (std::getline(stream, second_token, ','))
+    {
+      const std::string trimmed_second = trim_ascii_whitespace(second_token);
+      if (trimmed_second.empty())
+      {
+        throw std::runtime_error("invalid VAJRA_THREADS: expected one or two integer values");
+      }
+      max_threads = parse_integer_value("VAJRA_THREADS", trimmed_second, 1, 1'024);
+      std::string trailing_token;
+      if (std::getline(stream, trailing_token, ','))
+      {
+        throw std::runtime_error("invalid VAJRA_THREADS: expected one or two integer values");
+      }
+    }
+
+    return validated_thread_range(min_threads, max_threads, "VAJRA_THREADS");
+  }
+
+  std::string normalized_log_level(const std::string &value, const char *name)
+  {
+    std::string normalized = value;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char character) {
+      return static_cast<char>(std::tolower(character));
+    });
+
+    if (normalized == "debug" ||
+        normalized == "info" ||
+        normalized == "warn" ||
+        normalized == "error" ||
+        normalized == "fatal")
+    {
+      return normalized;
+    }
+
+    throw std::runtime_error(
+        "invalid " + std::string(name) + ": " + value +
+        ". Expected one of: debug, info, warn, error, fatal.");
+  }
+
+  std::string normalized_scheduler_policy(const std::string &value, const char *name)
+  {
+    std::string normalized = value;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char character) {
+      return static_cast<char>(std::tolower(character));
+    });
+
+    if (normalized == "least_loaded")
+    {
+      return normalized;
+    }
+
+    throw std::runtime_error(
+        "invalid " + std::string(name) + ": " + value +
+        ". Expected: least_loaded.");
+  }
+
+  bool debug_logging_enabled(const std::string &log_level)
+  {
+    return log_level == "debug";
+  }
+
   RuntimeConfig configured_runtime(VALUE options)
   {
     validate_supported_ruby_options(options);
 
+    const std::string ruby_host = configured_string_from_ruby(options, id_host, "host option", "0.0.0.0");
     const long ruby_port = configured_integer_from_ruby(options, id_port, "port option", 3000, 0, 65'535);
+    const long ruby_workers = configured_integer_from_ruby(options, id_workers, "workers option", 1, 1, 1'024);
+    const std::pair<std::size_t, std::size_t> ruby_threads = configured_threads_from_ruby(options);
+    const long ruby_max_connections = configured_integer_from_ruby(
+        options,
+        id_max_connections,
+        "max_connections option",
+        256,
+        1,
+        std::numeric_limits<int>::max());
+    const long ruby_queue_capacity = configured_integer_from_ruby(
+        options,
+        id_queue_capacity,
+        "queue_capacity option",
+        std::numeric_limits<long>::max(),
+        1,
+        std::numeric_limits<long>::max());
+    const std::string ruby_scheduler_policy = normalized_scheduler_policy(
+        configured_string_from_ruby(options, id_scheduler_policy, "scheduler_policy option", "least_loaded"),
+        "scheduler_policy option");
     const long ruby_max_request_head_bytes = configured_integer_from_ruby(
         options,
         id_max_request_head_bytes,
@@ -733,21 +1083,118 @@ namespace
         static_cast<long>(Vajra::request::kDefaultMaxRequestHeadBytes),
         1,
         std::numeric_limits<int>::max());
+    const long ruby_request_timeout_seconds = configured_integer_from_ruby(
+        options,
+        id_request_timeout,
+        "request_timeout option",
+        25,
+        1,
+        std::numeric_limits<int>::max());
+    const long ruby_request_head_timeout_seconds = configured_integer_from_ruby(
+        options,
+        id_request_head_timeout,
+        "request_head_timeout option",
+        5,
+        1,
+        std::numeric_limits<int>::max());
+    const long ruby_first_data_timeout_seconds = configured_integer_from_ruby(
+        options,
+        id_first_data_timeout,
+        "first_data_timeout option",
+        30,
+        1,
+        std::numeric_limits<int>::max());
+    const long ruby_persistent_timeout_seconds = configured_integer_from_ruby(
+        options,
+        id_persistent_timeout,
+        "persistent_timeout option",
+        30,
+        1,
+        std::numeric_limits<int>::max());
+    const long ruby_worker_timeout_seconds = configured_integer_from_ruby(
+        options,
+        id_worker_timeout,
+        "worker_timeout option",
+        60,
+        1,
+        std::numeric_limits<int>::max());
+    const std::string ruby_log_level = normalized_log_level(
+        configured_string_from_ruby(options, id_log_level, "log_level option", "info"),
+        "log_level option");
 
+    const std::string host = configured_string_from_env("VAJRA_HOST", ruby_host);
     const int port = static_cast<int>(configured_integer_from_env(
         "VAJRA_PORT",
         ruby_port,
         0,
         65'535,
         "Use 0 to request an ephemeral port."));
+    const int workers = static_cast<int>(configured_integer_from_env(
+        "VAJRA_WORKERS",
+        configured_integer_from_env("WEB_CONCURRENCY", ruby_workers, 1, 1'024),
+        1,
+        1'024));
+    const std::pair<std::size_t, std::size_t> threads = configured_threads_from_env(ruby_threads);
+    const std::size_t max_connections = static_cast<std::size_t>(ruby_max_connections);
+    const std::size_t queue_capacity = static_cast<std::size_t>(configured_integer_from_env(
+        "VAJRA_QUEUE_CAPACITY",
+        ruby_queue_capacity,
+        1,
+        std::numeric_limits<long>::max()));
+    const std::string scheduler_policy = normalized_scheduler_policy(
+        configured_string_from_env("VAJRA_SCHEDULER_POLICY", ruby_scheduler_policy),
+        "VAJRA_SCHEDULER_POLICY");
 
     const std::size_t max_request_head_bytes = static_cast<std::size_t>(configured_integer_from_env(
         "VAJRA_MAX_REQUEST_HEAD_BYTES",
         ruby_max_request_head_bytes,
         1,
         std::numeric_limits<int>::max()));
+    const std::size_t request_timeout_seconds = static_cast<std::size_t>(configured_integer_from_env(
+        "VAJRA_REQUEST_TIMEOUT",
+        ruby_request_timeout_seconds,
+        1,
+        std::numeric_limits<int>::max()));
+    const int request_head_timeout_seconds = static_cast<int>(configured_integer_from_env(
+        "VAJRA_REQUEST_HEAD_TIMEOUT",
+        ruby_request_head_timeout_seconds,
+        1,
+        std::numeric_limits<int>::max()));
+    const int first_data_timeout_seconds = static_cast<int>(configured_integer_from_env(
+        "VAJRA_FIRST_DATA_TIMEOUT",
+        ruby_first_data_timeout_seconds,
+        1,
+        std::numeric_limits<int>::max()));
+    const int persistent_timeout_seconds = static_cast<int>(configured_integer_from_env(
+        "VAJRA_PERSISTENT_TIMEOUT",
+        ruby_persistent_timeout_seconds,
+        1,
+        std::numeric_limits<int>::max()));
+    const int worker_timeout_seconds = static_cast<int>(configured_integer_from_env(
+        "VAJRA_WORKER_TIMEOUT",
+        ruby_worker_timeout_seconds,
+        1,
+        std::numeric_limits<int>::max()));
+    const std::string log_level = normalized_log_level(
+        configured_string_from_env("VAJRA_LOG_LEVEL", ruby_log_level),
+        "VAJRA_LOG_LEVEL");
 
-    return RuntimeConfig{port, max_request_head_bytes};
+    return RuntimeConfig{
+        host,
+        port,
+        workers,
+        threads.first,
+        threads.second,
+        max_connections,
+        queue_capacity,
+        scheduler_policy,
+        max_request_head_bytes,
+        request_timeout_seconds,
+        request_head_timeout_seconds,
+        first_data_timeout_seconds,
+        persistent_timeout_seconds,
+        worker_timeout_seconds,
+        log_level};
   }
 
   VALUE rb_vajra_start(int argc, VALUE *argv, VALUE self)
@@ -758,7 +1205,22 @@ namespace
       VALUE options = Qnil;
       rb_scan_args(argc, argv, "0:", &options);
       const RuntimeConfig config = configured_runtime(options);
-      VajraNative::start(config.port, config.max_request_head_bytes);
+      VajraNative::start(
+          config.host,
+          config.port,
+          config.workers,
+          config.min_threads,
+          config.max_threads,
+          config.max_connections,
+          config.queue_capacity,
+          config.scheduler_policy,
+          config.max_request_head_bytes,
+          config.request_timeout_seconds,
+          config.request_head_timeout_seconds,
+          config.first_data_timeout_seconds,
+          config.persistent_timeout_seconds,
+          config.worker_timeout_seconds,
+          config.log_level);
     }
     catch (const std::exception &error)
     {
@@ -816,43 +1278,121 @@ namespace VajraNative
       }
     }
 
+    std::size_t checked_multiply(std::size_t left, std::size_t right, const char *error_message)
+    {
+      if (left != 0 && right > (std::numeric_limits<std::size_t>::max() / left))
+      {
+        throw std::runtime_error(error_message);
+      }
+
+      return left * right;
+    }
+
+    std::size_t checked_add(std::size_t left, std::size_t right, const char *error_message)
+    {
+      if (right > (std::numeric_limits<std::size_t>::max() - left))
+      {
+        throw std::runtime_error(error_message);
+      }
+
+      return left + right;
+    }
+
+    void validate_worker_channel_capacity(int workers, std::size_t max_threads)
+    {
+      constexpr std::size_t kRuntimeFdReserve = 32;
+      const std::size_t total_request_channels = checked_multiply(
+          static_cast<std::size_t>(workers),
+          max_threads,
+          "invalid workers/threads combination: workers * max_threads is too large");
+      const std::size_t boot_request_channel_fds = checked_multiply(
+          max_threads,
+          static_cast<std::size_t>(2),
+          "invalid workers/threads combination: worker boot request channel fd count is too large");
+      const std::size_t boot_readiness_pipe_fds = static_cast<std::size_t>(2);
+      const std::size_t boot_overhead_fds = checked_add(
+          boot_request_channel_fds,
+          boot_readiness_pipe_fds,
+          "invalid workers/threads combination: worker boot fd count is too large");
+      const std::size_t peak_parent_fds = checked_add(
+          total_request_channels,
+          boot_overhead_fds,
+          "invalid workers/threads combination: required fd count is too large");
+      const std::size_t required_fds = checked_add(
+          peak_parent_fds,
+          kRuntimeFdReserve,
+          "invalid workers/threads combination: required fd count is too large");
+
+      rlimit fd_limit{};
+      if (getrlimit(RLIMIT_NOFILE, &fd_limit) != 0 || fd_limit.rlim_cur == RLIM_INFINITY)
+      {
+        return;
+      }
+
+      const std::size_t available_fds = static_cast<std::size_t>(fd_limit.rlim_cur);
+      if (required_fds > available_fds)
+      {
+        throw std::runtime_error(
+            "invalid workers/threads combination: workers * max_threads would keep " +
+            std::to_string(total_request_channels) + " parent request-channel fds open in steady state and peak at " +
+            std::to_string(peak_parent_fds) + " parent fds during worker boot (" +
+            std::to_string(boot_request_channel_fds) + " boot request-channel fds plus " +
+            std::to_string(boot_readiness_pipe_fds) + " readiness-pipe fds), which exceeds the process fd limit of " +
+            std::to_string(available_fds) + ". Lower workers or threads, or raise the fd limit.");
+      }
+    }
+
     void set_worker_runtime(pid_t pid, int request_channel_fd)
     {
       const std::lock_guard<std::mutex> lock(server_mutex);
-      worker_pid = pid;
-      worker_request_channel_fd = request_channel_fd;
+      worker_pids.push_back(pid);
+      worker_request_channel_fds.push_back(request_channel_fd);
       worker_startup_in_progress = false;
     }
 
-    void clear_worker_pid()
+    void clear_worker_runtime()
     {
-      int request_channel_fd = -1;
-      const std::lock_guard<std::mutex> lock(server_mutex);
-      request_channel_fd = worker_request_channel_fd;
-      worker_pid = -1;
-      worker_request_channel_fd = -1;
-      stop_requested = false;
-      worker_startup_in_progress = false;
-      close_fd_if_open(request_channel_fd);
+      std::vector<int> request_channel_fds;
+      {
+        const std::lock_guard<std::mutex> lock(server_mutex);
+        request_channel_fds = std::move(worker_request_channel_fds);
+        worker_pids.clear();
+        worker_request_channel_fds.clear();
+        stop_requested = false;
+        worker_startup_in_progress = false;
+      }
+
+      for (int request_channel_fd : request_channel_fds)
+      {
+        close_fd_if_open(request_channel_fd);
+      }
     }
 
-    void install_server_instance(std::unique_ptr<Vajra::Server> server)
+    void install_server_instance(std::shared_ptr<Vajra::Server> server)
     {
       const std::lock_guard<std::mutex> lock(server_mutex);
       server_instance = std::move(server);
       worker_startup_in_progress = false;
     }
 
-    std::unique_ptr<Vajra::Server> take_server_instance()
+    std::shared_ptr<Vajra::Server> take_server_instance()
     {
       const std::lock_guard<std::mutex> lock(server_mutex);
-      return std::move(server_instance);
+      std::shared_ptr<Vajra::Server> server = server_instance;
+      server_instance.reset();
+      return server;
+    }
+
+    bool runtime_running()
+    {
+      const std::lock_guard<std::mutex> lock(server_mutex);
+      return !worker_pids.empty() || server_instance || worker_startup_in_progress;
     }
 
     bool try_begin_startup()
     {
       const std::lock_guard<std::mutex> lock(server_mutex);
-      if (worker_pid > 0 || server_instance || worker_startup_in_progress)
+      if (!worker_pids.empty() || server_instance || worker_startup_in_progress)
       {
         return false;
       }
@@ -861,59 +1401,61 @@ namespace VajraNative
       return true;
     }
 
-    bool stop_worker_process()
+    bool stop_worker_processes()
     {
-      pid_t pid = -1;
+      std::vector<pid_t> pids;
       bool startup_in_progress = false;
-      int request_channel_fd = -1;
+      std::vector<int> request_channel_fds;
       {
         const std::lock_guard<std::mutex> lock(server_mutex);
-        pid = worker_pid;
-        request_channel_fd = worker_request_channel_fd;
+        pids = worker_pids;
+        request_channel_fds = worker_request_channel_fds;
         startup_in_progress = worker_startup_in_progress;
-        if (pid > 0 || startup_in_progress)
+        if (!pids.empty() || startup_in_progress)
         {
           stop_requested = true;
         }
       }
 
-      if (request_channel_fd >= 0)
+      for (int request_channel_fd : request_channel_fds)
       {
         shutdown(request_channel_fd, SHUT_RDWR);
         close_fd_if_open(request_channel_fd);
-        {
-          const std::lock_guard<std::mutex> lock(server_mutex);
-          if (worker_request_channel_fd == request_channel_fd)
-          {
-            worker_request_channel_fd = -1;
-          }
-        }
+      }
+      {
+        const std::lock_guard<std::mutex> lock(server_mutex);
+        worker_request_channel_fds.clear();
       }
 
-      if (pid <= 0)
+      if (pids.empty())
       {
         return startup_in_progress;
       }
 
-      if (request_channel_fd >= 0)
+      if (!request_channel_fds.empty())
       {
         return true;
       }
 
-      for (;;)
+      for (pid_t pid : pids)
       {
-        if (kill(pid, SIGINT) == 0 || errno == ESRCH)
+        for (;;)
         {
-          return true;
-        }
+          if (kill(pid, SIGINT) == 0 || errno == ESRCH)
+          {
+            break;
+          }
 
-        if (errno == EINTR)
-        {
-          continue;
-        }
+          if (errno == EINTR)
+          {
+            continue;
+          }
 
-        throw std::runtime_error("failed to signal worker shutdown");
+          throw std::runtime_error("failed to signal worker shutdown");
+        }
       }
+
+      return true;
     }
 
     void replay_pending_stop_if_needed()
@@ -926,7 +1468,7 @@ namespace VajraNative
 
       if (should_stop)
       {
-        stop_worker_process();
+        stop_worker_processes();
       }
     }
 
@@ -936,51 +1478,71 @@ namespace VajraNative
       bool forwarded_shutdown = false;
       for (;;)
       {
-        int status = 0;
-        const pid_t wait_result = waitpid(context->pid, &status, 0);
-        if (wait_result == context->pid)
+        bool any_remaining = false;
+        for (auto iterator = context->pids.begin(); iterator != context->pids.end();)
         {
-          if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+          int status = 0;
+          const pid_t wait_result = waitpid(*iterator, &status, WNOHANG);
+          if (wait_result == 0)
           {
-            return nullptr;
+            any_remaining = true;
+            ++iterator;
+            continue;
+          }
+          if (wait_result == *iterator)
+          {
+            if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0))
+            {
+              if (WIFEXITED(status))
+              {
+                context->error_message =
+                    "worker process exited unexpectedly with status " + std::to_string(WEXITSTATUS(status));
+              }
+              else if (WIFSIGNALED(status))
+              {
+                context->error_message =
+                    "worker process exited unexpectedly due to signal " + std::to_string(WTERMSIG(status));
+              }
+              else
+              {
+                context->error_message = "worker process exited unexpectedly";
+              }
+              return nullptr;
+            }
+            iterator = context->pids.erase(iterator);
+            continue;
+          }
+          if (wait_result < 0 && errno == EINTR)
+          {
+            break;
           }
 
-          if (WIFEXITED(status))
-          {
-            context->error_message =
-                "worker process exited unexpectedly with status " + std::to_string(WEXITSTATUS(status));
-            return nullptr;
-          }
-
-          if (WIFSIGNALED(status))
-          {
-            context->error_message =
-                "worker process exited unexpectedly due to signal " + std::to_string(WTERMSIG(status));
-            return nullptr;
-          }
-
-          context->error_message = "worker process exited unexpectedly";
+          context->error_message = "failed to wait for worker process";
           return nullptr;
         }
 
-        if (wait_result < 0 && errno == EINTR)
+        if (context->pids.empty())
         {
-          if (shutdown_requested() && !forwarded_shutdown)
-          {
-            stop_worker_process();
-            forwarded_shutdown = true;
-          }
-          continue;
+          return nullptr;
         }
 
-        context->error_message = "failed to wait for worker process";
-        return nullptr;
+        if (shutdown_requested() && !forwarded_shutdown)
+        {
+          stop_worker_processes();
+          forwarded_shutdown = true;
+        }
+
+        if (any_remaining)
+        {
+          usleep(10'000);
+          continue;
+        }
       }
     }
 
-    void wait_for_worker_exit(pid_t pid)
+    void wait_for_worker_exit(const std::vector<pid_t> &pids)
     {
-      WorkerWaitContext context{pid, ""};
+      WorkerWaitContext context{pids, ""};
       rb_thread_call_without_gvl(
           wait_for_worker_exit_without_gvl,
           &context,
@@ -1012,14 +1574,27 @@ namespace VajraNative
       }
     }
 
+    void reap_worker_processes(const std::vector<pid_t> &pids)
+    {
+      for (pid_t pid : pids)
+      {
+        reap_worker_process(pid);
+      }
+    }
+
     void run_worker_process(
-        int request_channel_fd,
+        std::vector<int> request_channel_fds,
+        std::size_t max_threads,
         int port,
         std::size_t max_request_head_bytes,
-        int readiness_write_fd)
+        int readiness_write_fd,
+        int worker_index,
+        int worker_processes,
+        bool debug_logging)
     {
       try
       {
+        const auto boot_started_at = std::chrono::steady_clock::now();
         const BootContractResult boot_result = run_boot_contract(
             BootContractConfig{port, max_request_head_bytes, kWorkerBootstrapRuntimeRole});
         if (boot_result.status != BootStatus::ready)
@@ -1031,16 +1606,23 @@ namespace VajraNative
         }
 
         report_worker_boot_ready(readiness_write_fd);
-        std::cout << "[Vajra][lifecycle] " << utc_timestamp()
-                  << " event=worker_ready state=booting boot_status=ready stop_reason=none"
-                  << " port=" << port
-                  << " listener_owned=false listener_fd=-1"
-                  << " mode=" << kMasterWorkerMode
-                  << " runtime_role=" << boot_result.runtime_role
-                  << " worker_processes=" << kWorkerProcessCount
-                  << std::endl;
+        if (debug_logging)
+        {
+          std::cout << "[Vajra][lifecycle] " << utc_timestamp()
+                    << " event=worker_ready state=booting boot_status=ready stop_reason=none"
+                    << " port=" << port
+                    << " listener_owned=false listener_fd=-1"
+                    << " mode=" << kMasterWorkerMode
+                    << " process_role=" << boot_result.runtime_role
+                    << " request_execution_role=" << boot_result.runtime_role
+                    << " worker_processes=" << worker_processes
+                    << std::endl;
+        }
+        const auto boot_finished_at = std::chrono::steady_clock::now();
+        const std::chrono::duration<double> boot_elapsed = boot_finished_at - boot_started_at;
+        log_worker_booted(worker_index, getpid(), boot_elapsed.count());
         close(readiness_write_fd);
-        Vajra::rack::run_worker_request_execution_loop(request_channel_fd);
+        Vajra::rack::run_worker_request_execution_loop(request_channel_fds, max_threads);
         _exit(0);
       }
       catch (const std::exception &error)
@@ -1055,15 +1637,47 @@ namespace VajraNative
       }
     }
 
-    void run_master_runtime_server(int port, std::size_t max_request_head_bytes, int request_channel_fd)
+    void run_master_runtime_server(
+        const std::string &host,
+        int port,
+        std::size_t max_request_head_bytes,
+        const std::vector<std::vector<int>> &request_channel_fds,
+        const std::vector<pid_t> &worker_pids_for_runtime,
+        std::size_t min_threads,
+        std::size_t max_connections,
+        std::size_t queue_capacity,
+        std::size_t request_timeout_seconds,
+        int request_head_timeout_seconds,
+        int first_data_timeout_seconds,
+        int persistent_timeout_seconds,
+        int worker_timeout_seconds,
+        int worker_processes,
+        bool debug_logging)
     {
-      auto server = std::make_unique<Vajra::Server>(
+      auto server = std::make_shared<Vajra::Server>(
           port,
+          host,
           max_request_head_bytes,
-          std::make_shared<Vajra::rack::RackRequestExecutor>(Vajra::rack::request_channel_transport(request_channel_fd)),
-          kMasterControlRuntimeRole,
+          std::make_shared<Vajra::rack::RackRequestExecutor>(
+              Vajra::rack::request_channel_transport(
+                  request_channel_fds,
+                  std::vector<int>(worker_pids_for_runtime.begin(), worker_pids_for_runtime.end()),
+                  min_threads,
+                  queue_capacity,
+                  request_timeout_seconds,
+                  worker_timeout_seconds,
+                  debug_logging)),
+          kNativeRuntimeControlRole,
           kMasterWorkerMode,
-          kWorkerProcessCount);
+          worker_processes,
+          kWorkerBootstrapRuntimeRole,
+          debug_logging,
+          -1,
+          request_head_timeout_seconds,
+          first_data_timeout_seconds,
+          persistent_timeout_seconds,
+          max_connections,
+          begin_runtime_shutdown);
       Vajra::Server *server_ptr = server.get();
       install_server_instance(std::move(server));
       ServerRunContext context{server_ptr, ""};
@@ -1103,12 +1717,36 @@ namespace VajraNative
     return shutting_down != 0;
   }
 
-  void start(int port, std::size_t max_request_head_bytes)
+  void begin_runtime_shutdown()
+  {
+    ::begin_runtime_shutdown();
+  }
+
+  void start(
+      std::string host,
+      int port,
+      int workers,
+      std::size_t min_threads,
+      std::size_t max_threads,
+      std::size_t max_connections,
+      std::size_t queue_capacity,
+      std::string scheduler_policy,
+      std::size_t max_request_head_bytes,
+      std::size_t request_timeout_seconds,
+      int request_head_timeout_seconds,
+      int first_data_timeout_seconds,
+      int persistent_timeout_seconds,
+      int worker_timeout_seconds,
+      std::string log_level)
   {
     SignalHandlerGuard signal_handler_guard;
     signal_handler_guard.install();
 
     shutting_down = 0;
+    {
+      std::lock_guard<std::mutex> lock(server_mutex);
+      runtime_shutdown_started = false;
+    }
 
     try
     {
@@ -1122,105 +1760,193 @@ namespace VajraNative
       {
         throw std::runtime_error("worker-only Vajra.start must be invoked from the Ruby main thread");
       }
+      if (scheduler_policy != "least_loaded")
+      {
+        throw std::runtime_error("unsupported scheduler_policy: " + scheduler_policy);
+      }
+      validate_worker_channel_capacity(workers, max_threads);
+      const bool debug_logging = debug_logging_enabled(log_level);
+      log_runtime_banner_start(host, port, workers, min_threads, max_threads);
       const BootContractResult master_boot_result = run_boot_contract(
           BootContractConfig{port, max_request_head_bytes, kMasterPreloadRuntimeRole});
       ensure_ready_boot_result(master_boot_result);
 
-      int readiness_pipe[2] = {-1, -1};
-      if (pipe(readiness_pipe) != 0)
-      {
-        const int error_number = errno;
-        throw std::runtime_error(
-            std::string("worker bootstrap pipe creation failed: ") + std::strerror(error_number));
-      }
+      std::vector<pid_t> booted_worker_pids;
+      std::vector<std::vector<int>> parent_request_channels;
 
-      int request_channel[2] = {-1, -1};
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, request_channel) != 0)
+      for (int worker_index = 0; worker_index < workers; ++worker_index)
       {
-        const int error_number = errno;
-        close_fd_if_open(readiness_pipe[0]);
-        close_fd_if_open(readiness_pipe[1]);
-        throw std::runtime_error(
-            std::string("worker request channel creation failed: ") + std::strerror(error_number));
-      }
+        int readiness_pipe[2] = {-1, -1};
+        if (pipe(readiness_pipe) != 0)
+        {
+          const int error_number = errno;
+          throw std::runtime_error(
+              std::string("worker bootstrap pipe creation failed: ") + std::strerror(error_number));
+        }
+
+        std::vector<std::array<int, 2>> request_channels;
+        request_channels.reserve(max_threads);
+        for (std::size_t thread_index = 0; thread_index < max_threads; ++thread_index)
+        {
+          std::array<int, 2> request_channel = {-1, -1};
+          if (socketpair(AF_UNIX, SOCK_STREAM, 0, request_channel.data()) != 0)
+          {
+            const int error_number = errno;
+            close_fd_if_open(readiness_pipe[0]);
+            close_fd_if_open(readiness_pipe[1]);
+            for (const auto &pair : request_channels)
+            {
+              close_fd_if_open(pair[0]);
+              close_fd_if_open(pair[1]);
+            }
+            throw std::runtime_error(
+                std::string("worker request channel creation failed: ") + std::strerror(error_number));
+          }
+          request_channels.push_back(request_channel);
+        }
 
 #if defined(__APPLE__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #endif
-      const pid_t pid = fork();
+        const pid_t pid = fork();
 #if defined(__APPLE__)
 #pragma clang diagnostic pop
 #endif
-      if (pid < 0)
-      {
-        const int error_number = errno;
-        close_fd_if_open(readiness_pipe[0]);
+        if (pid < 0)
+        {
+          const int error_number = errno;
+          close_fd_if_open(readiness_pipe[0]);
+          close_fd_if_open(readiness_pipe[1]);
+          for (const auto &pair : request_channels)
+          {
+            close_fd_if_open(pair[0]);
+            close_fd_if_open(pair[1]);
+          }
+          throw std::runtime_error(
+              std::string("worker fork failed: ") + std::strerror(error_number));
+        }
+
+        if (pid == 0)
+        {
+          rb_thread_atfork();
+          close_fd_if_open(readiness_pipe[0]);
+          std::vector<int> child_request_channels;
+          child_request_channels.reserve(request_channels.size());
+          for (const auto &pair : request_channels)
+          {
+            close_fd_if_open(pair[0]);
+            child_request_channels.push_back(pair[1]);
+          }
+          run_worker_process(
+              std::move(child_request_channels),
+              max_threads,
+              port,
+              max_request_head_bytes,
+              readiness_pipe[1],
+              worker_index,
+              workers,
+              debug_logging);
+        }
+
+        std::vector<int> worker_parent_channels;
+        worker_parent_channels.reserve(request_channels.size());
+        for (const auto &pair : request_channels)
+        {
+          close_fd_if_open(pair[1]);
+          worker_parent_channels.push_back(pair[0]);
+        }
+        set_worker_runtime(pid, worker_parent_channels.front());
+        {
+          const std::lock_guard<std::mutex> lock(server_mutex);
+          for (std::size_t index = 1; index < worker_parent_channels.size(); ++index)
+          {
+            worker_request_channel_fds.push_back(worker_parent_channels[index]);
+          }
+        }
+        replay_pending_stop_if_needed();
         close_fd_if_open(readiness_pipe[1]);
-        close_fd_if_open(request_channel[0]);
-        close_fd_if_open(request_channel[1]);
-        throw std::runtime_error(
-            std::string("worker fork failed: ") + std::strerror(error_number));
-      }
 
-      if (pid == 0)
-      {
-        rb_thread_atfork();
+        WorkerBootstrapReport report;
+        try
+        {
+          report = read_worker_bootstrap_report(readiness_pipe[0]);
+        }
+        catch (...)
+        {
+          close_fd_if_open(readiness_pipe[0]);
+          stop_worker_processes();
+          reap_worker_processes(booted_worker_pids);
+          reap_worker_process(pid);
+          clear_worker_runtime();
+          throw;
+        }
         close_fd_if_open(readiness_pipe[0]);
-        close_fd_if_open(request_channel[0]);
-        run_worker_process(request_channel[1], port, max_request_head_bytes, readiness_pipe[1]);
+
+        if (report.status == WorkerBootstrapStatus::failed)
+        {
+          stop_worker_processes();
+          reap_worker_processes(booted_worker_pids);
+          reap_worker_process(pid);
+          clear_worker_runtime();
+          const auto &diagnostic = report.diagnostic.value();
+          throw std::runtime_error(
+              "Ruby worker boot failed (" + diagnostic.code + "/" + diagnostic.category + "): " +
+              diagnostic.message);
+        }
+
+        booted_worker_pids.push_back(pid);
+        parent_request_channels.push_back(std::move(worker_parent_channels));
       }
 
-      close_fd_if_open(request_channel[1]);
-      set_worker_runtime(pid, request_channel[0]);
-      replay_pending_stop_if_needed();
-      close_fd_if_open(readiness_pipe[1]);
-
-      WorkerBootstrapReport report;
-      try
-      {
-        report = read_worker_bootstrap_report(readiness_pipe[0]);
-      }
-      catch (...)
-      {
-        close_fd_if_open(readiness_pipe[0]);
-        stop_worker_process();
-        reap_worker_process(pid);
-        clear_worker_pid();
-        throw;
-      }
-      close_fd_if_open(readiness_pipe[0]);
-
-      if (report.status == WorkerBootstrapStatus::failed)
-      {
-        reap_worker_process(pid);
-        clear_worker_pid();
-        const auto &diagnostic = report.diagnostic.value();
-        throw std::runtime_error(
-            "Ruby worker boot failed (" + diagnostic.code + "/" + diagnostic.category + "): " +
-            diagnostic.message);
-      }
-
-      run_master_runtime_server(port, max_request_head_bytes, request_channel[0]);
-      stop_worker_process();
-      wait_for_worker_exit(pid);
-      clear_worker_pid();
+      run_master_runtime_server(
+          host,
+          port,
+          max_request_head_bytes,
+          parent_request_channels,
+          booted_worker_pids,
+          min_threads,
+          max_connections,
+          queue_capacity,
+          request_timeout_seconds,
+          request_head_timeout_seconds,
+          first_data_timeout_seconds,
+          persistent_timeout_seconds,
+          worker_timeout_seconds,
+          workers,
+          debug_logging);
+      begin_runtime_shutdown();
+      stop_worker_processes();
+      wait_for_worker_exit(booted_worker_pids);
+      clear_worker_runtime();
+      log_runtime_shutdown_complete();
     }
     catch (...)
     {
-      clear_worker_pid();
+      clear_worker_runtime();
       throw;
     }
   }
 
   void stop()
   {
-    (void)stop_worker_process();
-
-    std::lock_guard<std::mutex> lock(server_mutex);
-    if (server_instance)
+    if (runtime_running())
     {
-      server_instance->stop();
+      begin_runtime_shutdown();
+    }
+    (void)stop_worker_processes();
+
+    Vajra::Server *server = nullptr;
+    std::shared_ptr<Vajra::Server> server_handle;
+    {
+      std::lock_guard<std::mutex> lock(server_mutex);
+      server_handle = server_instance;
+      server = server_handle.get();
+    }
+
+    if (server != nullptr)
+    {
+      server->stop();
     }
   }
 }
@@ -1228,7 +1954,19 @@ namespace VajraNative
 extern "C" void Init_vajra()
 {
   id_port = rb_intern("port");
+  id_host = rb_intern("host");
+  id_workers = rb_intern("workers");
+  id_threads = rb_intern("threads");
+  id_max_connections = rb_intern("max_connections");
+  id_queue_capacity = rb_intern("queue_capacity");
+  id_scheduler_policy = rb_intern("scheduler_policy");
+  id_request_timeout = rb_intern("request_timeout");
+  id_request_head_timeout = rb_intern("request_head_timeout");
+  id_first_data_timeout = rb_intern("first_data_timeout");
+  id_persistent_timeout = rb_intern("persistent_timeout");
+  id_worker_timeout = rb_intern("worker_timeout");
   id_max_request_head_bytes = rb_intern("max_request_head_bytes");
+  id_log_level = rb_intern("log_level");
   id_runtime_role = rb_intern("runtime_role");
   rb_global_variable(&boot_callback);
   Vajra::rack::initialize_rack_execution_bridge();

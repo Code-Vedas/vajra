@@ -6,26 +6,32 @@ permalink: /runtime-model/
 
 # Runtime Model
 
-Vajra starts from the Ruby executable, boots the Ruby application, and then
-runs the server through a native runtime plus Ruby worker execution model.
+Vajra is a native Ruby application server with a split runtime:
+
+- a native runtime process owns listener lifecycle and transport
+- Ruby worker processes execute application requests
+- a control path coordinates boot, readiness, drain, and shutdown
+- a request path carries request and response execution data
 
 ## Boot Flow
 
 1. Ruby loads the `vajra` package.
 2. The package loads the compiled native extension.
 3. The executable calls `Vajra.start`.
-4. Ruby preload boot runs in the main process.
-5. The main process forks one Ruby worker.
-6. The native runtime in the main process opens the listener and handles
-   network I/O after worker readiness succeeds.
+4. Ruby preload boot runs in the control process.
+5. the control process forks Ruby workers from the preloaded application state.
+6. worker readiness is reported back to the runtime.
+7. the native runtime binds listeners, accepts connections, and transports
+   requests and responses.
 
 ## Process Model
 
 Vajra uses an explicit master-and-worker split:
 
-- the main process owns boot orchestration, listener lifecycle, connection
-  acceptance, request parsing, and response transport
-- the Ruby worker owns application request execution
+- the control process owns boot orchestration and worker supervision
+- the native runtime owns listener lifecycle, connection acceptance, request
+  parsing, and response transport
+- Ruby workers own application request execution
 - the request path between them uses Vajra's request-channel IPC
 - `Vajra.start` must run on the Ruby main thread so that the runtime can fork
   and supervise the worker safely
@@ -34,7 +40,7 @@ Vajra uses an explicit master-and-worker split:
 
 The listener model is native-owned:
 
-- one foreground runtime process owns the listener lifecycle
+- one foreground native runtime process owns the listener lifecycle
 - the native runtime binds the socket, listens, accepts connections, and writes
   responses
 - Ruby workers do not own client sockets or write directly to the network
@@ -59,6 +65,20 @@ For each accepted connection, the runtime:
 
 That response path keeps the boot contract, smoke tests, and shutdown behavior
 clear and enforceable.
+
+## Lifecycle Signals
+
+Vajra emits lifecycle events that separate process ownership from execution
+ownership.
+
+- `process_role` identifies which process emitted the event
+- `request_execution_role` identifies which role executes application requests
+- `mode` identifies the runtime topology
+- `worker_processes` identifies the configured worker count
+
+That distinction matters in a master-worker deployment: the runtime process can
+enter `serving` because it owns the listener while request execution remains in
+Ruby workers.
 
 ## Shutdown Model
 

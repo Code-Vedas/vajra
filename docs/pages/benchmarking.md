@@ -25,6 +25,7 @@ The benchmark suite is organized around representative workload families:
 
 - generic Rack fixtures
 - Rails fixtures
+- representative Rack-framework fixtures
 - startup and boot-cost checks
 - overload and degradation scenarios
 - protocol- and transport-specific suites

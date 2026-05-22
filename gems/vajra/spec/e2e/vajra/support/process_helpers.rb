@@ -60,7 +60,7 @@ module VajraE2EProcessHelpers
   end
 
   def bind_conflict_output?(output, port)
-    output.include?("Unable to start Vajra: listener bind failed for port #{port}") &&
+    output.include?("Unable to start Vajra: listener bind failed for 0.0.0.0:#{port}") &&
       output.include?('Address already in use')
   end
 
@@ -72,8 +72,8 @@ module VajraE2EProcessHelpers
     TCPServer.new(VajraE2EHelpers::LISTENER_BIND_HOST, port)
   end
 
-  def idle_keep_alive_timeout_result(port: disposable_listener_port)
-    Open3.popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+  def idle_keep_alive_timeout_result(port: disposable_listener_port, env: {})
+    Open3.popen2e(vajra_env(port:).merge(env), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       selected_port = wait_for_banner(output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
@@ -94,13 +94,77 @@ module VajraE2EProcessHelpers
     end
   end
 
+  def delayed_request_result(
+    request:,
+    initial_pause:,
+    port: disposable_listener_port,
+    env: {},
+    timeout: 15
+  )
+    Open3.popen2e(vajra_env(port:).merge(env), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
+
+      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+      begin
+        sleep initial_pause
+        socket.write(request)
+        socket.close_write
+        response = Timeout.timeout(timeout) { socket.read }
+      ensure
+        socket.close unless socket.closed?
+      end
+
+      status = stop_process(wait_thread)
+
+      { exitstatus: status.exitstatus, response:, output: "#{startup_output.join}#{output.read}", port: selected_port }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
   def idle_shutdown(port: disposable_listener_port, signal: 'INT')
     Open3.popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
-      selected_port = wait_for_banner(output)
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
 
       status = stop_process(wait_thread, signal:)
 
-      { exitstatus: status.exitstatus, output: output.read, port: selected_port }
+      { exitstatus: status.exitstatus, output: "#{startup_output.join}#{output.read}", port: selected_port }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
+  def active_request_shutdown(request:, port: disposable_listener_port, signal: 'INT')
+    Open3.popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
+
+      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+      socket.write(request)
+      response = read_raw_http_response(socket, wait_thread:, output:, request_label: 'active_request_shutdown')
+      socket.close
+
+      Process.kill(signal, wait_thread.pid)
+      immediate_output = Timeout.timeout(1) do
+        loop do
+          captured_output = read_available_output(output)
+          break captured_output if captured_output.include?('- Gracefully shutting down workers...')
+          raise Timeout::Error if !wait_thread.alive? && captured_output.empty?
+
+          sleep 0.01
+        end
+      end
+      status = wait_for_exit(wait_thread)
+
+      {
+        exitstatus: status.exitstatus,
+        response:,
+        immediate_output:,
+        output: "#{startup_output.join}#{immediate_output}#{output.read}",
+        port: selected_port
+      }
     ensure
       cleanup_process(wait_thread, output)
     end
@@ -122,7 +186,8 @@ module VajraE2EProcessHelpers
     RUBY
 
     Open3.popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |stdin, output, wait_thread|
-      selected_port = wait_for_banner(output)
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
       begin
@@ -132,6 +197,12 @@ module VajraE2EProcessHelpers
         end
         socket.close_write
         response = Timeout.timeout(timeout) { socket.read }
+      rescue Errno::EPIPE, Errno::ECONNRESET
+        begin
+          response = Timeout.timeout(timeout) { socket.read }
+        rescue Errno::ECONNRESET
+          response = ''
+        end
       ensure
         socket.close unless socket.closed?
       end
@@ -139,7 +210,7 @@ module VajraE2EProcessHelpers
       stdin.close
       status = Timeout.timeout(timeout) { wait_thread.value }
 
-      { exitstatus: status.exitstatus, response:, output: output.read, port: selected_port }
+      { exitstatus: status.exitstatus, response:, output: "#{startup_output.join}#{output.read}", port: selected_port }
     ensure
       cleanup_process(wait_thread, output)
     end

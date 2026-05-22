@@ -91,10 +91,22 @@ namespace
 Vajra::request::RequestProcessor::RequestProcessor(
     std::size_t max_request_head_bytes,
     std::shared_ptr<const RequestExecutor> request_executor)
-    : request_head_reader_(max_request_head_bytes),
+    : RequestProcessor(max_request_head_bytes, 5, 30, 30, std::move(request_executor))
+{
+}
+
+Vajra::request::RequestProcessor::RequestProcessor(
+    std::size_t max_request_head_bytes,
+    int request_head_timeout_seconds,
+    int first_data_timeout_seconds,
+    int persistent_timeout_seconds,
+    std::shared_ptr<const RequestExecutor> request_executor)
+    : request_head_reader_(max_request_head_bytes, request_head_timeout_seconds),
       request_head_parser_(),
       response_writer_(),
-      request_executor_(std::move(request_executor))
+      request_executor_(std::move(request_executor)),
+      first_data_timeout_seconds_(first_data_timeout_seconds),
+      persistent_timeout_seconds_(persistent_timeout_seconds)
 {
 }
 
@@ -102,13 +114,17 @@ void Vajra::request::RequestProcessor::handle(int client_fd, const SocketContext
 {
   ClientSocketGuard client_socket_guard(client_fd);
   std::string buffered_bytes;
+  bool first_request = true;
 
   while (true)
   {
     HeadReadResult read_result;
     try
     {
-      read_result = request_head_reader_.read(client_fd, std::move(buffered_bytes));
+      read_result = request_head_reader_.read(
+          client_fd,
+          std::move(buffered_bytes),
+          first_request ? first_data_timeout_seconds_ : persistent_timeout_seconds_);
     }
     catch (const HeadError &error)
     {
@@ -129,6 +145,7 @@ void Vajra::request::RequestProcessor::handle(int client_fd, const SocketContext
       request_context = RequestContext{
           request_head_parser_.parse(read_result.request_head),
           socket_context,
+          client_fd,
           ""};
     }
     catch (const HeadError &error)
@@ -184,6 +201,16 @@ void Vajra::request::RequestProcessor::handle(int client_fd, const SocketContext
       reject_request_head(client_fd, error);
       return;
     }
+    catch (const QueueCapacityError &error)
+    {
+      reject_request_queue_capacity(client_fd, error);
+      return;
+    }
+    catch (const RequestTimeoutError &error)
+    {
+      reject_request_timeout(client_fd, error);
+      return;
+    }
     catch (const std::exception &error)
     {
       reject_request_execution(client_fd, error);
@@ -199,6 +226,8 @@ void Vajra::request::RequestProcessor::handle(int client_fd, const SocketContext
     {
       return;
     }
+
+    first_request = false;
   }
 }
 
@@ -253,6 +282,24 @@ void Vajra::request::RequestProcessor::reject_request_execution(int client_fd, c
   message << "request execution failed: client_fd=" << client_fd << " error=" << error.what();
   log_request_error(message.str());
   (void)response_writer_.send(client_fd, response_writer_.internal_server_error_response());
+}
+
+void Vajra::request::RequestProcessor::reject_request_queue_capacity(
+    int client_fd,
+    const QueueCapacityError &error) const
+{
+  std::ostringstream message;
+  message << "request queue capacity reached: client_fd=" << client_fd << " error=" << error.what();
+  log_request_error(message.str());
+  (void)response_writer_.send(client_fd, response_writer_.queue_capacity_response());
+}
+
+void Vajra::request::RequestProcessor::reject_request_timeout(int client_fd, const RequestTimeoutError &error) const
+{
+  std::ostringstream message;
+  message << "request timed out: client_fd=" << client_fd << " error=" << error.what();
+  log_request_error(message.str());
+  (void)response_writer_.send(client_fd, response_writer_.request_timeout_response());
 }
 
 Vajra::response::ConnectionBehavior Vajra::request::RequestProcessor::connection_behavior_for(

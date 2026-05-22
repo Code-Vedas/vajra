@@ -35,7 +35,6 @@ module Vajra
   NativeExtension.load!
   Vajra::Internal::Boot.install!
   # Rails integration is optional for non-Rails hosts and is loaded lazily when Rails is present.
-  # :nocov:
   def self.install_optional_railtie
     return unless defined?(::Rails::Railtie)
 
@@ -44,7 +43,6 @@ module Vajra
     nil
   end
   install_optional_railtie
-  # :nocov:
 
   class << self
     DOCUMENTED_START_OPTION_KEYS = %i[

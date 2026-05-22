@@ -265,6 +265,24 @@ RSpec.describe Vajra::CLI do
       end
     end
 
+    it 'rejects the app directive when it is called without an argument or block' do
+      Dir.mktmpdir('vajra-cli-config') do |root|
+        config_dir = File.join(root, 'config')
+        FileUtils.mkdir_p(config_dir)
+        File.write(File.join(config_dir, 'vajra.rb'), <<~RUBY)
+          Vajra.configure do |config|
+            config.app
+          end
+        RUBY
+
+        allow(Vajra).to receive(:header).and_return('header')
+
+        expect do
+          described_class.start(argv: [], root:, stdout: StringIO.new)
+        end.to raise_error(Vajra::CLI::Error, /app requires either a Rack app argument or a block/)
+      end
+    end
+
     it 'raises outside configuration loading for Vajra.configure' do
       expect do
         Vajra.configure { |config| config.port 3000 }

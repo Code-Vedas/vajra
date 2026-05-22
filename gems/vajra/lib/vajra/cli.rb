@@ -168,6 +168,8 @@ module Vajra
 
       # :reek:ControlParameter
       def app(rack_app = nil, &block)
+        raise Error, 'app requires either a Rack app argument or a block' if rack_app.nil? && block.nil?
+
         application_loader = block || -> { rack_app }
         @application_installer = lambda {
           Vajra::Internal::RackExecution.install!(application_loader.call)

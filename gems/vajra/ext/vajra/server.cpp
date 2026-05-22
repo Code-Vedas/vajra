@@ -12,7 +12,6 @@
 #include <cstring>
 #include <cstdint>
 #include <ctime>
-#include <fcntl.h>
 #include <iomanip>
 #include <iostream>
 #include <poll.h>

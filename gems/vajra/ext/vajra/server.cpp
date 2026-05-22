@@ -12,6 +12,7 @@
 #include <cstring>
 #include <cstdint>
 #include <ctime>
+#include <fcntl.h>
 #include <iomanip>
 #include <iostream>
 #include <poll.h>
@@ -25,6 +26,38 @@ namespace
 {
   constexpr const char *kUnknownSocketAddress = "0.0.0.0";
   constexpr int kHandlerReapPollTimeoutMilliseconds = 1000;
+
+  int duplicate_fd_cloexec(int fd)
+  {
+#ifdef F_DUPFD_CLOEXEC
+    return fcntl(fd, F_DUPFD_CLOEXEC, 0);
+#else
+    const int duplicated_fd = dup(fd);
+    if (duplicated_fd < 0)
+    {
+      return duplicated_fd;
+    }
+
+    const int existing_flags = fcntl(duplicated_fd, F_GETFD);
+    if (existing_flags < 0)
+    {
+      const int error_number = errno;
+      close(duplicated_fd);
+      errno = error_number;
+      return -1;
+    }
+
+    if (fcntl(duplicated_fd, F_SETFD, existing_flags | FD_CLOEXEC) < 0)
+    {
+      const int error_number = errno;
+      close(duplicated_fd);
+      errno = error_number;
+      return -1;
+    }
+
+    return duplicated_fd;
+#endif
+  }
 
   std::string socket_address(sockaddr_in address)
   {
@@ -385,7 +418,7 @@ void Vajra::Server::join_handler_threads()
 
 std::uint64_t Vajra::Server::register_active_client_fd(int client_fd)
 {
-  const int interrupt_fd = dup(client_fd);
+  const int interrupt_fd = duplicate_fd_cloexec(client_fd);
   if (interrupt_fd < 0)
   {
     std::ostringstream error_message;
@@ -403,15 +436,18 @@ std::uint64_t Vajra::Server::register_active_client_fd(int client_fd)
 void Vajra::Server::unregister_active_client_fd(int client_fd, std::uint64_t client_token)
 {
   int interrupt_fd = -1;
-  std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
-  const auto active_client_fd = active_client_fds_.find(client_token);
-  if (active_client_fd == active_client_fds_.end() || active_client_fd->second.original_fd != client_fd)
   {
-    return;
+    std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
+    const auto active_client_fd = active_client_fds_.find(client_token);
+    if (active_client_fd == active_client_fds_.end() || active_client_fd->second.original_fd != client_fd)
+    {
+      return;
+    }
+
+    interrupt_fd = active_client_fd->second.interrupt_fd;
+    active_client_fds_.erase(active_client_fd);
   }
 
-  interrupt_fd = active_client_fd->second.interrupt_fd;
-  active_client_fds_.erase(active_client_fd);
   if (interrupt_fd >= 0)
   {
     close(interrupt_fd);
@@ -420,14 +456,14 @@ void Vajra::Server::unregister_active_client_fd(int client_fd, std::uint64_t cli
 
 void Vajra::Server::interrupt_active_client_sockets()
 {
-  std::vector<int> interrupt_fds;
+  std::vector<std::pair<int, int>> interrupt_fds;
   {
     std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
     interrupt_fds.reserve(active_client_fds_.size());
     for (const auto &[client_token, registration] : active_client_fds_)
     {
       (void)client_token;
-      const int interrupt_fd = dup(registration.interrupt_fd);
+      const int interrupt_fd = duplicate_fd_cloexec(registration.interrupt_fd);
       if (interrupt_fd < 0)
       {
         if (errno == EBADF)
@@ -439,15 +475,15 @@ void Vajra::Server::interrupt_active_client_sockets()
         continue;
       }
 
-      interrupt_fds.push_back(interrupt_fd);
+      interrupt_fds.emplace_back(registration.original_fd, interrupt_fd);
     }
   }
 
-  for (int client_fd : interrupt_fds)
+  for (const auto &[original_fd, interrupt_fd] : interrupt_fds)
   {
     for (;;)
     {
-      if (shutdown(client_fd, SHUT_RDWR) == 0)
+      if (shutdown(interrupt_fd, SHUT_RDWR) == 0)
       {
         break;
       }
@@ -463,11 +499,11 @@ void Vajra::Server::interrupt_active_client_sockets()
         break;
       }
 
-      log_client_socket_interrupt_failed(client_fd, std::strerror(errno));
+      log_client_socket_interrupt_failed(original_fd, std::strerror(errno));
       break;
     }
 
-    close(client_fd);
+    close(interrupt_fd);
   }
 }
 

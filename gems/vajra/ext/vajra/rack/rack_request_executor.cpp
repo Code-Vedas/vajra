@@ -1795,9 +1795,18 @@ namespace
   struct WorkerChannelThreadContext
   {
     int channel_fd = -1;
+    int completion_signal_fd = -1;
+    std::atomic_bool completed{false};
     std::atomic_bool failed{false};
     mutable std::mutex error_mutex;
     std::string error_message;
+  };
+
+  struct WorkerChannelSignalReadContext
+  {
+    int fd = -1;
+    bool eof = false;
+    int error_number = 0;
   };
 
   std::optional<std::string> take_worker_channel_error(const WorkerChannelThreadContext &context)
@@ -1809,6 +1818,64 @@ namespace
 
     const std::lock_guard<std::mutex> lock(context.error_mutex);
     return context.error_message;
+  }
+
+  void notify_worker_channel_thread_completion(
+      WorkerChannelThreadContext *context,
+      const std::optional<std::string> &error_message = std::nullopt)
+  {
+    if (error_message)
+    {
+      {
+        const std::lock_guard<std::mutex> lock(context->error_mutex);
+        context->error_message = *error_message;
+      }
+      context->failed.store(true, std::memory_order_release);
+    }
+
+    context->completed.store(true, std::memory_order_release);
+
+    const std::uint8_t signal_byte = 1;
+    for (;;)
+    {
+      const ssize_t result = write(context->completion_signal_fd, &signal_byte, sizeof(signal_byte));
+      if (result >= 0)
+      {
+        return;
+      }
+      if (errno == EINTR)
+      {
+        continue;
+      }
+      return;
+    }
+  }
+
+  void *wait_for_worker_channel_signal_without_gvl(void *data)
+  {
+    auto *context = static_cast<WorkerChannelSignalReadContext *>(data);
+    std::uint8_t signal_byte = 0;
+
+    for (;;)
+    {
+      const ssize_t result = read(context->fd, &signal_byte, sizeof(signal_byte));
+      if (result > 0)
+      {
+        return nullptr;
+      }
+      if (result == 0)
+      {
+        context->eof = true;
+        return nullptr;
+      }
+      if (errno == EINTR)
+      {
+        continue;
+      }
+
+      context->error_number = errno;
+      return nullptr;
+    }
   }
 
   VALUE run_worker_request_channel_thread(void *data)
@@ -1827,15 +1894,12 @@ namespace
 
       if (!read_result.error_message.empty())
       {
-        {
-          const std::lock_guard<std::mutex> lock(context->error_mutex);
-          context->error_message = read_result.error_message;
-        }
-        context->failed.store(true, std::memory_order_release);
+        notify_worker_channel_thread_completion(context, read_result.error_message);
         return Qnil;
       }
       if (read_result.eof)
       {
+        notify_worker_channel_thread_completion(context);
         return Qnil;
       }
       if (read_result.request_canceled)
@@ -2000,6 +2064,12 @@ void Vajra::rack::run_worker_request_execution_loop(
     throw std::runtime_error("worker request channel count must match max_threads");
   }
 
+  int completion_signal_pipe[2] = {-1, -1};
+  if (pipe(completion_signal_pipe) != 0)
+  {
+    throw std::runtime_error("worker request completion signal pipe failed");
+  }
+
   std::vector<std::unique_ptr<WorkerChannelThreadContext>> contexts;
   contexts.reserve(channel_fds.size());
   std::vector<VALUE> threads;
@@ -2009,42 +2079,59 @@ void Vajra::rack::run_worker_request_execution_loop(
   {
     auto context = std::make_unique<WorkerChannelThreadContext>();
     context->channel_fd = channel_fd;
+    context->completion_signal_fd = completion_signal_pipe[1];
     contexts.push_back(std::move(context));
     threads.push_back(rb_thread_create(run_worker_request_channel_thread, contexts.back().get()));
   }
 
   ID id_join = rb_intern("join");
-  VALUE join_timeout = rb_float_new(0.01);
   std::vector<bool> joined(threads.size(), false);
   std::size_t joined_count = 0;
 
   while (joined_count < threads.size())
   {
+    WorkerChannelSignalReadContext signal_read_context{completion_signal_pipe[0], false, 0};
+    rb_thread_call_without_gvl(
+        wait_for_worker_channel_signal_without_gvl,
+        &signal_read_context,
+        RUBY_UBF_IO,
+        nullptr);
+    if (signal_read_context.error_number != 0)
+    {
+      close(completion_signal_pipe[0]);
+      close(completion_signal_pipe[1]);
+      throw std::runtime_error("worker request completion signal wait failed");
+    }
+    if (signal_read_context.eof)
+    {
+      break;
+    }
+
     for (std::size_t index = 0; index < threads.size(); ++index)
     {
       if (joined[index])
       {
         continue;
       }
-      if (const std::optional<std::string> error_message = take_worker_channel_error(*contexts[index]))
-      {
-        throw std::runtime_error(*error_message);
-      }
-
-      const VALUE join_result = rb_funcall(threads[index], id_join, 1, join_timeout);
-      if (NIL_P(join_result))
+      if (!contexts[index]->completed.load(std::memory_order_acquire))
       {
         continue;
       }
 
+      rb_funcall(threads[index], id_join, 0);
       joined[index] = true;
       ++joined_count;
       if (const std::optional<std::string> error_message = take_worker_channel_error(*contexts[index]))
       {
+        close(completion_signal_pipe[0]);
+        close(completion_signal_pipe[1]);
         throw std::runtime_error(*error_message);
       }
     }
   }
+
+  close(completion_signal_pipe[0]);
+  close(completion_signal_pipe[1]);
 
   for (const std::unique_ptr<WorkerChannelThreadContext> &context : contexts)
   {

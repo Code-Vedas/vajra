@@ -234,6 +234,13 @@ namespace
     log_message("error", error_message.str(), std::cerr);
   }
 
+  void log_client_socket_interrupt_failed(int client_fd, const char *error_message)
+  {
+    std::ostringstream message;
+    message << "client socket interrupt failed: client_fd=" << client_fd << " error=" << error_message;
+    log_message("error", message.str(), std::cerr);
+  }
+
   class ActiveConnectionGuard
   {
   public:
@@ -376,16 +383,24 @@ void Vajra::Server::join_handler_threads()
   }
 }
 
-void Vajra::Server::register_active_client_fd(int client_fd)
+std::uint64_t Vajra::Server::register_active_client_fd(int client_fd)
 {
+  const std::uint64_t client_token = next_active_client_token_.fetch_add(1, std::memory_order_acq_rel) + 1;
   std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
-  active_client_fds_.insert(client_fd);
+  active_client_fds_[client_fd] = client_token;
+  return client_token;
 }
 
-void Vajra::Server::unregister_active_client_fd(int client_fd)
+void Vajra::Server::unregister_active_client_fd(int client_fd, std::uint64_t client_token)
 {
   std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
-  active_client_fds_.erase(client_fd);
+  const auto active_client_fd = active_client_fds_.find(client_fd);
+  if (active_client_fd == active_client_fds_.end() || active_client_fd->second != client_token)
+  {
+    return;
+  }
+
+  active_client_fds_.erase(active_client_fd);
 }
 
 void Vajra::Server::interrupt_active_client_sockets()
@@ -394,22 +409,33 @@ void Vajra::Server::interrupt_active_client_sockets()
   {
     std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
     active_client_fds.reserve(active_client_fds_.size());
-    for (int client_fd : active_client_fds_)
+    for (const auto &[client_fd, client_token] : active_client_fds_)
     {
+      (void)client_token;
       active_client_fds.push_back(client_fd);
     }
   }
 
   for (int client_fd : active_client_fds)
   {
-    if (shutdown(client_fd, SHUT_RDWR) == 0)
+    for (;;)
     {
-      continue;
-    }
+      if (shutdown(client_fd, SHUT_RDWR) == 0)
+      {
+        break;
+      }
 
-    if (errno == ENOTCONN || errno == EINVAL || errno == EBADF)
-    {
-      continue;
+      if (errno == EINTR)
+      {
+        continue;
+      }
+      if (errno == ENOTCONN || errno == EINVAL || errno == EBADF)
+      {
+        break;
+      }
+
+      log_client_socket_interrupt_failed(client_fd, std::strerror(errno));
+      break;
     }
   }
 }
@@ -577,13 +603,13 @@ void Vajra::Server::start()
       }
 
       reap_completed_handler_threads();
-      register_active_client_fd(client_fd);
+      const std::uint64_t client_token = register_active_client_fd(client_fd);
 
       const std::size_t previous_active_connections = active_connection_count_.fetch_add(1, std::memory_order_acq_rel);
       if (previous_active_connections >= max_connections_)
       {
         active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
-        unregister_active_client_fd(client_fd);
+        unregister_active_client_fd(client_fd, client_token);
         log_connection_rejected(max_connections_);
         close(client_fd);
         continue;
@@ -595,7 +621,7 @@ void Vajra::Server::start()
         std::lock_guard<std::mutex> lock(handler_threads_mutex_);
         handler_threads_.push_back(HandlerThread{std::thread(), completed});
         HandlerThread &handler_thread = handler_threads_.back();
-        handler_thread.thread = std::thread([this, client_fd, client_addr, completed]() {
+        handler_thread.thread = std::thread([this, client_fd, client_addr, completed, client_token]() {
           ActiveConnectionGuard active_connection_guard(active_connection_count_);
           try
           {
@@ -609,7 +635,7 @@ void Vajra::Server::start()
           {
             log_handler_thread_failure(client_addr, client_fd, "unknown exception");
           }
-          unregister_active_client_fd(client_fd);
+          unregister_active_client_fd(client_fd, client_token);
           completed->store(true, std::memory_order_release);
         });
       }
@@ -622,7 +648,7 @@ void Vajra::Server::start()
           handler_threads_.pop_back();
         }
         active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
-        unregister_active_client_fd(client_fd);
+        unregister_active_client_fd(client_fd, client_token);
         close(client_fd);
         throw;
       }

@@ -167,8 +167,11 @@ module Vajra
       end
 
       # :reek:ControlParameter
-      def app(rack_app = nil, &block)
-        raise Error, 'app requires either a Rack app argument or a block' if rack_app.nil? && block.nil?
+      def app(*args, &block)
+        raise Error, 'app expects at most one Rack app argument' if args.length > 1
+        raise Error, 'app requires either a Rack app argument or a block' if args.empty? && !block
+
+        rack_app = args.first
 
         application_loader = block || -> { rack_app }
         @application_installer = lambda {

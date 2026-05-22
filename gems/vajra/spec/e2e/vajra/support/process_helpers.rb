@@ -177,7 +177,10 @@ module VajraE2EProcessHelpers
   end
 
   def wait_for_socket_close(socket)
-    Timeout.timeout(1) { socket.read == '' }
+    Timeout.timeout(1) do
+      socket.read
+      true
+    end
   rescue EOFError, Errno::ECONNRESET
     true
   end

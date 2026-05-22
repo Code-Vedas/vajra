@@ -16,6 +16,10 @@ namespace VajraSpecCpp
 {
   namespace
   {
+    void expect_stopped_snapshot(
+        const Vajra::Server &server,
+        Vajra::lifecycle::StopReason expected_reason);
+
     template <typename Scenario>
     void run_stop_interrupt_test(const Scenario &scenario, const std::string &retry_failure_message)
     {
@@ -39,7 +43,16 @@ namespace VajraSpecCpp
         try
         {
           wait_until_listening(port);
-          scenario(port, server, server_thread, server_error);
+          scenario(port, server);
+          if (server_thread.joinable())
+          {
+            server_thread.join();
+          }
+          if (server_error)
+          {
+            std::rethrow_exception(server_error);
+          }
+          expect_stopped_snapshot(server, Vajra::lifecycle::StopReason::programmatic_stop);
           return;
         }
         catch (...)
@@ -254,7 +267,7 @@ namespace VajraSpecCpp
     void test_stop_interrupts_keep_alive_connection()
     {
       run_stop_interrupt_test(
-          [&](int port, Vajra::Server &server, std::thread &server_thread, const std::exception_ptr &server_error) {
+          [&](int port, Vajra::Server &server) {
             FileDescriptorGuard client_socket(connect_to_listener(port));
             if (client_socket.get() < 0)
             {
@@ -275,18 +288,10 @@ namespace VajraSpecCpp
             server.stop();
             const bool peer_closed = peer_closed_within(client_socket.get(), 1000);
             client_socket.close_if_open();
-            server_thread.join();
-
-            if (server_error)
-            {
-              std::rethrow_exception(server_error);
-            }
             if (!peer_closed)
             {
               fail("server did not interrupt keep-alive client socket during drain");
             }
-
-            expect_stopped_snapshot(server, Vajra::lifecycle::StopReason::programmatic_stop);
           },
           "keep-alive interrupt test could not obtain a reusable listener port after retries");
     }
@@ -294,7 +299,7 @@ namespace VajraSpecCpp
     void test_stop_interrupts_partial_next_request()
     {
       run_stop_interrupt_test(
-          [&](int port, Vajra::Server &server, std::thread &server_thread, const std::exception_ptr &server_error) {
+          [&](int port, Vajra::Server &server) {
             FileDescriptorGuard client_socket(connect_to_listener(port));
             if (client_socket.get() < 0)
             {
@@ -323,18 +328,10 @@ namespace VajraSpecCpp
             server.stop();
             const bool peer_closed = peer_closed_within(client_socket.get(), 1000);
             client_socket.close_if_open();
-            server_thread.join();
-
-            if (server_error)
-            {
-              std::rethrow_exception(server_error);
-            }
             if (!peer_closed)
             {
               fail("server did not interrupt partial next request during drain");
             }
-
-            expect_stopped_snapshot(server, Vajra::lifecycle::StopReason::programmatic_stop);
           },
           "partial-next-request interrupt test could not obtain a reusable listener port after retries");
     }

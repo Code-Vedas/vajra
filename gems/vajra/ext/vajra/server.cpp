@@ -204,6 +204,13 @@ namespace
     log_message("error", message.str(), std::cerr);
   }
 
+  void log_poll_failed(const char *error_message)
+  {
+    std::ostringstream message;
+    message << "poll failed: " << error_message;
+    log_message("error", message.str(), std::cerr);
+  }
+
   void log_connection_rejected(std::size_t max_connections)
   {
     std::ostringstream message;
@@ -461,7 +468,7 @@ void Vajra::Server::start()
           continue;
         }
 
-        log_accept_failed(std::strerror(errno));
+        log_poll_failed(std::strerror(errno));
         continue;
       }
 

@@ -1313,6 +1313,12 @@ namespace VajraNative
       return server;
     }
 
+    bool runtime_running()
+    {
+      const std::lock_guard<std::mutex> lock(server_mutex);
+      return !worker_pids.empty() || server_instance || worker_startup_in_progress;
+    }
+
     bool try_begin_startup()
     {
       const std::lock_guard<std::mutex> lock(server_mutex);
@@ -1853,7 +1859,10 @@ namespace VajraNative
 
   void stop()
   {
-    begin_runtime_shutdown();
+    if (runtime_running())
+    {
+      begin_runtime_shutdown();
+    }
     (void)stop_worker_processes();
 
     Vajra::Server *server = nullptr;

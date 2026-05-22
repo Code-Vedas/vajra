@@ -17,7 +17,7 @@ namespace
   constexpr const char *kHeaderBoundary = "\r\n\r\n";
   constexpr std::size_t kHeaderBoundaryLength = 4;
 
-  bool drain_interrupted_recv_error(int error_number)
+  bool peer_closed_recv_error(int error_number)
   {
     return error_number == ECONNRESET || error_number == ECONNABORTED || error_number == ENOTCONN;
   }
@@ -80,7 +80,7 @@ Vajra::request::HeadReadResult Vajra::request::HeadReader::read(
       {
         return HeadReadResult{false, request_head, ""};
       }
-      if (drain_interrupted_recv_error(errno))
+      if (peer_closed_recv_error(errno))
       {
         return HeadReadResult{false, request_head, ""};
       }

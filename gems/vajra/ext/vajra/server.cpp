@@ -619,7 +619,7 @@ void Vajra::Server::start()
         if (!handler_threads_.empty() && handler_threads_.back().thread.joinable() == false &&
             handler_threads_.back().completed == completed)
         {
-            handler_threads_.pop_back();
+          handler_threads_.pop_back();
         }
         active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
         unregister_active_client_fd(client_fd);

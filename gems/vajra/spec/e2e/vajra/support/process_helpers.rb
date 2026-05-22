@@ -147,15 +147,7 @@ module VajraE2EProcessHelpers
       socket.close
 
       Process.kill(signal, wait_thread.pid)
-      immediate_output = Timeout.timeout(1) do
-        loop do
-          captured_output = read_available_output(output)
-          break captured_output if captured_output.include?('- Gracefully shutting down workers...')
-          raise Timeout::Error if !wait_thread.alive? && captured_output.empty?
-
-          sleep 0.01
-        end
-      end
+      immediate_output = wait_for_graceful_shutdown_banner(output, wait_thread)
       status = wait_for_exit(wait_thread)
 
       {
@@ -171,9 +163,11 @@ module VajraE2EProcessHelpers
   end
 
   def wait_for_graceful_shutdown_banner(output, wait_thread)
+    captured_output = +''
+
     Timeout.timeout(1) do
       loop do
-        captured_output = read_available_output(output)
+        captured_output << read_available_output(output)
         break captured_output if captured_output.include?('- Gracefully shutting down workers...')
         raise Timeout::Error if !wait_thread.alive? && captured_output.empty?
 

@@ -51,6 +51,12 @@ namespace Vajra
     void set_lifecycle_observer(lifecycle::Controller::Observer observer);
 
   private:
+    struct ActiveClientRegistration
+    {
+      int original_fd;
+      int interrupt_fd;
+    };
+
     struct HandlerThread
     {
       std::thread thread;
@@ -74,7 +80,7 @@ namespace Vajra
     std::mutex handler_threads_mutex_;
     std::vector<HandlerThread> handler_threads_;
     std::mutex active_client_fds_mutex_;
-    std::unordered_map<int, std::uint64_t> active_client_fds_;
+    std::unordered_map<std::uint64_t, ActiveClientRegistration> active_client_fds_;
     std::atomic<std::uint64_t> next_active_client_token_{0};
 
     void close_listener_fd(bool interrupt_accept);

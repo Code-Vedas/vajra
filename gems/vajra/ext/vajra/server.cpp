@@ -385,22 +385,34 @@ void Vajra::Server::join_handler_threads()
 
 std::uint64_t Vajra::Server::register_active_client_fd(int client_fd)
 {
+  const int interrupt_fd = dup(client_fd);
+  if (interrupt_fd < 0)
+  {
+    throw std::runtime_error("dup failed while tracking active client socket");
+  }
+
   const std::uint64_t client_token = next_active_client_token_.fetch_add(1, std::memory_order_acq_rel) + 1;
   std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
-  active_client_fds_[client_fd] = client_token;
+  active_client_fds_[client_token] = ActiveClientRegistration{client_fd, interrupt_fd};
   return client_token;
 }
 
 void Vajra::Server::unregister_active_client_fd(int client_fd, std::uint64_t client_token)
 {
+  int interrupt_fd = -1;
   std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
-  const auto active_client_fd = active_client_fds_.find(client_fd);
-  if (active_client_fd == active_client_fds_.end() || active_client_fd->second != client_token)
+  const auto active_client_fd = active_client_fds_.find(client_token);
+  if (active_client_fd == active_client_fds_.end() || active_client_fd->second.original_fd != client_fd)
   {
     return;
   }
 
+  interrupt_fd = active_client_fd->second.interrupt_fd;
   active_client_fds_.erase(active_client_fd);
+  if (interrupt_fd >= 0)
+  {
+    close(interrupt_fd);
+  }
 }
 
 void Vajra::Server::interrupt_active_client_sockets()
@@ -409,10 +421,10 @@ void Vajra::Server::interrupt_active_client_sockets()
   {
     std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
     active_client_fds.reserve(active_client_fds_.size());
-    for (const auto &[client_fd, client_token] : active_client_fds_)
+    for (const auto &[client_token, registration] : active_client_fds_)
     {
       (void)client_token;
-      active_client_fds.push_back(client_fd);
+      active_client_fds.push_back(registration.interrupt_fd);
     }
   }
 
@@ -605,7 +617,17 @@ void Vajra::Server::start()
       }
 
       reap_completed_handler_threads();
-      const std::uint64_t client_token = register_active_client_fd(client_fd);
+      std::uint64_t client_token = 0;
+      try
+      {
+        client_token = register_active_client_fd(client_fd);
+      }
+      catch (const std::exception &error)
+      {
+        log_accept_failed(error.what());
+        close(client_fd);
+        continue;
+      }
 
       const std::size_t previous_active_connections = active_connection_count_.fetch_add(1, std::memory_order_acq_rel);
       if (previous_active_connections >= max_connections_)

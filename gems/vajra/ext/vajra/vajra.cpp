@@ -672,6 +672,7 @@ namespace
         key_id == id_host ||
         key_id == id_workers ||
         key_id == id_threads ||
+        key_id == id_max_connections ||
         key_id == id_queue_capacity ||
         key_id == id_scheduler_policy ||
         key_id == id_max_request_head_bytes ||

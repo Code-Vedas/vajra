@@ -388,7 +388,10 @@ std::uint64_t Vajra::Server::register_active_client_fd(int client_fd)
   const int interrupt_fd = dup(client_fd);
   if (interrupt_fd < 0)
   {
-    throw std::runtime_error("dup failed while tracking active client socket");
+    std::ostringstream error_message;
+    error_message << "dup failed while tracking active client socket fd=" << client_fd
+                  << ": " << std::strerror(errno);
+    throw std::runtime_error(error_message.str());
   }
 
   const std::uint64_t client_token = next_active_client_token_.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -417,18 +420,30 @@ void Vajra::Server::unregister_active_client_fd(int client_fd, std::uint64_t cli
 
 void Vajra::Server::interrupt_active_client_sockets()
 {
-  std::vector<int> active_client_fds;
+  std::vector<int> interrupt_fds;
   {
     std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
-    active_client_fds.reserve(active_client_fds_.size());
+    interrupt_fds.reserve(active_client_fds_.size());
     for (const auto &[client_token, registration] : active_client_fds_)
     {
       (void)client_token;
-      active_client_fds.push_back(registration.interrupt_fd);
+      const int interrupt_fd = dup(registration.interrupt_fd);
+      if (interrupt_fd < 0)
+      {
+        if (errno == EBADF)
+        {
+          continue;
+        }
+
+        log_client_socket_interrupt_failed(registration.original_fd, std::strerror(errno));
+        continue;
+      }
+
+      interrupt_fds.push_back(interrupt_fd);
     }
   }
 
-  for (int client_fd : active_client_fds)
+  for (int client_fd : interrupt_fds)
   {
     for (;;)
     {
@@ -451,6 +466,8 @@ void Vajra::Server::interrupt_active_client_sockets()
       log_client_socket_interrupt_failed(client_fd, std::strerror(errno));
       break;
     }
+
+    close(client_fd);
   }
 }
 

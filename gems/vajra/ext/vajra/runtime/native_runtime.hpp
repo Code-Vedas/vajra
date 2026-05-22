@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <sys/types.h>
 #include <vector>
 
 namespace Vajra

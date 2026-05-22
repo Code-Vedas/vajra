@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <string>
+#include <sys/types.h>
 
 namespace Vajra
 {
@@ -22,7 +23,7 @@ namespace Vajra
         int workers,
         std::size_t min_threads,
         std::size_t max_threads);
-    void log_worker_booted(int worker_index, int pid, double boot_seconds);
+    void log_worker_booted(int worker_index, pid_t pid, double boot_seconds);
     void log_runtime_shutdown_begin();
     void log_runtime_shutdown_complete();
   }

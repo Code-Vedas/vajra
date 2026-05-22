@@ -62,7 +62,7 @@ void Vajra::runtime::log_runtime_banner_start(
   std::cout << "[" << pid << "] * Bind: http://" << host << ":" << port << std::endl;
 }
 
-void Vajra::runtime::log_worker_booted(int worker_index, int pid, double boot_seconds)
+void Vajra::runtime::log_worker_booted(int worker_index, pid_t pid, double boot_seconds)
 {
   std::ostringstream message;
   message << "[" << getppid() << "] - Worker " << worker_index

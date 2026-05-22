@@ -9,11 +9,13 @@
 #include "runtime/ruby_support.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <cctype>
 #include <cstdlib>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace
 {

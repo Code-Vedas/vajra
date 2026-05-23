@@ -60,6 +60,13 @@ namespace
     std::string error_message;
   };
 
+  struct WorkerWaitContext
+  {
+    Vajra::runtime::NativeRuntime *runtime;
+    const std::vector<std::shared_ptr<Vajra::runtime::SharedWorkerState>> *worker_states;
+    std::string error_message;
+  };
+
   void handle_signal(int sig)
   {
     if (sig == SIGINT || sig == SIGTERM)
@@ -699,10 +706,27 @@ bool Vajra::runtime::NativeRuntime::stop_worker_processes()
     {
       continue;
     }
-    if (signal_process_with_retry(pid, SIGINT, "failed to signal worker shutdown") &&
-        mark_expected_shutdown_after_signal[index])
+    try
     {
-      worker_state->expected_shutdown.store(true, std::memory_order_release);
+      if (signal_process_with_retry(pid, SIGINT, "failed to signal worker shutdown") &&
+          mark_expected_shutdown_after_signal[index])
+      {
+        worker_state->expected_shutdown.store(true, std::memory_order_release);
+      }
+    }
+    catch (const std::exception &error)
+    {
+      std::cerr << "[Vajra][error] " << utc_timestamp()
+                << " failed to signal worker shutdown pid=" << pid
+                << ": " << error.what()
+                << std::endl;
+    }
+    catch (...)
+    {
+      std::cerr << "[Vajra][error] " << utc_timestamp()
+                << " failed to signal worker shutdown pid=" << pid
+                << ": unknown native error"
+                << std::endl;
     }
   }
 
@@ -724,6 +748,21 @@ void Vajra::runtime::NativeRuntime::replay_pending_stop_if_needed()
 }
 
 void Vajra::runtime::NativeRuntime::wait_for_worker_exit(const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states)
+{
+  WorkerWaitContext context{this, &worker_states, ""};
+  rb_thread_call_without_gvl(
+      &NativeRuntime::wait_for_worker_exit_without_gvl,
+      &context,
+      RUBY_UBF_IO,
+      nullptr);
+  if (!context.error_message.empty())
+  {
+    throw std::runtime_error(context.error_message);
+  }
+}
+
+void Vajra::runtime::NativeRuntime::wait_for_worker_exit_blocking(
+    const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states)
 {
   {
     std::unique_lock<std::mutex> lock(server_mutex_);
@@ -777,6 +816,24 @@ void Vajra::runtime::NativeRuntime::wait_for_worker_exit(const std::vector<std::
       throw std::runtime_error("failed to wait for worker exit");
     }
   }
+}
+
+void *Vajra::runtime::NativeRuntime::wait_for_worker_exit_without_gvl(void *data)
+{
+  auto *context = static_cast<WorkerWaitContext *>(data);
+  try
+  {
+    context->runtime->wait_for_worker_exit_blocking(*context->worker_states);
+  }
+  catch (const std::exception &error)
+  {
+    context->error_message = error.what();
+  }
+  catch (...)
+  {
+    context->error_message = "failed to wait for worker exit";
+  }
+  return nullptr;
 }
 
 void Vajra::runtime::NativeRuntime::observe_worker_exit(

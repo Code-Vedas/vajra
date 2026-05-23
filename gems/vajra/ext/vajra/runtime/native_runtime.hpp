@@ -58,6 +58,8 @@ namespace Vajra
       void install_server_instance(std::shared_ptr<Vajra::Server> server);
       std::shared_ptr<Vajra::Server> take_server_instance();
       void wait_for_worker_exit(const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states);
+      void wait_for_worker_exit_blocking(const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states);
+      static void *wait_for_worker_exit_without_gvl(void *data);
       void observe_worker_exit(
           const std::shared_ptr<SharedWorkerState> &worker_state,
           int status);

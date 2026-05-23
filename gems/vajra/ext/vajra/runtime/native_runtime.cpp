@@ -474,7 +474,6 @@ std::shared_ptr<Vajra::runtime::SharedWorkerState> Vajra::runtime::NativeRuntime
         0);
   }
   worker_state_changed_.notify_all();
-  ensure_worker_exit_watcher_started();
   return worker_state;
 }
 
@@ -684,21 +683,57 @@ void Vajra::runtime::NativeRuntime::replay_pending_stop_if_needed()
 
 void Vajra::runtime::NativeRuntime::wait_for_worker_exit(const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states)
 {
-  std::unique_lock<std::mutex> lock(server_mutex_);
-  worker_state_changed_.wait(lock, [this, &worker_states]() {
-    if (worker_exit_watcher_stop_requested_)
-    {
-      return true;
-    }
-    return std::all_of(worker_states.begin(), worker_states.end(), [](const auto &worker_state) {
-      return worker_has_exited(worker_state);
-    });
-  });
-  if (!std::all_of(worker_states.begin(), worker_states.end(), [](const auto &worker_state) {
-        return worker_has_exited(worker_state);
-      }))
   {
-    throw std::runtime_error("worker exit watcher stopped before all workers exited");
+    std::unique_lock<std::mutex> lock(server_mutex_);
+    if (worker_exit_watcher_running_)
+    {
+      worker_state_changed_.wait(lock, [this, &worker_states]() {
+        if (worker_exit_watcher_stop_requested_)
+        {
+          return true;
+        }
+        return std::all_of(worker_states.begin(), worker_states.end(), [](const auto &worker_state) {
+          return worker_has_exited(worker_state);
+        });
+      });
+      if (!std::all_of(worker_states.begin(), worker_states.end(), [](const auto &worker_state) {
+            return worker_has_exited(worker_state);
+          }))
+      {
+        throw std::runtime_error("worker exit watcher stopped before all workers exited");
+      }
+      return;
+    }
+  }
+
+  for (const auto &worker_state : worker_states)
+  {
+    if (worker_has_exited(worker_state))
+    {
+      continue;
+    }
+
+    const pid_t pid = worker_state->pid.load(std::memory_order_acquire);
+    if (pid <= 0)
+    {
+      continue;
+    }
+
+    int status = 0;
+    for (;;)
+    {
+      const pid_t wait_result = waitpid(pid, &status, 0);
+      if (wait_result == pid)
+      {
+        observe_worker_exit(worker_state, status);
+        break;
+      }
+      if (wait_result < 0 && errno == EINTR)
+      {
+        continue;
+      }
+      throw std::runtime_error("failed to wait for worker exit");
+    }
   }
 }
 
@@ -1212,6 +1247,7 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
       booted_worker_states.push_back(worker_state);
     }
 
+    ensure_worker_exit_watcher_started();
     run_master_runtime_server(config, booted_worker_states, debug_logging);
     begin_runtime_shutdown();
     stop_worker_processes();

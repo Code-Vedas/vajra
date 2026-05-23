@@ -1519,7 +1519,10 @@ namespace
       {
         std::lock_guard<std::mutex> lock(scheduler_mutex_);
         const std::shared_ptr<WorkerSlot> slot = slot_for(worker_index);
-        if (slot->state->lifecycle_state.load(std::memory_order_acquire) == Vajra::runtime::WorkerLifecycleState::exited)
+        const Vajra::runtime::WorkerLifecycleState current_state =
+            slot->state->lifecycle_state.load(std::memory_order_acquire);
+        if (current_state == Vajra::runtime::WorkerLifecycleState::stopping ||
+            current_state == Vajra::runtime::WorkerLifecycleState::exited)
         {
           return;
         }

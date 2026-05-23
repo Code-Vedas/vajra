@@ -39,7 +39,7 @@ namespace
   constexpr const char *kMasterWorkerMode = "master_worker";
   constexpr std::size_t kMaxWorkerBootstrapStringPayloadBytes = 64 * 1024;
   constexpr auto kWorkerTimeoutGracePeriod = std::chrono::seconds(1);
-  constexpr auto kWorkerExitWatcherPollInterval = std::chrono::milliseconds(10);
+  constexpr auto kWorkerExitWatcherIdlePollInterval = std::chrono::seconds(1);
   constexpr int kSignalRetryLimit = 5;
 
   enum class WorkerBootstrapStatus : std::uint8_t
@@ -370,6 +370,41 @@ namespace
         .count();
   }
 
+  std::chrono::steady_clock::duration watcher_sleep_interval(
+      const std::vector<std::shared_ptr<Vajra::runtime::SharedWorkerState>> &worker_states)
+  {
+    const std::int64_t now_nanoseconds = steady_clock_nanoseconds();
+    std::optional<std::int64_t> earliest_deadline;
+    for (const auto &worker_state : worker_states)
+    {
+      if (!worker_state->timeout_escalation_pending.load(std::memory_order_acquire))
+      {
+        continue;
+      }
+
+      const std::int64_t deadline = worker_state->timeout_kill_deadline_nanoseconds.load(std::memory_order_acquire);
+      if (deadline == 0)
+      {
+        continue;
+      }
+      if (!earliest_deadline.has_value() || deadline < *earliest_deadline)
+      {
+        earliest_deadline = deadline;
+      }
+    }
+
+    if (!earliest_deadline.has_value())
+    {
+      return kWorkerExitWatcherIdlePollInterval;
+    }
+    if (*earliest_deadline <= now_nanoseconds)
+    {
+      return std::chrono::steady_clock::duration::zero();
+    }
+
+    return std::chrono::nanoseconds(*earliest_deadline - now_nanoseconds);
+  }
+
   bool signal_process_with_retry(pid_t pid, int signal_number, const char *error_message)
   {
     int interrupted_attempts = 0;
@@ -480,7 +515,6 @@ std::shared_ptr<Vajra::runtime::SharedWorkerState> Vajra::runtime::NativeRuntime
 void Vajra::runtime::NativeRuntime::mark_worker_ready(const std::shared_ptr<SharedWorkerState> &worker_state)
 {
   worker_state->available.store(true, std::memory_order_release);
-  worker_state->expected_shutdown.store(false, std::memory_order_release);
   worker_state->lifecycle_state.store(WorkerLifecycleState::ready, std::memory_order_release);
   if (debug_logging_.load(std::memory_order_acquire))
   {
@@ -970,7 +1004,7 @@ void Vajra::runtime::NativeRuntime::watch_worker_exits()
       if (!observed_exit)
       {
         std::unique_lock<std::mutex> lock(server_mutex_);
-        worker_state_changed_.wait_for(lock, kWorkerExitWatcherPollInterval);
+        worker_state_changed_.wait_for(lock, watcher_sleep_interval(worker_states));
       }
     }
   }

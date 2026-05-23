@@ -88,7 +88,7 @@ namespace Vajra
     void reap_completed_handler_threads();
     std::uint64_t register_active_client_fd(int client_fd);
     void unregister_active_client_fd(int client_fd, std::uint64_t client_token);
-    void interrupt_active_client_sockets();
+    void interrupt_active_client_sockets() noexcept;
   };
 }
 

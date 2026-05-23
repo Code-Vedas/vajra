@@ -345,6 +345,13 @@ namespace
     log_message("error", message.str(), std::cerr);
   }
 
+  void log_client_socket_interrupt_aborted(const char *error_message)
+  {
+    std::ostringstream message;
+    message << "client socket interrupt aborted: " << error_message;
+    log_message("error", message.str(), std::cerr);
+  }
+
   void log_max_connections_clamped(std::size_t requested, std::size_t actual, std::size_t fd_limit)
   {
     std::ostringstream message;
@@ -559,41 +566,52 @@ void Vajra::Server::unregister_active_client_fd(int client_fd, std::uint64_t cli
   }
 }
 
-void Vajra::Server::interrupt_active_client_sockets()
+void Vajra::Server::interrupt_active_client_sockets() noexcept
 {
-  std::vector<std::pair<int, int>> interrupt_fds;
+  try
   {
-    std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
-    interrupt_fds.reserve(active_client_fds_.size());
-    for (const auto &[client_token, registration] : active_client_fds_)
+    std::vector<std::pair<int, int>> interrupt_fds;
     {
-      (void)client_token;
-      const int interrupt_fd = duplicate_fd_cloexec(registration.interrupt_fd);
-      if (interrupt_fd < 0)
+      std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
+      interrupt_fds.reserve(active_client_fds_.size());
+      for (const auto &[client_token, registration] : active_client_fds_)
       {
-        if (errno == EBADF)
+        (void)client_token;
+        const int interrupt_fd = duplicate_fd_cloexec(registration.interrupt_fd);
+        if (interrupt_fd < 0)
         {
+          if (errno == EBADF)
+          {
+            continue;
+          }
+
+          if (errno == EMFILE || errno == ENFILE)
+          {
+            shutdown_interrupt_succeeded_or_expected(registration.interrupt_fd, registration.original_fd);
+            continue;
+          }
+
+          log_client_socket_interrupt_failed(registration.original_fd, std::strerror(errno));
           continue;
         }
 
-        if (errno == EMFILE || errno == ENFILE)
-        {
-          shutdown_interrupt_succeeded_or_expected(registration.interrupt_fd, registration.original_fd);
-          continue;
-        }
-
-        log_client_socket_interrupt_failed(registration.original_fd, std::strerror(errno));
-        continue;
+        interrupt_fds.emplace_back(registration.original_fd, interrupt_fd);
       }
+    }
 
-      interrupt_fds.emplace_back(registration.original_fd, interrupt_fd);
+    for (const auto &[original_fd, interrupt_fd] : interrupt_fds)
+    {
+      shutdown_interrupt_succeeded_or_expected(interrupt_fd, original_fd);
+      close(interrupt_fd);
     }
   }
-
-  for (const auto &[original_fd, interrupt_fd] : interrupt_fds)
+  catch (const std::exception &error)
   {
-    shutdown_interrupt_succeeded_or_expected(interrupt_fd, original_fd);
-    close(interrupt_fd);
+    log_client_socket_interrupt_aborted(error.what());
+  }
+  catch (...)
+  {
+    log_client_socket_interrupt_aborted("unknown native error");
   }
 }
 

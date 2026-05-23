@@ -10,6 +10,7 @@
 
 #include <exception>
 #include <sstream>
+#include <string>
 #include <thread>
 
 namespace VajraSpecCpp

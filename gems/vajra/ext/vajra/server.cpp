@@ -26,13 +26,14 @@ namespace
 {
   constexpr const char *kUnknownSocketAddress = "0.0.0.0";
   constexpr int kHandlerReapPollTimeoutMilliseconds = 1000;
+  constexpr int kDuplicateFdMinimum = STDERR_FILENO + 1;
 
   int duplicate_fd_cloexec(int fd)
   {
 #ifdef F_DUPFD_CLOEXEC
-    return fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    return fcntl(fd, F_DUPFD_CLOEXEC, kDuplicateFdMinimum);
 #else
-    const int duplicated_fd = dup(fd);
+    const int duplicated_fd = fcntl(fd, F_DUPFD, kDuplicateFdMinimum);
     if (duplicated_fd < 0)
     {
       return duplicated_fd;
@@ -233,6 +234,13 @@ namespace
   {
     std::ostringstream message;
     message << "accept failed: " << error_message;
+    log_message("error", message.str(), std::cerr);
+  }
+
+  void log_active_client_tracking_failed(const char *error_message)
+  {
+    std::ostringstream message;
+    message << "active client tracking failed: " << error_message;
     log_message("error", message.str(), std::cerr);
   }
 
@@ -677,7 +685,7 @@ void Vajra::Server::start()
       }
       catch (const std::exception &error)
       {
-        log_accept_failed(error.what());
+        log_active_client_tracking_failed(error.what());
         close(client_fd);
         continue;
       }

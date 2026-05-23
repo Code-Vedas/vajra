@@ -6,6 +6,8 @@
 #ifndef VAJRA_RUNTIME_RUNTIME_LOGGING_HPP
 #define VAJRA_RUNTIME_RUNTIME_LOGGING_HPP
 
+#include "runtime/worker_pool.hpp"
+
 #include <cstddef>
 #include <string>
 #include <sys/types.h>
@@ -23,6 +25,20 @@ namespace Vajra
         int workers,
         std::size_t min_threads,
         std::size_t max_threads);
+    void log_worker_lifecycle_event(
+        const char *event_name,
+        std::size_t worker_index,
+        pid_t pid,
+        WorkerLifecycleState lifecycle_state,
+        bool available,
+        WorkerExitClassification exit_classification,
+        bool replacement_needed,
+        int exit_detail);
+    void log_unexpected_worker_exit(WorkerExitClassification exit_classification, int exit_detail);
+    void log_worker_bootstrap_ready(
+        int port,
+        const std::string &runtime_role,
+        int worker_processes);
     void log_worker_booted(int worker_index, pid_t pid, double boot_seconds);
     void log_runtime_shutdown_begin();
     void log_runtime_shutdown_complete();

@@ -31,6 +31,7 @@
 #include <string>
 #include <signal.h>
 #include <sys/socket.h>
+#include <thread>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -81,6 +82,7 @@ namespace
   constexpr std::size_t kInlineBodyChunkBytes =
       static_cast<std::size_t>(Vajra::ipc::kMaxFramePayloadLength) - 1;
   constexpr std::size_t kMillisecondsPerSecond = 1000;
+  constexpr auto kQueueHousekeepingInterval = std::chrono::milliseconds(500);
   struct DecodedResponseMetadata
   {
     ResponseMetadataKind kind = ResponseMetadataKind::no_response;
@@ -1221,6 +1223,7 @@ namespace
     std::atomic_bool canceled = false;
     std::atomic_bool timed_out = false;
     std::atomic_bool client_gone = false;
+    bool enqueued = false;
     std::size_t worker_index = 0;
     std::size_t channel_index = 0;
   };
@@ -1244,46 +1247,46 @@ namespace
 
     struct WorkerSlot
     {
-      WorkerSlot(std::vector<WorkerChannel> worker_channels, int worker_pid, std::size_t min_channel_count)
+      WorkerSlot(
+          std::vector<WorkerChannel> worker_channels,
+          std::shared_ptr<Vajra::runtime::SharedWorkerState> worker_state,
+          std::size_t min_channel_count)
           : channels(std::move(worker_channels)),
-            pid(worker_pid),
+            state(std::move(worker_state)),
             min_channels(std::min(min_channel_count, channels.size())),
             active_channels(std::min(min_channel_count, channels.size()))
       {
       }
 
       std::vector<WorkerChannel> channels;
-      int pid;
+      std::shared_ptr<Vajra::runtime::SharedWorkerState> state;
       std::size_t min_channels;
       std::size_t active_channels;
-      bool alive = true;
     };
 
     GlobalQueuedWorkerProcessRackExecutionTransport(
-        const std::vector<std::vector<int>> &worker_channel_fds,
-        const std::vector<int> &worker_pids,
+        const std::vector<std::shared_ptr<Vajra::runtime::SharedWorkerState>> &worker_states,
         std::size_t min_threads,
         std::size_t queue_capacity,
         std::size_t request_timeout_seconds,
         std::size_t worker_timeout_seconds,
+        std::function<void(const std::shared_ptr<Vajra::runtime::SharedWorkerState> &)> worker_timeout_handler,
         bool debug_logging)
         : queue_capacity_(queue_capacity),
           request_timeout_(std::chrono::seconds(request_timeout_seconds)),
+          worker_timeout_handler_(std::move(worker_timeout_handler)),
           debug_logging_(debug_logging)
     {
-      if (worker_channel_fds.empty())
+      if (worker_states.empty())
       {
         throw std::logic_error("worker request transport requires at least one channel");
       }
-      if (worker_channel_fds.size() != worker_pids.size())
-      {
-        throw std::logic_error("worker request transport requires one pid per worker");
-      }
 
-      slots_.reserve(worker_channel_fds.size());
-      for (std::size_t worker_index = 0; worker_index < worker_channel_fds.size(); ++worker_index)
+      slots_.reserve(worker_states.size());
+      for (std::size_t worker_index = 0; worker_index < worker_states.size(); ++worker_index)
       {
-        const std::vector<int> &channel_fds = worker_channel_fds[worker_index];
+        const std::shared_ptr<Vajra::runtime::SharedWorkerState> &worker_state = worker_states[worker_index];
+        const std::vector<int> &channel_fds = worker_state->request_channel_fds;
         if (channel_fds.empty())
         {
           throw std::logic_error("worker request transport requires at least one channel per worker");
@@ -1301,8 +1304,23 @@ namespace
 
         slots_.push_back(std::make_shared<WorkerSlot>(
             std::move(worker_channels),
-            worker_pids[worker_index],
+            worker_state,
             min_threads));
+      }
+
+      housekeeping_thread_ = std::thread([this]() { housekeeping_loop(); });
+    }
+
+    ~GlobalQueuedWorkerProcessRackExecutionTransport() override
+    {
+      {
+        std::lock_guard<std::mutex> lock(scheduler_mutex_);
+        housekeeping_stop_requested_ = true;
+      }
+      scheduler_condition_.notify_all();
+      if (housekeeping_thread_.joinable())
+      {
+        housekeeping_thread_.join();
       }
     }
 
@@ -1342,7 +1360,9 @@ namespace
              !pending_request->client_gone.load() &&
              !pending_request->canceled.load())
       {
-        prune_queue_locked();
+        const auto now = std::chrono::steady_clock::now();
+        prune_queue_head_locked(now);
+        refresh_pending_request_state_locked(pending_request, now, true);
         if (pending_request->assigned.load() ||
             pending_request->timed_out.load() ||
             pending_request->client_gone.load() ||
@@ -1366,21 +1386,13 @@ namespace
                     " selected_worker=" + std::to_string(assignment->first) +
                     " channel=" + std::to_string(assignment->second) +
                     " inflight=" + std::to_string(inflight_count_locked(*slot)) +
-                    " queue_depth=" + std::to_string(pending_requests_.size() - 1),
+                    " queue_depth=" + std::to_string(queued_request_count_ - 1),
                 debug_logging_);
+            pending_request->enqueued = false;
+            --queued_request_count_;
             pending_requests_.pop_front();
             break;
           }
-        }
-
-        if (pending_request->deadline <= std::chrono::steady_clock::now())
-        {
-          pending_request->timed_out = true;
-          log_scheduler_debug_event(
-              "event=request_wait_timeout request_id=" + std::to_string(pending_request->request_id),
-              debug_logging_);
-          erase_pending_request_locked(pending_request);
-          break;
         }
 
         scheduler_condition_.wait_until(lock, pending_request->deadline);
@@ -1445,6 +1457,12 @@ namespace
     }
 
   private:
+    static bool worker_schedulable(const WorkerSlot &slot)
+    {
+      return slot.state->available.load(std::memory_order_acquire) &&
+             slot.state->lifecycle_state.load(std::memory_order_acquire) == Vajra::runtime::WorkerLifecycleState::ready;
+    }
+
     static std::optional<std::size_t> first_available_channel_index_locked(const WorkerSlot &slot)
     {
       for (std::size_t index = 0; index < slot.active_channels; ++index)
@@ -1471,8 +1489,8 @@ namespace
         int client_fd) const
     {
       std::lock_guard<std::mutex> lock(scheduler_mutex_);
-      prune_queue_locked();
-      if (pending_requests_.size() >= queue_capacity_)
+      prune_queue_head_locked(std::chrono::steady_clock::now());
+      if (queued_request_count_ >= queue_capacity_)
       {
         log_scheduler_debug_event(
             "event=queue_capacity_reached policy=least_loaded queue_capacity=" + std::to_string(queue_capacity_),
@@ -1486,7 +1504,9 @@ namespace
       pending_request->client_fd = client_fd;
       pending_request->env_entries = env_entries;
       pending_request->deadline = std::chrono::steady_clock::now() + request_timeout_;
+      pending_request->enqueued = true;
       pending_requests_.push_back(pending_request);
+      ++queued_request_count_;
       scheduler_condition_.notify_all();
       return pending_request;
     }
@@ -1495,17 +1515,23 @@ namespace
     {
       std::lock_guard<std::mutex> lock(scheduler_mutex_);
       const std::shared_ptr<WorkerSlot> slot = slot_for(worker_index);
-      if (!slot->alive)
+      if (slot->state->lifecycle_state.load(std::memory_order_acquire) == Vajra::runtime::WorkerLifecycleState::exited)
       {
         return;
       }
 
-      slot->alive = false;
+      slot->state->available.store(false, std::memory_order_release);
+      slot->state->expected_shutdown.store(false, std::memory_order_release);
+      slot->state->lifecycle_state.store(Vajra::runtime::WorkerLifecycleState::stopping, std::memory_order_release);
+      const pid_t worker_pid = slot->state->pid.load(std::memory_order_acquire);
       log_scheduler_debug_event(
           "event=worker_timeout worker_index=" + std::to_string(worker_index) +
-              " worker_pid=" + std::to_string(slot->pid),
+              " worker_pid=" + std::to_string(worker_pid),
           debug_logging_);
-      kill(slot->pid, SIGKILL);
+      if (worker_timeout_handler_)
+      {
+        worker_timeout_handler_(slot->state);
+      }
       scheduler_condition_.notify_all();
     }
 
@@ -1519,7 +1545,7 @@ namespace
       {
         const std::size_t worker_index = (next_preferred_worker_ + offset) % worker_count;
         const std::shared_ptr<WorkerSlot> slot = slots_[worker_index];
-        if (!slot->alive)
+        if (!worker_schedulable(*slot))
         {
           continue;
         }
@@ -1551,69 +1577,143 @@ namespace
       return best_assignment;
     }
 
-    void prune_queue_locked() const
+    void refresh_pending_request_state_locked(
+        const std::shared_ptr<PendingRequest> &pending_request,
+        std::chrono::steady_clock::time_point now,
+        bool check_client_disconnect) const
     {
-      const auto now = std::chrono::steady_clock::now();
+      if (pending_request->assigned.load() ||
+          pending_request->canceled.load() ||
+          pending_request->timed_out.load() ||
+          pending_request->client_gone.load())
+      {
+        return;
+      }
+
+      if (pending_request->deadline <= now)
+      {
+        pending_request->timed_out = true;
+        log_scheduler_debug_event(
+            "event=request_wait_timeout request_id=" + std::to_string(pending_request->request_id),
+            debug_logging_);
+        return;
+      }
+
+      if (check_client_disconnect && client_disconnected(pending_request->client_fd))
+      {
+        pending_request->client_gone = true;
+        log_scheduler_debug_event(
+            "event=request_client_disconnected request_id=" + std::to_string(pending_request->request_id),
+            debug_logging_);
+      }
+    }
+
+    void prune_queue_head_locked(std::chrono::steady_clock::time_point now) const
+    {
+      while (!pending_requests_.empty())
+      {
+        const std::shared_ptr<PendingRequest> &pending_request = pending_requests_.front();
+        refresh_pending_request_state_locked(pending_request, now, true);
+        if (!pending_request->canceled.load() &&
+            !pending_request->timed_out.load() &&
+            !pending_request->client_gone.load())
+        {
+          return;
+        }
+
+        pending_request->enqueued = false;
+        --queued_request_count_;
+        pending_requests_.pop_front();
+      }
+    }
+
+    void prune_queue_locked(std::chrono::steady_clock::time_point now) const
+    {
       for (const auto &pending_request : pending_requests_)
       {
-        if (pending_request->assigned.load() ||
-            pending_request->canceled.load() ||
-            pending_request->timed_out.load() ||
-            pending_request->client_gone.load())
-        {
-          continue;
-        }
-        if (pending_request->deadline <= now)
-        {
-          pending_request->timed_out = true;
-          log_scheduler_debug_event(
-              "event=request_wait_timeout request_id=" + std::to_string(pending_request->request_id),
-              debug_logging_);
-          continue;
-        }
-        if (client_disconnected(pending_request->client_fd))
-        {
-          pending_request->client_gone = true;
-          log_scheduler_debug_event(
-              "event=request_client_disconnected request_id=" + std::to_string(pending_request->request_id),
-              debug_logging_);
-        }
+        refresh_pending_request_state_locked(pending_request, now, true);
       }
 
       pending_requests_.erase(
           std::remove_if(
               pending_requests_.begin(),
               pending_requests_.end(),
-              [](const std::shared_ptr<PendingRequest> &pending_request) {
-                return pending_request->canceled.load() ||
-                       pending_request->timed_out.load() ||
-                       pending_request->client_gone.load();
+              [this](const std::shared_ptr<PendingRequest> &pending_request) {
+                if (!(pending_request->canceled.load() ||
+                      pending_request->timed_out.load() ||
+                      pending_request->client_gone.load()))
+                {
+                  return false;
+                }
+
+                if (pending_request->enqueued)
+                {
+                  pending_request->enqueued = false;
+                  --queued_request_count_;
+                }
+                return true;
               }),
           pending_requests_.end());
     }
 
     void erase_pending_request_locked(const std::shared_ptr<PendingRequest> &pending_request) const
     {
-      pending_requests_.erase(
-          std::remove(pending_requests_.begin(), pending_requests_.end(), pending_request),
-          pending_requests_.end());
+      const auto iterator = std::find(pending_requests_.begin(), pending_requests_.end(), pending_request);
+      if (iterator == pending_requests_.end())
+      {
+        return;
+      }
+
+      if ((*iterator)->enqueued)
+      {
+        (*iterator)->enqueued = false;
+        --queued_request_count_;
+      }
+      pending_requests_.erase(iterator);
     }
 
     std::size_t queue_depth() const
     {
       std::lock_guard<std::mutex> lock(scheduler_mutex_);
-      return pending_requests_.size();
+      return queued_request_count_;
+    }
+
+    void housekeeping_loop() const
+    {
+      for (;;)
+      {
+        std::unique_lock<std::mutex> lock(scheduler_mutex_);
+        if (housekeeping_stop_requested_)
+        {
+          return;
+        }
+
+        prune_queue_locked(std::chrono::steady_clock::now());
+        prune_queue_head_locked(std::chrono::steady_clock::now());
+        scheduler_condition_.notify_all();
+        scheduler_condition_.wait_for(lock, kQueueHousekeepingInterval, [this]() {
+          return housekeeping_stop_requested_;
+        });
+        if (housekeeping_stop_requested_)
+        {
+          return;
+        }
+      }
     }
 
     std::vector<std::shared_ptr<WorkerSlot>> slots_;
     std::size_t queue_capacity_;
     std::chrono::steady_clock::duration request_timeout_;
+    std::function<void(const std::shared_ptr<Vajra::runtime::SharedWorkerState> &)> worker_timeout_handler_;
     bool debug_logging_;
     mutable std::mutex scheduler_mutex_;
     mutable std::condition_variable scheduler_condition_;
     mutable std::deque<std::shared_ptr<PendingRequest>> pending_requests_;
+    mutable std::size_t queued_request_count_ = 0;
     mutable std::uint64_t next_request_id_ = 0;
     mutable std::size_t next_preferred_worker_ = 0;
+    mutable bool housekeeping_stop_requested_ = false;
+    mutable std::thread housekeeping_thread_;
 
     friend class QueuedWorkerProcessRackExecutionSession;
   };
@@ -1988,21 +2088,21 @@ std::shared_ptr<const Vajra::rack::RackExecutionTransport> Vajra::rack::request_
 }
 
 std::shared_ptr<const Vajra::rack::RackExecutionTransport> Vajra::rack::request_channel_transport(
-    const std::vector<std::vector<int>> &worker_channel_fds,
-    const std::vector<int> &worker_pids,
+    const std::vector<std::shared_ptr<Vajra::runtime::SharedWorkerState>> &worker_states,
     std::size_t min_threads,
     std::size_t queue_capacity,
     std::size_t request_timeout_seconds,
     std::size_t worker_timeout_seconds,
+    std::function<void(const std::shared_ptr<Vajra::runtime::SharedWorkerState> &)> worker_timeout_handler,
     bool debug_logging)
 {
   return std::make_shared<GlobalQueuedWorkerProcessRackExecutionTransport>(
-      worker_channel_fds,
-      worker_pids,
+      worker_states,
       min_threads,
       queue_capacity,
       request_timeout_seconds,
       worker_timeout_seconds,
+      std::move(worker_timeout_handler),
       debug_logging);
 }
 

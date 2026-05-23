@@ -8,9 +8,11 @@
 
 #include "request/rack_env.hpp"
 #include "request/request_executor.hpp"
+#include "runtime/worker_pool.hpp"
 #include "ruby.h"
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -26,12 +28,12 @@ namespace Vajra
         std::size_t max_threads);
     std::shared_ptr<const class RackExecutionTransport> request_channel_transport(int channel_fd);
     std::shared_ptr<const class RackExecutionTransport> request_channel_transport(
-        const std::vector<std::vector<int>> &worker_channel_fds,
-        const std::vector<int> &worker_pids,
+        const std::vector<std::shared_ptr<Vajra::runtime::SharedWorkerState>> &worker_states,
         std::size_t min_threads,
         std::size_t queue_capacity,
         std::size_t request_timeout_seconds,
         std::size_t worker_timeout_seconds,
+        std::function<void(const std::shared_ptr<Vajra::runtime::SharedWorkerState> &)> worker_timeout_handler,
         bool debug_logging);
     class RackExecutionSession
     {

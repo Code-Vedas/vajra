@@ -546,6 +546,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
 
     expect(request[:exitstatus]).to eq(0)
     expect(request[:output]).to include(
+      'event=worker_registered',
       'event=worker_ready',
       'event=booting',
       'event=boot_complete',
@@ -727,6 +728,12 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
       .to include('fast', 'queued')
     expect(result[:output]).to include('event=worker_timeout')
     expect(result[:output]).to include('worker process exited unexpectedly due to signal 9')
+    expect(result[:output]).to include(
+      'event=worker_exited',
+      'exit_classification=unexpected_signal',
+      'event=worker_replacement_pending',
+      'replacement_needed=true'
+    )
   end
 
   it 'applies the configured request head timeout to fragmented request headers' do

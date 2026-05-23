@@ -15,9 +15,11 @@
 #include <fcntl.h>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <poll.h>
 #include <sstream>
 #include <stdexcept>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <utility>
@@ -27,8 +29,65 @@ namespace
   constexpr const char *kUnknownSocketAddress = "0.0.0.0";
   constexpr int kHandlerReapPollTimeoutMilliseconds = 1000;
   constexpr int kDuplicateFdMinimum = STDERR_FILENO + 1;
+  constexpr std::size_t kRuntimeFdReserve = 32;
+  constexpr std::size_t kPerConnectionFdCost = 2;
+  constexpr std::size_t kListenerFdCost = 1;
 
   void log_client_socket_interrupt_failed(int client_fd, const char *error_message);
+
+  std::size_t checked_multiply(std::size_t left, std::size_t right, const char *error_message)
+  {
+    if (left != 0 && right > (std::numeric_limits<std::size_t>::max() / left))
+    {
+      throw std::runtime_error(error_message);
+    }
+
+    return left * right;
+  }
+
+  std::size_t checked_add(std::size_t left, std::size_t right, const char *error_message)
+  {
+    if (right > (std::numeric_limits<std::size_t>::max() - left))
+    {
+      throw std::runtime_error(error_message);
+    }
+
+    return left + right;
+  }
+
+  void validate_connection_capacity(std::size_t max_connections)
+  {
+    const std::size_t steady_state_connection_fds = checked_multiply(
+        max_connections,
+        kPerConnectionFdCost,
+        "invalid max_connections: required fd count is too large");
+    const std::size_t listener_and_connections_fds = checked_add(
+        kListenerFdCost,
+        steady_state_connection_fds,
+        "invalid max_connections: required fd count is too large");
+    const std::size_t required_fds = checked_add(
+        listener_and_connections_fds,
+        kRuntimeFdReserve,
+        "invalid max_connections: required fd count is too large");
+
+    rlimit fd_limit{};
+    if (getrlimit(RLIMIT_NOFILE, &fd_limit) != 0 || fd_limit.rlim_cur == RLIM_INFINITY)
+    {
+      return;
+    }
+
+    const std::size_t available_fds = static_cast<std::size_t>(fd_limit.rlim_cur);
+    if (required_fds > available_fds)
+    {
+      throw std::runtime_error(
+          "invalid max_connections: " + std::to_string(max_connections) +
+          " active connections require " + std::to_string(steady_state_connection_fds) +
+          " steady-state per-connection fds (accepted socket plus drain-interrupt tracking fd), plus " +
+          std::to_string(kListenerFdCost) + " listener fd and " + std::to_string(kRuntimeFdReserve) +
+          " runtime reserve fds, which exceeds the process fd limit of " + std::to_string(available_fds) +
+          ". Lower max_connections or raise the fd limit.");
+    }
+  }
 
   int duplicate_fd_cloexec(int fd)
   {
@@ -362,6 +421,8 @@ Vajra::Server::Server(
       max_connections_(max_connections),
       shutdown_begin_callback_(std::move(shutdown_begin_callback))
 {
+  validate_connection_capacity(max_connections_);
+
   set_lifecycle_observer([this](lifecycle::HookPoint hook_point, const lifecycle::Snapshot &snapshot) {
     switch (hook_point)
     {

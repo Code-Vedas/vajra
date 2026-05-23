@@ -44,7 +44,6 @@ namespace VajraSpecCpp
         {
           wait_until_listening(port);
           scenario(port, server);
-          server.stop();
           if (server_thread.joinable())
           {
             server_thread.join();

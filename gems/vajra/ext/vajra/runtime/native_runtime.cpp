@@ -794,7 +794,7 @@ void Vajra::runtime::NativeRuntime::observe_worker_exit(
     {
       exit_classification = WorkerExitClassification::exit_before_ready;
     }
-    else if (shutdown_expected)
+    else if (shutdown_expected && exit_detail == 0)
     {
       exit_classification = WorkerExitClassification::expected_shutdown;
     }

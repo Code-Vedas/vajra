@@ -154,7 +154,7 @@ void Vajra::runtime::log_worker_bootstrap_ready(
     int worker_processes)
 {
   std::cout << "[Vajra][lifecycle] " << utc_timestamp()
-            << " event=worker_ready state=booting boot_status=ready stop_reason=none"
+            << " event=worker_bootstrap_ready state=booting boot_status=ready stop_reason=none"
             << " port=" << port
             << " listener_owned=false listener_fd=-1"
             << " mode=master_worker"

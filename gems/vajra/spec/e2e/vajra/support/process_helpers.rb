@@ -181,6 +181,8 @@ module VajraE2EProcessHelpers
       socket.read
       true
     end
+  rescue Timeout::Error
+    false
   rescue EOFError, Errno::ECONNRESET
     true
   end

@@ -35,16 +35,6 @@ namespace
 
   void log_client_socket_interrupt_failed(int client_fd, const char *error_message);
 
-  std::size_t checked_multiply(std::size_t left, std::size_t right, const char *error_message)
-  {
-    if (left != 0 && right > (std::numeric_limits<std::size_t>::max() / left))
-    {
-      throw std::runtime_error(error_message);
-    }
-
-    return left * right;
-  }
-
   std::size_t checked_add(std::size_t left, std::size_t right, const char *error_message)
   {
     if (right > (std::numeric_limits<std::size_t>::max() - left))
@@ -55,38 +45,25 @@ namespace
     return left + right;
   }
 
-  void validate_connection_capacity(std::size_t max_connections)
+  std::size_t safe_max_connections_for_fd_limit()
   {
-    const std::size_t steady_state_connection_fds = checked_multiply(
-        max_connections,
-        kPerConnectionFdCost,
-        "invalid max_connections: required fd count is too large");
-    const std::size_t listener_and_connections_fds = checked_add(
-        kListenerFdCost,
-        steady_state_connection_fds,
-        "invalid max_connections: required fd count is too large");
-    const std::size_t required_fds = checked_add(
-        listener_and_connections_fds,
-        kRuntimeFdReserve,
-        "invalid max_connections: required fd count is too large");
-
     rlimit fd_limit{};
     if (getrlimit(RLIMIT_NOFILE, &fd_limit) != 0 || fd_limit.rlim_cur == RLIM_INFINITY)
     {
-      return;
+      return std::numeric_limits<std::size_t>::max();
     }
 
     const std::size_t available_fds = static_cast<std::size_t>(fd_limit.rlim_cur);
-    if (required_fds > available_fds)
+    const std::size_t fixed_fd_cost = checked_add(
+        kRuntimeFdReserve,
+        kListenerFdCost,
+        "invalid max_connections: fixed fd cost is too large");
+    if (available_fds <= fixed_fd_cost)
     {
-      throw std::runtime_error(
-          "invalid max_connections: " + std::to_string(max_connections) +
-          " active connections require " + std::to_string(steady_state_connection_fds) +
-          " steady-state per-connection fds (accepted socket plus drain-interrupt tracking fd), plus " +
-          std::to_string(kListenerFdCost) + " listener fd and " + std::to_string(kRuntimeFdReserve) +
-          " runtime reserve fds, which exceeds the process fd limit of " + std::to_string(available_fds) +
-          ". Lower max_connections or raise the fd limit.");
+      return 0;
     }
+
+    return (available_fds - fixed_fd_cost) / kPerConnectionFdCost;
   }
 
   int duplicate_fd_cloexec(int fd)
@@ -368,6 +345,15 @@ namespace
     log_message("error", message.str(), std::cerr);
   }
 
+  void log_max_connections_clamped(std::size_t requested, std::size_t actual, std::size_t fd_limit)
+  {
+    std::ostringstream message;
+    message << "max_connections clamped from " << requested << " to " << actual
+            << " so steady-state accepted sockets plus drain-interrupt tracking fds fit within fd limit="
+            << fd_limit;
+    log_message("warn", message.str(), std::cerr);
+  }
+
   class ActiveConnectionGuard
   {
   public:
@@ -421,7 +407,21 @@ Vajra::Server::Server(
       max_connections_(max_connections),
       shutdown_begin_callback_(std::move(shutdown_begin_callback))
 {
-  validate_connection_capacity(max_connections_);
+  const std::size_t safe_max_connections = safe_max_connections_for_fd_limit();
+  if (safe_max_connections == 0)
+  {
+    throw std::runtime_error(
+        "invalid max_connections: fd limit is too low to keep even one accepted connection and its drain-interrupt tracking fd open");
+  }
+  if (safe_max_connections != std::numeric_limits<std::size_t>::max() && max_connections_ > safe_max_connections)
+  {
+    rlimit fd_limit{};
+    if (getrlimit(RLIMIT_NOFILE, &fd_limit) == 0 && fd_limit.rlim_cur != RLIM_INFINITY)
+    {
+      log_max_connections_clamped(max_connections_, safe_max_connections, static_cast<std::size_t>(fd_limit.rlim_cur));
+    }
+    max_connections_ = safe_max_connections;
+  }
 
   set_lifecycle_observer([this](lifecycle::HookPoint hook_point, const lifecycle::Snapshot &snapshot) {
     switch (hook_point)

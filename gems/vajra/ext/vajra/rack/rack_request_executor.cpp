@@ -1528,9 +1528,11 @@ namespace
         }
 
         slot->state->available.store(false, std::memory_order_release);
-        slot->state->expected_shutdown.store(false, std::memory_order_release);
-        slot->state->lifecycle_state.store(Vajra::runtime::WorkerLifecycleState::stopping, std::memory_order_release);
         worker_state = slot->state;
+        if (worker_state->timeout_handling_started.load(std::memory_order_acquire))
+        {
+          return;
+        }
         worker_pid = worker_state->pid.load(std::memory_order_acquire);
         log_scheduler_debug_event(
             "event=worker_timeout worker_index=" + std::to_string(worker_index) +

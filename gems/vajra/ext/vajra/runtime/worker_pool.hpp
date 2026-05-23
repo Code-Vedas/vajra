@@ -59,6 +59,7 @@ namespace Vajra
       std::atomic_bool timeout_escalation_pending{false};
       std::atomic<std::int64_t> timeout_kill_deadline_nanoseconds{0};
       std::atomic_bool request_channels_closed{false};
+      std::atomic_bool timeout_handling_started{false};
     };
   }
 }

@@ -436,8 +436,17 @@ std::uint64_t Vajra::Server::register_active_client_fd(int client_fd)
   }
 
   const std::uint64_t client_token = next_active_client_token_.fetch_add(1, std::memory_order_acq_rel) + 1;
-  std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
-  active_client_fds_[client_token] = ActiveClientRegistration{client_fd, interrupt_fd};
+  try
+  {
+    std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
+    active_client_fds_.emplace(client_token, ActiveClientRegistration{client_fd, interrupt_fd});
+  }
+  catch (...)
+  {
+    close(interrupt_fd);
+    throw;
+  }
+
   return client_token;
 }
 

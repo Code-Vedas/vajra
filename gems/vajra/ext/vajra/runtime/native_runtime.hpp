@@ -10,6 +10,7 @@
 #include "runtime/worker_pool.hpp"
 #include "server.hpp"
 
+#include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <memory>
@@ -86,7 +87,7 @@ namespace Vajra
       std::vector<std::shared_ptr<SharedWorkerState>> worker_states_;
       bool stop_requested_ = false;
       bool worker_startup_in_progress_ = false;
-      bool debug_logging_ = false;
+      std::atomic_bool debug_logging_{false};
       bool worker_exit_watcher_stop_requested_ = false;
       bool worker_exit_watcher_running_ = false;
       std::thread worker_exit_watcher_;

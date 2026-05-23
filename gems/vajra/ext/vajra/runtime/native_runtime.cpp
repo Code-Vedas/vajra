@@ -461,7 +461,7 @@ std::shared_ptr<Vajra::runtime::SharedWorkerState> Vajra::runtime::NativeRuntime
     worker_states_.push_back(worker_state);
     worker_startup_in_progress_ = false;
   }
-  if (debug_logging_)
+  if (debug_logging_.load(std::memory_order_acquire))
   {
     log_worker_lifecycle_event(
         "worker_registered",
@@ -483,7 +483,7 @@ void Vajra::runtime::NativeRuntime::mark_worker_ready(const std::shared_ptr<Shar
   worker_state->available.store(true, std::memory_order_release);
   worker_state->expected_shutdown.store(false, std::memory_order_release);
   worker_state->lifecycle_state.store(WorkerLifecycleState::ready, std::memory_order_release);
-  if (debug_logging_)
+  if (debug_logging_.load(std::memory_order_acquire))
   {
     log_worker_lifecycle_event(
         "worker_ready",
@@ -508,7 +508,7 @@ void Vajra::runtime::NativeRuntime::mark_worker_stopping(const std::shared_ptr<S
   }
 
   worker_state->available.store(false, std::memory_order_release);
-  if (debug_logging_)
+  if (debug_logging_.load(std::memory_order_acquire))
   {
     log_worker_lifecycle_event(
         "worker_stopping",
@@ -545,7 +545,7 @@ void Vajra::runtime::NativeRuntime::mark_worker_exit(
       exit_classification != WorkerExitClassification::expected_shutdown;
   worker_state->replacement_needed.store(replacement_needed, std::memory_order_release);
   close_worker_request_channels(worker_state);
-  if (debug_logging_)
+  if (debug_logging_.load(std::memory_order_acquire))
   {
     log_worker_lifecycle_event(
         "worker_exited",
@@ -596,7 +596,7 @@ void Vajra::runtime::NativeRuntime::clear_worker_runtime()
     worker_states_.clear();
     stop_requested_ = false;
     worker_startup_in_progress_ = false;
-    debug_logging_ = false;
+    debug_logging_.store(false, std::memory_order_release);
   }
 
   for (const auto &worker_state : worker_states)
@@ -739,8 +739,8 @@ void Vajra::runtime::NativeRuntime::observe_worker_exit(
 
   log_unexpected_worker_exit(exit_classification, exit_detail);
 
-  worker_state->pid.store(-1, std::memory_order_release);
   mark_worker_exit(worker_state, exit_classification, exit_detail);
+  worker_state->pid.store(-1, std::memory_order_release);
 }
 
 void Vajra::runtime::NativeRuntime::handle_worker_timeout(const std::shared_ptr<SharedWorkerState> &worker_state)
@@ -828,80 +828,107 @@ void Vajra::runtime::NativeRuntime::stop_worker_exit_watcher()
 
 void Vajra::runtime::NativeRuntime::watch_worker_exits()
 {
-  for (;;)
+  try
   {
-    std::vector<std::shared_ptr<SharedWorkerState>> worker_states;
-    bool stop_requested = false;
-    {
-      const std::lock_guard<std::mutex> lock(server_mutex_);
-      worker_states = worker_states_;
-      stop_requested = worker_exit_watcher_stop_requested_;
-    }
-
-    maybe_escalate_timed_out_workers(worker_states);
-
-    bool observed_exit = false;
-    bool any_live_workers = false;
-    for (const auto &worker_state : worker_states)
-    {
-      if (worker_has_exited(worker_state))
-      {
-        continue;
-      }
-
-      const pid_t pid = worker_state->pid.load(std::memory_order_acquire);
-      if (pid <= 0)
-      {
-        continue;
-      }
-
-      any_live_workers = true;
-    }
-
-    if (stop_requested && !any_live_workers)
-    {
-      return;
-    }
-
     for (;;)
     {
-      int status = 0;
-      const pid_t exited_pid = waitpid(-1, &status, WNOHANG);
-      if (exited_pid == 0)
+      std::vector<std::shared_ptr<SharedWorkerState>> worker_states;
+      bool stop_requested = false;
       {
-        break;
+        const std::lock_guard<std::mutex> lock(server_mutex_);
+        worker_states = worker_states_;
+        stop_requested = worker_exit_watcher_stop_requested_;
       }
-      if (exited_pid < 0)
+
+      maybe_escalate_timed_out_workers(worker_states);
+
+      bool observed_exit = false;
+      bool any_live_workers = false;
+      for (const auto &worker_state : worker_states)
       {
-        if (errno == EINTR)
+        if (worker_has_exited(worker_state))
         {
           continue;
         }
-        if (errno == ECHILD)
+
+        const pid_t pid = worker_state->pid.load(std::memory_order_acquire);
+        if (pid <= 0)
+        {
+          continue;
+        }
+
+        any_live_workers = true;
+      }
+
+      if (stop_requested && !any_live_workers)
+      {
+        return;
+      }
+
+      for (;;)
+      {
+        int status = 0;
+        const pid_t exited_pid = waitpid(-1, &status, WNOHANG);
+        if (exited_pid == 0)
         {
           break;
         }
-        throw std::runtime_error("failed to wait for worker exit");
+        if (exited_pid < 0)
+        {
+          if (errno == EINTR)
+          {
+            continue;
+          }
+          if (errno == ECHILD)
+          {
+            break;
+          }
+          throw std::runtime_error("failed to wait for worker exit");
+        }
+
+        const auto worker_iterator = std::find_if(
+            worker_states.begin(),
+            worker_states.end(),
+            [exited_pid](const std::shared_ptr<SharedWorkerState> &worker_state) {
+              return worker_state->pid.load(std::memory_order_acquire) == exited_pid;
+            });
+        if (worker_iterator != worker_states.end())
+        {
+          observe_worker_exit(*worker_iterator, status);
+        }
+        observed_exit = true;
       }
 
-      const auto worker_iterator = std::find_if(
-          worker_states.begin(),
-          worker_states.end(),
-          [exited_pid](const std::shared_ptr<SharedWorkerState> &worker_state) {
-            return worker_state->pid.load(std::memory_order_acquire) == exited_pid;
-          });
-      if (worker_iterator != worker_states.end())
+      if (!observed_exit)
       {
-        observe_worker_exit(*worker_iterator, status);
+        std::unique_lock<std::mutex> lock(server_mutex_);
+        worker_state_changed_.wait_for(lock, kWorkerExitWatcherPollInterval);
       }
-      observed_exit = true;
     }
-
-    if (!observed_exit)
+  }
+  catch (const std::exception &error)
+  {
     {
-      std::unique_lock<std::mutex> lock(server_mutex_);
-      worker_state_changed_.wait_for(lock, kWorkerExitWatcherPollInterval);
+      const std::lock_guard<std::mutex> lock(server_mutex_);
+      worker_exit_watcher_stop_requested_ = true;
+      stop_requested_ = true;
     }
+    std::cerr << "[Vajra][error] " << utc_timestamp()
+              << " worker exit watcher failed: " << error.what()
+              << std::endl;
+    worker_state_changed_.notify_all();
+  }
+  catch (...)
+  {
+    {
+      const std::lock_guard<std::mutex> lock(server_mutex_);
+      worker_exit_watcher_stop_requested_ = true;
+      stop_requested_ = true;
+    }
+    std::cerr << "[Vajra][error] " << utc_timestamp()
+              << " worker exit watcher failed with an unknown native error"
+              << std::endl;
+    worker_state_changed_.notify_all();
   }
 }
 
@@ -1047,7 +1074,7 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
     const bool debug_logging = debug_logging_enabled(config.log_level);
     {
       const std::lock_guard<std::mutex> lock(server_mutex_);
-      debug_logging_ = debug_logging;
+      debug_logging_.store(debug_logging, std::memory_order_release);
     }
     log_runtime_banner_start(config.host, config.port, config.workers, config.min_threads, config.max_threads);
     const BootContractResult master_boot_result = BootContract::run(

@@ -9,6 +9,7 @@
 #include "request/http_field_utils.hpp"
 #include "request/rack_env.hpp"
 #include "request/request_head_error.hpp"
+#include "runtime/runtime_logging.hpp"
 #include "ruby.h"
 #include "ruby/encoding.h"
 #include "ruby/thread.h"
@@ -1513,26 +1514,51 @@ namespace
 
     void mark_worker_timed_out(std::size_t worker_index) const
     {
-      std::lock_guard<std::mutex> lock(scheduler_mutex_);
-      const std::shared_ptr<WorkerSlot> slot = slot_for(worker_index);
-      if (slot->state->lifecycle_state.load(std::memory_order_acquire) == Vajra::runtime::WorkerLifecycleState::exited)
+      std::shared_ptr<Vajra::runtime::SharedWorkerState> worker_state;
+      pid_t worker_pid = -1;
+      {
+        std::lock_guard<std::mutex> lock(scheduler_mutex_);
+        const std::shared_ptr<WorkerSlot> slot = slot_for(worker_index);
+        if (slot->state->lifecycle_state.load(std::memory_order_acquire) == Vajra::runtime::WorkerLifecycleState::exited)
+        {
+          return;
+        }
+
+        slot->state->available.store(false, std::memory_order_release);
+        slot->state->expected_shutdown.store(false, std::memory_order_release);
+        slot->state->lifecycle_state.store(Vajra::runtime::WorkerLifecycleState::stopping, std::memory_order_release);
+        worker_state = slot->state;
+        worker_pid = worker_state->pid.load(std::memory_order_acquire);
+        log_scheduler_debug_event(
+            "event=worker_timeout worker_index=" + std::to_string(worker_index) +
+                " worker_pid=" + std::to_string(worker_pid),
+            debug_logging_);
+        scheduler_condition_.notify_all();
+      }
+
+      if (!worker_timeout_handler_)
       {
         return;
       }
 
-      slot->state->available.store(false, std::memory_order_release);
-      slot->state->expected_shutdown.store(false, std::memory_order_release);
-      slot->state->lifecycle_state.store(Vajra::runtime::WorkerLifecycleState::stopping, std::memory_order_release);
-      const pid_t worker_pid = slot->state->pid.load(std::memory_order_acquire);
-      log_scheduler_debug_event(
-          "event=worker_timeout worker_index=" + std::to_string(worker_index) +
-              " worker_pid=" + std::to_string(worker_pid),
-          debug_logging_);
-      if (worker_timeout_handler_)
+      try
       {
-        worker_timeout_handler_(slot->state);
+        worker_timeout_handler_(worker_state);
       }
-      scheduler_condition_.notify_all();
+      catch (const std::exception &error)
+      {
+        std::cerr << "[Vajra][error] " << Vajra::runtime::utc_timestamp()
+                  << " failed to signal timed out worker pid=" << worker_pid
+                  << ": " << error.what()
+                  << std::endl;
+      }
+      catch (...)
+      {
+        std::cerr << "[Vajra][error] " << Vajra::runtime::utc_timestamp()
+                  << " failed to signal timed out worker pid=" << worker_pid
+                  << ": unknown native error"
+                  << std::endl;
+      }
     }
 
     std::optional<std::pair<std::size_t, std::size_t>> least_busy_channel_locked() const

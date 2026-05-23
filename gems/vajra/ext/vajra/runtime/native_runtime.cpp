@@ -685,11 +685,21 @@ void Vajra::runtime::NativeRuntime::replay_pending_stop_if_needed()
 void Vajra::runtime::NativeRuntime::wait_for_worker_exit(const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states)
 {
   std::unique_lock<std::mutex> lock(server_mutex_);
-  worker_state_changed_.wait(lock, [&worker_states]() {
+  worker_state_changed_.wait(lock, [this, &worker_states]() {
+    if (worker_exit_watcher_stop_requested_)
+    {
+      return true;
+    }
     return std::all_of(worker_states.begin(), worker_states.end(), [](const auto &worker_state) {
       return worker_has_exited(worker_state);
     });
   });
+  if (!std::all_of(worker_states.begin(), worker_states.end(), [](const auto &worker_state) {
+        return worker_has_exited(worker_state);
+      }))
+  {
+    throw std::runtime_error("worker exit watcher stopped before all workers exited");
+  }
 }
 
 void Vajra::runtime::NativeRuntime::observe_worker_exit(

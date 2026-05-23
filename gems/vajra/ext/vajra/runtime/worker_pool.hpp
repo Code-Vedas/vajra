@@ -7,10 +7,10 @@
 #define VAJRA_RUNTIME_WORKER_POOL_HPP
 
 #include <atomic>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <sys/types.h>
+#include <utility>
 #include <vector>
 
 namespace Vajra

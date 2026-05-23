@@ -783,18 +783,26 @@ void Vajra::runtime::NativeRuntime::observe_worker_exit(
     const std::shared_ptr<SharedWorkerState> &worker_state,
     int status)
 {
+  const WorkerLifecycleState current_state = worker_state->lifecycle_state.load(std::memory_order_acquire);
   const bool shutdown_expected = worker_state->expected_shutdown.load(std::memory_order_acquire);
+  bool runtime_shutdown_requested = false;
+  {
+    const std::lock_guard<std::mutex> lock(server_mutex_);
+    runtime_shutdown_requested = runtime_shutdown_started_ || stop_requested_ || shutting_down != 0;
+  }
 
   WorkerExitClassification exit_classification = WorkerExitClassification::unexpected_exit;
   int exit_detail = 0;
   if (WIFEXITED(status))
   {
     exit_detail = WEXITSTATUS(status);
-    if (worker_state->lifecycle_state.load(std::memory_order_acquire) == WorkerLifecycleState::booting)
+    if (current_state == WorkerLifecycleState::booting)
     {
       exit_classification = WorkerExitClassification::exit_before_ready;
     }
-    else if (shutdown_expected && exit_detail == 0)
+    else if (exit_detail == 0 &&
+             (shutdown_expected ||
+              (runtime_shutdown_requested && current_state == WorkerLifecycleState::stopping)))
     {
       exit_classification = WorkerExitClassification::expected_shutdown;
     }
@@ -806,7 +814,7 @@ void Vajra::runtime::NativeRuntime::observe_worker_exit(
   else if (WIFSIGNALED(status))
   {
     exit_detail = WTERMSIG(status);
-    if (worker_state->lifecycle_state.load(std::memory_order_acquire) == WorkerLifecycleState::booting)
+    if (current_state == WorkerLifecycleState::booting)
     {
       exit_classification = WorkerExitClassification::exit_before_ready;
     }
@@ -819,7 +827,7 @@ void Vajra::runtime::NativeRuntime::observe_worker_exit(
       exit_classification = WorkerExitClassification::unexpected_signal;
     }
   }
-  else if (worker_state->lifecycle_state.load(std::memory_order_acquire) == WorkerLifecycleState::booting)
+  else if (current_state == WorkerLifecycleState::booting)
   {
     exit_classification = WorkerExitClassification::exit_before_ready;
   }

@@ -1719,12 +1719,21 @@ namespace
           return;
         }
 
-        prune_queue_locked(std::chrono::steady_clock::now());
-        prune_queue_head_locked(std::chrono::steady_clock::now());
-        scheduler_condition_.notify_all();
-        scheduler_condition_.wait_for(lock, kQueueHousekeepingInterval, [this]() {
-          return housekeeping_stop_requested_;
-        });
+        if (queued_request_count_ == 0)
+        {
+          scheduler_condition_.wait(lock, [this]() {
+            return housekeeping_stop_requested_ || queued_request_count_ > 0;
+          });
+        }
+        else
+        {
+          prune_queue_locked(std::chrono::steady_clock::now());
+          prune_queue_head_locked(std::chrono::steady_clock::now());
+          scheduler_condition_.notify_all();
+          scheduler_condition_.wait_for(lock, kQueueHousekeepingInterval, [this]() {
+            return housekeeping_stop_requested_ || queued_request_count_ == 0;
+          });
+        }
         if (housekeeping_stop_requested_)
         {
           return;

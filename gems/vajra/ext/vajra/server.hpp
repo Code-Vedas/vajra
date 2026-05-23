@@ -7,12 +7,14 @@
 #define VAJRA_SERVER_HPP
 
 #include <cstddef>
-#include <functional>
 #include <atomic>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "lifecycle/lifecycle_controller.hpp"
@@ -49,6 +51,12 @@ namespace Vajra
     void set_lifecycle_observer(lifecycle::Controller::Observer observer);
 
   private:
+    struct ActiveClientRegistration
+    {
+      int original_fd;
+      int interrupt_fd;
+    };
+
     struct HandlerThread
     {
       std::thread thread;
@@ -71,10 +79,16 @@ namespace Vajra
     std::function<void()> shutdown_begin_callback_;
     std::mutex handler_threads_mutex_;
     std::vector<HandlerThread> handler_threads_;
+    std::mutex active_client_fds_mutex_;
+    std::unordered_map<std::uint64_t, ActiveClientRegistration> active_client_fds_;
+    std::atomic<std::uint64_t> next_active_client_token_{0};
 
     void close_listener_fd(bool interrupt_accept);
     void join_handler_threads();
     void reap_completed_handler_threads();
+    std::uint64_t register_active_client_fd(int client_fd);
+    void unregister_active_client_fd(int client_fd, std::uint64_t client_token);
+    void interrupt_active_client_sockets() noexcept;
   };
 }
 

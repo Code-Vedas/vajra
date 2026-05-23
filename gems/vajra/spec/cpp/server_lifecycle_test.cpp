@@ -10,12 +10,72 @@
 
 #include <exception>
 #include <sstream>
+#include <string>
 #include <thread>
 
 namespace VajraSpecCpp
 {
   namespace
   {
+    void expect_stopped_snapshot(
+        const Vajra::Server &server,
+        Vajra::lifecycle::StopReason expected_reason);
+
+    template <typename Scenario>
+    void run_stop_interrupt_test(const Scenario &scenario, const std::string &retry_failure_message)
+    {
+      for (int attempt = 0; attempt < 10; ++attempt)
+      {
+        const int port = available_port();
+        Vajra::Server server(port, "0.0.0.0", Vajra::request::kDefaultMaxRequestHeadBytes);
+        std::exception_ptr server_error;
+
+        std::thread server_thread([&]() {
+          try
+          {
+            server.start();
+          }
+          catch (...)
+          {
+            server_error = std::current_exception();
+          }
+        });
+
+        try
+        {
+          wait_until_listening(port);
+          scenario(port, server);
+          if (server_thread.joinable())
+          {
+            server_thread.join();
+          }
+          if (server_error)
+          {
+            std::rethrow_exception(server_error);
+          }
+          expect_stopped_snapshot(server, Vajra::lifecycle::StopReason::programmatic_stop);
+          return;
+        }
+        catch (...)
+        {
+          if (server_thread.joinable())
+          {
+            server.stop();
+            server_thread.join();
+          }
+
+          if (bind_conflict(server_error) && attempt < 9)
+          {
+            continue;
+          }
+
+          throw;
+        }
+      }
+
+      fail(retry_failure_message);
+    }
+
     void expect_stopped_snapshot(
         const Vajra::Server &server,
         Vajra::lifecycle::StopReason expected_reason)
@@ -204,6 +264,78 @@ namespace VajraSpecCpp
       assert_can_rebind(binding.port);
       expect_stopped_snapshot(server, Vajra::lifecycle::StopReason::programmatic_stop);
     }
+
+    void test_stop_interrupts_keep_alive_connection()
+    {
+      run_stop_interrupt_test(
+          [&](int port, Vajra::Server &server) {
+            FileDescriptorGuard client_socket(connect_to_listener(port));
+            if (client_socket.get() < 0)
+            {
+              fail("failed to connect keep-alive test client");
+            }
+
+            suppress_sigpipe(client_socket.get());
+            if (!send_all(
+                    client_socket.get(),
+                    "GET / HTTP/1.1\r\n"
+                    "Host: localhost\r\n"
+                    "\r\n"))
+            {
+              fail("failed to send keep-alive request");
+            }
+            read_http_response(client_socket.get());
+
+            server.stop();
+            const bool peer_closed = peer_closed_within(client_socket.get(), 1000);
+            client_socket.close_if_open();
+            if (!peer_closed)
+            {
+              fail("server did not interrupt keep-alive client socket during drain");
+            }
+          },
+          "keep-alive interrupt test could not obtain a reusable listener port after retries");
+    }
+
+    void test_stop_interrupts_partial_next_request()
+    {
+      run_stop_interrupt_test(
+          [&](int port, Vajra::Server &server) {
+            FileDescriptorGuard client_socket(connect_to_listener(port));
+            if (client_socket.get() < 0)
+            {
+              fail("failed to connect partial-next-request test client");
+            }
+
+            suppress_sigpipe(client_socket.get());
+            if (!send_all(
+                    client_socket.get(),
+                    "GET / HTTP/1.1\r\n"
+                    "Host: localhost\r\n"
+                    "\r\n"))
+            {
+              fail("failed to send initial keep-alive request");
+            }
+            read_http_response(client_socket.get());
+
+            if (!send_all(
+                    client_socket.get(),
+                    "GET /next HTTP/1.1\r\n"
+                    "Host: localhost\r\n"))
+            {
+              fail("failed to send partial next request");
+            }
+
+            server.stop();
+            const bool peer_closed = peer_closed_within(client_socket.get(), 1000);
+            client_socket.close_if_open();
+            if (!peer_closed)
+            {
+              fail("server did not interrupt partial next request during drain");
+            }
+          },
+          "partial-next-request interrupt test could not obtain a reusable listener port after retries");
+    }
   }
 
   void run_server_lifecycle_tests()
@@ -213,5 +345,7 @@ namespace VajraSpecCpp
     test_repeated_start_stop_cycles_remain_reusable();
     test_repeated_stop_requests_are_idempotent();
     test_inherited_listener_start_and_stop_release_listener();
+    test_stop_interrupts_keep_alive_connection();
+    test_stop_interrupts_partial_next_request();
   }
 }

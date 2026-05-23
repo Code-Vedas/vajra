@@ -12,11 +12,14 @@
 #include <cstring>
 #include <cstdint>
 #include <ctime>
+#include <fcntl.h>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <poll.h>
 #include <sstream>
 #include <stdexcept>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <utility>
@@ -25,6 +28,100 @@ namespace
 {
   constexpr const char *kUnknownSocketAddress = "0.0.0.0";
   constexpr int kHandlerReapPollTimeoutMilliseconds = 1000;
+  constexpr int kDuplicateFdMinimum = STDERR_FILENO + 1;
+  constexpr std::size_t kRuntimeFdReserve = 32;
+  constexpr std::size_t kPerConnectionFdCost = 2;
+  constexpr std::size_t kListenerFdCost = 1;
+
+  void log_client_socket_interrupt_failed(int client_fd, const char *error_message);
+
+  std::size_t checked_add(std::size_t left, std::size_t right, const char *error_message)
+  {
+    if (right > (std::numeric_limits<std::size_t>::max() - left))
+    {
+      throw std::runtime_error(error_message);
+    }
+
+    return left + right;
+  }
+
+  std::size_t safe_max_connections_for_fd_limit()
+  {
+    rlimit fd_limit{};
+    if (getrlimit(RLIMIT_NOFILE, &fd_limit) != 0 || fd_limit.rlim_cur == RLIM_INFINITY)
+    {
+      return std::numeric_limits<std::size_t>::max();
+    }
+
+    const std::size_t available_fds = static_cast<std::size_t>(fd_limit.rlim_cur);
+    const std::size_t fixed_fd_cost = checked_add(
+        kRuntimeFdReserve,
+        kListenerFdCost,
+        "invalid max_connections: fixed fd cost is too large");
+    if (available_fds <= fixed_fd_cost)
+    {
+      return 0;
+    }
+
+    return (available_fds - fixed_fd_cost) / kPerConnectionFdCost;
+  }
+
+  int duplicate_fd_cloexec(int fd)
+  {
+#ifdef F_DUPFD_CLOEXEC
+    return fcntl(fd, F_DUPFD_CLOEXEC, kDuplicateFdMinimum);
+#else
+    const int duplicated_fd = fcntl(fd, F_DUPFD, kDuplicateFdMinimum);
+    if (duplicated_fd < 0)
+    {
+      return duplicated_fd;
+    }
+
+    const int existing_flags = fcntl(duplicated_fd, F_GETFD);
+    if (existing_flags < 0)
+    {
+      const int error_number = errno;
+      close(duplicated_fd);
+      errno = error_number;
+      return -1;
+    }
+
+    if (fcntl(duplicated_fd, F_SETFD, existing_flags | FD_CLOEXEC) < 0)
+    {
+      const int error_number = errno;
+      close(duplicated_fd);
+      errno = error_number;
+      return -1;
+    }
+
+    return duplicated_fd;
+#endif
+  }
+
+  bool shutdown_interrupt_succeeded_or_expected(int fd, int original_fd)
+  {
+    for (;;)
+    {
+      if (shutdown(fd, SHUT_RDWR) == 0)
+      {
+        return true;
+      }
+
+      if (errno == EINTR)
+      {
+        continue;
+      }
+      // Ignore shutdown-time races where a handler closes the socket or the fd
+      // is recycled before this best-effort interrupt reaches shutdown(2).
+      if (errno == ENOTCONN || errno == EINVAL || errno == EBADF || errno == ENOTSOCK)
+      {
+        return true;
+      }
+
+      log_client_socket_interrupt_failed(original_fd, std::strerror(errno));
+      return false;
+    }
+  }
 
   std::string socket_address(sockaddr_in address)
   {
@@ -203,6 +300,13 @@ namespace
     log_message("error", message.str(), std::cerr);
   }
 
+  void log_active_client_tracking_failed(const char *error_message)
+  {
+    std::ostringstream message;
+    message << "active client tracking failed: " << error_message;
+    log_message("error", message.str(), std::cerr);
+  }
+
   void log_poll_failed(const char *error_message)
   {
     std::ostringstream message;
@@ -232,6 +336,29 @@ namespace
                   << " client_fd=" << client_fd
                   << " error=" << message;
     log_message("error", error_message.str(), std::cerr);
+  }
+
+  void log_client_socket_interrupt_failed(int client_fd, const char *error_message)
+  {
+    std::ostringstream message;
+    message << "client socket interrupt failed: client_fd=" << client_fd << " error=" << error_message;
+    log_message("error", message.str(), std::cerr);
+  }
+
+  void log_client_socket_interrupt_aborted(const char *error_message)
+  {
+    std::ostringstream message;
+    message << "client socket interrupt aborted: " << error_message;
+    log_message("error", message.str(), std::cerr);
+  }
+
+  void log_max_connections_clamped(std::size_t requested, std::size_t actual, std::size_t fd_limit)
+  {
+    std::ostringstream message;
+    message << "max_connections clamped from " << requested << " to " << actual
+            << " so steady-state accepted sockets plus drain-interrupt tracking fds fit within fd limit="
+            << fd_limit;
+    log_message("warn", message.str(), std::cerr);
   }
 
   class ActiveConnectionGuard
@@ -287,6 +414,22 @@ Vajra::Server::Server(
       max_connections_(max_connections),
       shutdown_begin_callback_(std::move(shutdown_begin_callback))
 {
+  const std::size_t safe_max_connections = safe_max_connections_for_fd_limit();
+  if (safe_max_connections == 0)
+  {
+    throw std::runtime_error(
+        "invalid max_connections: fd limit is too low to keep even one accepted connection and its drain-interrupt tracking fd open");
+  }
+  if (safe_max_connections != std::numeric_limits<std::size_t>::max() && max_connections_ > safe_max_connections)
+  {
+    rlimit fd_limit{};
+    if (getrlimit(RLIMIT_NOFILE, &fd_limit) == 0 && fd_limit.rlim_cur != RLIM_INFINITY)
+    {
+      log_max_connections_clamped(max_connections_, safe_max_connections, static_cast<std::size_t>(fd_limit.rlim_cur));
+    }
+    max_connections_ = safe_max_connections;
+  }
+
   set_lifecycle_observer([this](lifecycle::HookPoint hook_point, const lifecycle::Snapshot &snapshot) {
     switch (hook_point)
     {
@@ -330,6 +473,11 @@ Vajra::Server::Server(
 Vajra::Server::~Server()
 {
   close_listener_fd(false);
+  const lifecycle::Snapshot snapshot = lifecycle_.snapshot();
+  if (snapshot.state == lifecycle::State::draining || snapshot.state == lifecycle::State::failed)
+  {
+    interrupt_active_client_sockets();
+  }
   join_handler_threads();
 }
 
@@ -368,6 +516,102 @@ void Vajra::Server::join_handler_threads()
     {
       thread.join();
     }
+  }
+}
+
+std::uint64_t Vajra::Server::register_active_client_fd(int client_fd)
+{
+  const int interrupt_fd = duplicate_fd_cloexec(client_fd);
+  if (interrupt_fd < 0)
+  {
+    std::ostringstream error_message;
+    error_message << "dup failed while tracking active client socket fd=" << client_fd
+                  << ": " << std::strerror(errno);
+    throw std::runtime_error(error_message.str());
+  }
+
+  const std::uint64_t client_token = next_active_client_token_.fetch_add(1, std::memory_order_acq_rel) + 1;
+  try
+  {
+    std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
+    active_client_fds_.emplace(client_token, ActiveClientRegistration{client_fd, interrupt_fd});
+  }
+  catch (...)
+  {
+    close(interrupt_fd);
+    throw;
+  }
+
+  return client_token;
+}
+
+void Vajra::Server::unregister_active_client_fd(int client_fd, std::uint64_t client_token)
+{
+  int interrupt_fd = -1;
+  {
+    std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
+    const auto active_client_fd = active_client_fds_.find(client_token);
+    if (active_client_fd == active_client_fds_.end() || active_client_fd->second.original_fd != client_fd)
+    {
+      return;
+    }
+
+    interrupt_fd = active_client_fd->second.interrupt_fd;
+    active_client_fds_.erase(active_client_fd);
+  }
+
+  if (interrupt_fd >= 0)
+  {
+    close(interrupt_fd);
+  }
+}
+
+void Vajra::Server::interrupt_active_client_sockets() noexcept
+{
+  try
+  {
+    std::vector<std::pair<int, int>> interrupt_fds;
+    {
+      std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
+      interrupt_fds.reserve(active_client_fds_.size());
+      for (const auto &[client_token, registration] : active_client_fds_)
+      {
+        (void)client_token;
+        const int interrupt_fd = duplicate_fd_cloexec(registration.interrupt_fd);
+        if (interrupt_fd < 0)
+        {
+          if (errno == EBADF)
+          {
+            continue;
+          }
+
+          if (errno == EMFILE || errno == ENFILE)
+          {
+            shutdown_interrupt_succeeded_or_expected(registration.interrupt_fd, registration.original_fd);
+            continue;
+          }
+
+          log_client_socket_interrupt_failed(registration.original_fd, std::strerror(errno));
+          continue;
+        }
+
+        interrupt_fds.emplace_back(registration.original_fd, interrupt_fd);
+      }
+    }
+
+    for (const auto &[original_fd, interrupt_fd] : interrupt_fds)
+    {
+      shutdown_interrupt_succeeded_or_expected(interrupt_fd, original_fd);
+      close(interrupt_fd);
+    }
+  }
+  catch (const std::exception &error)
+  {
+    log_client_socket_interrupt_aborted(error.what());
+  }
+  catch (...)
+  {
+    log_client_socket_interrupt_aborted("unknown native error");
   }
 }
 
@@ -451,6 +695,7 @@ void Vajra::Server::start()
           shutdown_begin_callback_();
         }
         lifecycle_.request_stop(lifecycle::StopReason::signal_shutdown);
+        interrupt_active_client_sockets();
         break;
       }
 
@@ -513,6 +758,7 @@ void Vajra::Server::start()
               shutdown_begin_callback_();
             }
             lifecycle_.request_stop(lifecycle::StopReason::signal_shutdown);
+            interrupt_active_client_sockets();
           }
           break;
         }
@@ -532,12 +778,24 @@ void Vajra::Server::start()
       }
 
       reap_completed_handler_threads();
-
       const std::size_t previous_active_connections = active_connection_count_.fetch_add(1, std::memory_order_acq_rel);
       if (previous_active_connections >= max_connections_)
       {
         active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
         log_connection_rejected(max_connections_);
+        close(client_fd);
+        continue;
+      }
+
+      std::uint64_t client_token = 0;
+      try
+      {
+        client_token = register_active_client_fd(client_fd);
+      }
+      catch (const std::exception &error)
+      {
+        active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
+        log_active_client_tracking_failed(error.what());
         close(client_fd);
         continue;
       }
@@ -548,7 +806,7 @@ void Vajra::Server::start()
         std::lock_guard<std::mutex> lock(handler_threads_mutex_);
         handler_threads_.push_back(HandlerThread{std::thread(), completed});
         HandlerThread &handler_thread = handler_threads_.back();
-        handler_thread.thread = std::thread([this, client_fd, client_addr, completed]() {
+        handler_thread.thread = std::thread([this, client_fd, client_addr, completed, client_token]() {
           ActiveConnectionGuard active_connection_guard(active_connection_count_);
           try
           {
@@ -562,6 +820,7 @@ void Vajra::Server::start()
           {
             log_handler_thread_failure(client_addr, client_fd, "unknown exception");
           }
+          unregister_active_client_fd(client_fd, client_token);
           completed->store(true, std::memory_order_release);
         });
       }
@@ -574,6 +833,7 @@ void Vajra::Server::start()
           handler_threads_.pop_back();
         }
         active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
+        unregister_active_client_fd(client_fd, client_token);
         close(client_fd);
         throw;
       }
@@ -582,12 +842,22 @@ void Vajra::Server::start()
   catch (...)
   {
     close_listener_fd(false);
+    const lifecycle::Snapshot snapshot = lifecycle_.snapshot();
+    if (snapshot.state == lifecycle::State::draining || snapshot.state == lifecycle::State::failed)
+    {
+      interrupt_active_client_sockets();
+    }
     join_handler_threads();
     lifecycle_.finish_stop();
     throw;
   }
 
   close_listener_fd(false);
+  const lifecycle::Snapshot snapshot = lifecycle_.snapshot();
+  if (snapshot.state == lifecycle::State::draining || snapshot.state == lifecycle::State::failed)
+  {
+    interrupt_active_client_sockets();
+  }
   join_handler_threads();
   lifecycle_.finish_stop();
 }
@@ -600,6 +870,7 @@ void Vajra::Server::stop()
   }
   lifecycle_.request_stop(lifecycle::StopReason::programmatic_stop);
   close_listener_fd(true);
+  interrupt_active_client_sockets();
 }
 
 Vajra::lifecycle::Snapshot Vajra::Server::lifecycle_snapshot() const

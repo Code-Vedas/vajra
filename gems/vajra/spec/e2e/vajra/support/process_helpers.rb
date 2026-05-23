@@ -147,15 +147,7 @@ module VajraE2EProcessHelpers
       socket.close
 
       Process.kill(signal, wait_thread.pid)
-      immediate_output = Timeout.timeout(1) do
-        loop do
-          captured_output = read_available_output(output)
-          break captured_output if captured_output.include?('- Gracefully shutting down workers...')
-          raise Timeout::Error if !wait_thread.alive? && captured_output.empty?
-
-          sleep 0.01
-        end
-      end
+      immediate_output = wait_for_graceful_shutdown_banner(output, wait_thread)
       status = wait_for_exit(wait_thread)
 
       {
@@ -166,6 +158,64 @@ module VajraE2EProcessHelpers
         port: selected_port
       }
     ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
+  def wait_for_graceful_shutdown_banner(output, wait_thread)
+    captured_output = +''
+
+    Timeout.timeout(1) do
+      loop do
+        captured_output << read_available_output(output)
+        break captured_output if captured_output.include?('- Gracefully shutting down workers...')
+        raise Timeout::Error if !wait_thread.alive? && captured_output.empty?
+
+        sleep 0.01
+      end
+    end
+  end
+
+  def wait_for_socket_close(socket)
+    Timeout.timeout(1) do
+      socket.read == ''
+    end
+  rescue Timeout::Error
+    false
+  rescue Errno::ECONNRESET
+    true
+  end
+
+  def keep_alive_shutdown_with_open_socket(
+    followup_chunks: [],
+    port: disposable_listener_port,
+    signal: 'INT',
+    exit_timeout: 2
+  )
+    Open3.popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
+
+      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+      socket.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+      response = read_raw_http_response(socket, wait_thread:, output:, request_label: 'keep_alive_shutdown_with_open_socket')
+      followup_chunks.each { |chunk| socket.write(chunk) }
+
+      Process.kill(signal, wait_thread.pid)
+      immediate_output = wait_for_graceful_shutdown_banner(output, wait_thread)
+      socket_closed = wait_for_socket_close(socket)
+      status = wait_for_exit(wait_thread, timeout: exit_timeout)
+
+      {
+        exitstatus: status.exitstatus,
+        response:,
+        socket_closed:,
+        immediate_output:,
+        output: "#{startup_output.join}#{immediate_output}#{output.read}",
+        port: selected_port
+      }
+    ensure
+      socket.close unless socket.nil? || socket.closed?
       cleanup_process(wait_thread, output)
     end
   end

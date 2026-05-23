@@ -28,6 +28,8 @@ namespace
   constexpr int kHandlerReapPollTimeoutMilliseconds = 1000;
   constexpr int kDuplicateFdMinimum = STDERR_FILENO + 1;
 
+  void log_client_socket_interrupt_failed(int client_fd, const char *error_message);
+
   int duplicate_fd_cloexec(int fd)
   {
 #ifdef F_DUPFD_CLOEXEC
@@ -58,6 +60,31 @@ namespace
 
     return duplicated_fd;
 #endif
+  }
+
+  bool shutdown_interrupt_succeeded_or_expected(int fd, int original_fd)
+  {
+    for (;;)
+    {
+      if (shutdown(fd, SHUT_RDWR) == 0)
+      {
+        return true;
+      }
+
+      if (errno == EINTR)
+      {
+        continue;
+      }
+      // Ignore shutdown-time races where a handler closes the socket or the fd
+      // is recycled before this best-effort interrupt reaches shutdown(2).
+      if (errno == ENOTCONN || errno == EINVAL || errno == EBADF || errno == ENOTSOCK)
+      {
+        return true;
+      }
+
+      log_client_socket_interrupt_failed(original_fd, std::strerror(errno));
+      return false;
+    }
   }
 
   std::string socket_address(sockaddr_in address)
@@ -488,6 +515,12 @@ void Vajra::Server::interrupt_active_client_sockets()
           continue;
         }
 
+        if (errno == EMFILE || errno == ENFILE)
+        {
+          shutdown_interrupt_succeeded_or_expected(registration.interrupt_fd, registration.original_fd);
+          continue;
+        }
+
         log_client_socket_interrupt_failed(registration.original_fd, std::strerror(errno));
         continue;
       }
@@ -498,28 +531,7 @@ void Vajra::Server::interrupt_active_client_sockets()
 
   for (const auto &[original_fd, interrupt_fd] : interrupt_fds)
   {
-    for (;;)
-    {
-      if (shutdown(interrupt_fd, SHUT_RDWR) == 0)
-      {
-        break;
-      }
-
-      if (errno == EINTR)
-      {
-        continue;
-      }
-      // Ignore shutdown-time races where a handler closes the socket or the fd
-      // is recycled before this best-effort interrupt reaches shutdown(2).
-      if (errno == ENOTCONN || errno == EINVAL || errno == EBADF || errno == ENOTSOCK)
-      {
-        break;
-      }
-
-      log_client_socket_interrupt_failed(original_fd, std::strerror(errno));
-      break;
-    }
-
+    shutdown_interrupt_succeeded_or_expected(interrupt_fd, original_fd);
     close(interrupt_fd);
   }
 }
@@ -687,6 +699,15 @@ void Vajra::Server::start()
       }
 
       reap_completed_handler_threads();
+      const std::size_t previous_active_connections = active_connection_count_.fetch_add(1, std::memory_order_acq_rel);
+      if (previous_active_connections >= max_connections_)
+      {
+        active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
+        log_connection_rejected(max_connections_);
+        close(client_fd);
+        continue;
+      }
+
       std::uint64_t client_token = 0;
       try
       {
@@ -694,17 +715,8 @@ void Vajra::Server::start()
       }
       catch (const std::exception &error)
       {
-        log_active_client_tracking_failed(error.what());
-        close(client_fd);
-        continue;
-      }
-
-      const std::size_t previous_active_connections = active_connection_count_.fetch_add(1, std::memory_order_acq_rel);
-      if (previous_active_connections >= max_connections_)
-      {
         active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
-        unregister_active_client_fd(client_fd, client_token);
-        log_connection_rejected(max_connections_);
+        log_active_client_tracking_failed(error.what());
         close(client_fd);
         continue;
       }

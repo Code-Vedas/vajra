@@ -8,8 +8,11 @@
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <sstream>
 #include <unistd.h>
 
@@ -46,6 +49,18 @@ bool Vajra::runtime::debug_logging_enabled(const std::string &log_level)
 
 namespace
 {
+  struct LoggingConfig
+  {
+    bool structured_logs = false;
+    std::string access_log_path;
+    std::string error_log_path;
+    std::unique_ptr<std::ofstream> access_log_stream;
+    std::unique_ptr<std::ofstream> error_log_stream;
+  };
+
+  std::mutex logging_mutex;
+  LoggingConfig logging_config;
+
   const char *worker_lifecycle_state_name(Vajra::runtime::WorkerLifecycleState lifecycle_state)
   {
     switch (lifecycle_state)
@@ -83,6 +98,86 @@ namespace
 
     return "unknown";
   }
+
+  const char *worker_health_state_name(Vajra::runtime::WorkerHealthState state)
+  {
+    switch (state)
+    {
+      case Vajra::runtime::WorkerHealthState::healthy:
+        return "healthy";
+      case Vajra::runtime::WorkerHealthState::busy:
+        return "busy";
+      case Vajra::runtime::WorkerHealthState::overloaded:
+        return "overloaded";
+      case Vajra::runtime::WorkerHealthState::degraded:
+        return "degraded";
+      case Vajra::runtime::WorkerHealthState::suspect:
+        return "suspect";
+      case Vajra::runtime::WorkerHealthState::wedged:
+        return "wedged";
+    }
+
+    return "unknown";
+  }
+
+  void write_line(std::ostream &stream, const std::string &line)
+  {
+    stream << line << std::endl;
+  }
+
+  void write_runtime_line(const std::string &line)
+  {
+    std::lock_guard<std::mutex> lock(logging_mutex);
+    write_line(std::cout, line);
+    if (logging_config.error_log_stream)
+    {
+      write_line(*logging_config.error_log_stream, line);
+    }
+  }
+
+  void write_error_line(const std::string &line)
+  {
+    std::lock_guard<std::mutex> lock(logging_mutex);
+    write_line(std::cerr, line);
+    if (logging_config.error_log_stream)
+    {
+      write_line(*logging_config.error_log_stream, line);
+    }
+  }
+
+  void write_access_line(const std::string &line)
+  {
+    std::lock_guard<std::mutex> lock(logging_mutex);
+    if (logging_config.access_log_stream)
+    {
+      write_line(*logging_config.access_log_stream, line);
+      return;
+    }
+
+    write_line(std::cout, line);
+  }
+}
+
+void Vajra::runtime::configure_runtime_logging(
+    bool structured_logs,
+    const std::string &access_log,
+    const std::string &error_log)
+{
+  std::lock_guard<std::mutex> lock(logging_mutex);
+  logging_config.structured_logs = structured_logs;
+  logging_config.access_log_path = access_log;
+  logging_config.error_log_path = error_log;
+  logging_config.access_log_stream.reset();
+  logging_config.error_log_stream.reset();
+
+  if (!access_log.empty())
+  {
+    logging_config.access_log_stream = std::make_unique<std::ofstream>(access_log, std::ios::app);
+  }
+  if (!error_log.empty())
+  {
+    logging_config.error_log_stream = std::make_unique<std::ofstream>(error_log, std::ios::app);
+  }
 }
 
 void Vajra::runtime::log_runtime_banner_start(
@@ -93,14 +188,16 @@ void Vajra::runtime::log_runtime_banner_start(
     std::size_t max_threads)
 {
   const pid_t pid = getpid();
-  std::cout << "[" << pid << "] === vajra boot: " << utc_timestamp() << " ===" << std::endl;
-  std::cout << "[" << pid << "] Vajra starting in master-worker mode..." << std::endl;
-  std::cout << "[" << pid << "] * Environment: " << runtime_environment_name() << std::endl;
-  std::cout << "[" << pid << "] * Master PID: " << pid << std::endl;
-  std::cout << "[" << pid << "] * Workers: " << workers << std::endl;
-  std::cout << "[" << pid << "] * Min threads: " << min_threads << std::endl;
-  std::cout << "[" << pid << "] * Max threads: " << max_threads << std::endl;
-  std::cout << "[" << pid << "] * Bind: http://" << host << ":" << port << std::endl;
+  std::ostringstream line;
+  line << "[" << pid << "] === vajra boot: " << utc_timestamp() << " ===";
+  write_runtime_line(line.str());
+  write_runtime_line("[" + std::to_string(pid) + "] Vajra starting in master-worker mode...");
+  write_runtime_line("[" + std::to_string(pid) + "] * Environment: " + runtime_environment_name());
+  write_runtime_line("[" + std::to_string(pid) + "] * Master PID: " + std::to_string(pid));
+  write_runtime_line("[" + std::to_string(pid) + "] * Workers: " + std::to_string(workers));
+  write_runtime_line("[" + std::to_string(pid) + "] * Min threads: " + std::to_string(min_threads));
+  write_runtime_line("[" + std::to_string(pid) + "] * Max threads: " + std::to_string(max_threads));
+  write_runtime_line("[" + std::to_string(pid) + "] * Bind: http://" + host + ":" + std::to_string(port));
 }
 
 void Vajra::runtime::log_worker_lifecycle_event(
@@ -113,19 +210,25 @@ void Vajra::runtime::log_worker_lifecycle_event(
     bool replacement_needed,
     int exit_detail)
 {
-  std::cout << "[Vajra][lifecycle] " << utc_timestamp()
-            << " event=" << event_name
-            << " worker_index=" << worker_index
-            << " pid=" << pid
-            << " lifecycle=" << worker_lifecycle_state_name(lifecycle_state)
-            << " availability=" << (available ? "available" : "unavailable")
-            << " exit_classification=" << worker_exit_classification_name(exit_classification)
-            << " replacement_needed=" << (replacement_needed ? "true" : "false");
+  std::ostringstream line;
+  line << "[Vajra][lifecycle] " << utc_timestamp()
+       << " event=" << event_name
+       << " worker_index=" << worker_index
+       << " pid=" << pid
+       << " lifecycle=" << worker_lifecycle_state_name(lifecycle_state)
+       << " availability=" << (available ? "available" : "unavailable")
+       << " exit_classification=" << worker_exit_classification_name(exit_classification)
+       << " replacement_needed=" << (replacement_needed ? "true" : "false")
+       << " health_state=" << worker_health_state_name(
+              exit_detail >= static_cast<int>(Vajra::runtime::WorkerHealthState::healthy) &&
+                      exit_detail <= static_cast<int>(Vajra::runtime::WorkerHealthState::wedged)
+                  ? static_cast<Vajra::runtime::WorkerHealthState>(exit_detail)
+                  : Vajra::runtime::WorkerHealthState::healthy);
   if (exit_detail != 0)
   {
-    std::cout << " exit_detail=" << exit_detail;
+    line << " exit_detail=" << exit_detail;
   }
-  std::cout << std::endl;
+  write_runtime_line(line.str());
 }
 
 void Vajra::runtime::log_unexpected_worker_exit(
@@ -135,13 +238,13 @@ void Vajra::runtime::log_unexpected_worker_exit(
   switch (exit_classification)
   {
     case WorkerExitClassification::unexpected_status:
-      std::cout << "worker process exited unexpectedly with status " << exit_detail << std::endl;
+      write_runtime_line("worker process exited unexpectedly with status " + std::to_string(exit_detail));
       return;
     case WorkerExitClassification::unexpected_signal:
-      std::cout << "worker process exited unexpectedly due to signal " << exit_detail << std::endl;
+      write_runtime_line("worker process exited unexpectedly due to signal " + std::to_string(exit_detail));
       return;
     case WorkerExitClassification::unexpected_exit:
-      std::cout << "worker process exited unexpectedly" << std::endl;
+      write_runtime_line("worker process exited unexpectedly");
       return;
     default:
       return;
@@ -153,15 +256,16 @@ void Vajra::runtime::log_worker_bootstrap_ready(
     const std::string &runtime_role,
     int worker_processes)
 {
-  std::cout << "[Vajra][lifecycle] " << utc_timestamp()
-            << " event=worker_bootstrap_ready state=booting boot_status=ready stop_reason=none"
-            << " port=" << port
-            << " listener_owned=false listener_fd=-1"
-            << " mode=master_worker"
-            << " process_role=" << runtime_role
-            << " request_execution_role=" << runtime_role
-            << " worker_processes=" << worker_processes
-            << std::endl;
+  std::ostringstream line;
+  line << "[Vajra][lifecycle] " << utc_timestamp()
+       << " event=worker_bootstrap_ready state=booting boot_status=ready stop_reason=none"
+       << " port=" << port
+       << " listener_owned=false listener_fd=-1"
+       << " mode=master_worker"
+       << " process_role=" << runtime_role
+       << " request_execution_role=" << runtime_role
+       << " worker_processes=" << worker_processes;
+  write_runtime_line(line.str());
 }
 
 void Vajra::runtime::log_worker_booted(int worker_index, pid_t pid, double boot_seconds)
@@ -170,16 +274,31 @@ void Vajra::runtime::log_worker_booted(int worker_index, pid_t pid, double boot_
   message << "[" << getppid() << "] - Worker " << worker_index
           << " (PID: " << pid << ") booted in "
           << std::fixed << std::setprecision(2) << boot_seconds << "s";
-  std::cout << message.str() << std::endl;
+  write_runtime_line(message.str());
+}
+
+void Vajra::runtime::log_runtime_error(const std::string &message)
+{
+  write_error_line("[Vajra][error] " + utc_timestamp() + ' ' + message);
+}
+
+void Vajra::runtime::log_access_event(const std::string &method, const std::string &target, int status_code)
+{
+  std::ostringstream line;
+  line << "[Vajra][access] " << utc_timestamp()
+       << " method=" << method
+       << " target=" << target
+       << " status=" << status_code;
+  write_access_line(line.str());
 }
 
 void Vajra::runtime::log_runtime_shutdown_begin()
 {
-  std::cout << "[" << getpid() << "] - Gracefully shutting down workers..." << std::endl;
+  write_runtime_line("[" + std::to_string(getpid()) + "] - Gracefully shutting down workers...");
 }
 
 void Vajra::runtime::log_runtime_shutdown_complete()
 {
-  std::cout << "[" << getpid() << "] === vajra shutdown: " << utc_timestamp() << " ===" << std::endl;
-  std::cout << "[" << getpid() << "] - Goodbye!" << std::endl;
+  write_runtime_line("[" + std::to_string(getpid()) + "] === vajra shutdown: " + utc_timestamp() + " ===");
+  write_runtime_line("[" + std::to_string(getpid()) + "] - Goodbye!");
 }

@@ -37,6 +37,12 @@ namespace
   };
 }
 
+std::optional<Vajra::response::Response> Vajra::request::RequestExecutor::control_response(
+    const RequestContext &) const
+{
+  return std::nullopt;
+}
+
 std::unique_ptr<Vajra::request::RequestExecutionSession> Vajra::request::RequestExecutor::start(
     const RequestContext &request_context) const
 {

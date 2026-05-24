@@ -214,6 +214,34 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     end
   end
 
+  def control_plane_response_result(script:, path:)
+    Open3.popen2e(
+      vajra_env(port: disposable_listener_port),
+      *inline_ruby_command(script),
+      chdir: VajraE2EHelpers::PACKAGE_ROOT
+    ) do |_stdin, output, wait_thread|
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
+
+      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+      socket.write("GET #{path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+      response = parse_http_response(
+        read_raw_http_response(
+          socket,
+          wait_thread:,
+          output:,
+          request_label: "control_plane_response_result:#{path}"
+        )
+      )
+      socket.close
+
+      status = stop_process(wait_thread)
+      { exitstatus: status.exitstatus, response:, output: "#{startup_output.join}#{output.read}" }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
   def open_request_sockets(port, count)
     Array.new(count) { TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, port) }
   end
@@ -236,6 +264,25 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
         request_label: "staged_request_result:#{index}"
       )
     end
+  end
+
+  def observability_control_plane_script
+    <<~RUBY
+      require "vajra"
+
+      Vajra::Internal::RackExecution.install!(
+        lambda do |_rack_env|
+          [200, { "Content-Type" => "text/plain" }, ["OK"]]
+        end
+      )
+
+      Vajra.start(
+        workers: 1,
+        threads: [1, 1],
+        stats_path: "/__vajra/stats",
+        metrics_endpoint: "/metrics"
+      )
+    RUBY
   end
 
   def staged_request_result(script:, env:, request_bodies:)
@@ -804,7 +851,8 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     expect(payloads.map { |payload| payload.fetch('max_active') }.max).to eq(2)
     expect(payloads.map { |payload| payload.fetch('max_active') }).to all(be <= 2)
     expect(payloads.first.fetch('started').first(2)).to match_array(%w[hold-a hold-b])
-    expect(payloads.last.fetch('started').index('queued-c')).to be < payloads.last.fetch('started').index('queued-d')
+    deepest_started_snapshot = payloads.max_by { |payload| payload.fetch('started').length }.fetch('started')
+    expect(deepest_started_snapshot.index('queued-c')).to be < deepest_started_snapshot.index('queued-d')
   end
 
   it 'applies the configured request head timeout to fragmented request headers' do
@@ -891,5 +939,29 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     expect(result[:exitstatus]).to eq(0)
     expect(result[:response]).to include('HTTP/1.1 431 Request Header Fields Too Large')
     expect(result[:output]).to include('request rejected (431 request header fields too large)')
+  end
+
+  it 'serves the configured stats path from the native control plane' do
+    result = control_plane_response_result(script: observability_control_plane_script, path: '/__vajra/stats')
+
+    expect(result[:exitstatus]).to eq(0), result[:output]
+    expect(result[:response][:status_line]).to eq('HTTP/1.1 200 OK')
+    expect(result[:response][:headers]).to include('content-type' => 'application/json')
+    payload = JSON.parse(result[:response][:body])
+    expect(payload).to include('scheduler_policy' => 'least_loaded')
+    expect(payload).to have_key('workers')
+  end
+
+  it 'serves the configured metrics endpoint from the native control plane' do
+    result = control_plane_response_result(script: observability_control_plane_script, path: '/metrics')
+
+    expect(result[:exitstatus]).to eq(0), result[:output]
+    expect(result[:response][:status_line]).to eq('HTTP/1.1 200 OK')
+    expect(result[:response][:headers]).to include('content-type' => 'text/plain; version=0.0.4')
+    expect(result[:response][:body]).to include(
+      'vajra_scheduler_queue_depth',
+      'vajra_scheduler_queue_capacity',
+      'vajra_worker_active_channels'
+    )
   end
 end

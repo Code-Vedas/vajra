@@ -81,6 +81,11 @@ module DocumentedServerOptions
         config.queue_capacity 5000
         config.scheduler_policy "least_loaded"
         config.log_level "info"
+        config.access_log "log/vajra-access.log"
+        config.error_log "log/vajra-error.log"
+        config.structured_logs
+        config.stats_path "/__vajra/stats"
+        config.metrics_endpoint "/metrics"
         config.max_request_head_bytes 2048
         config.app ->(_env) { [200, { "Content-Type" => "text/plain" }, ["OK"]] }
       end
@@ -156,6 +161,11 @@ module DocumentedServerOptions
       queue_capacity: 5000,
       scheduler_policy: 'least_loaded',
       log_level: 'info',
+      access_log: 'log/vajra-access.log',
+      error_log: 'log/vajra-error.log',
+      structured_logs: true,
+      stats_path: '/__vajra/stats',
+      metrics_endpoint: '/metrics',
       max_request_head_bytes: 2048
     }
   end

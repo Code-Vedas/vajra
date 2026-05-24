@@ -28,6 +28,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <poll.h>
 #include <stdexcept>
 #include <string>
@@ -395,6 +396,12 @@ namespace
     }
 
     return false;
+  }
+
+  std::string request_path_for(const std::string &target)
+  {
+    const std::size_t delimiter = target.find('?');
+    return target.substr(0, delimiter);
   }
 
   std::string exception_message(VALUE exception);
@@ -1349,6 +1356,54 @@ namespace
       return session->finish();
     }
 
+    std::string stats_payload_json() const override
+    {
+      std::lock_guard<std::mutex> lock(scheduler_mutex_);
+      std::ostringstream payload;
+      payload << '{'
+              << "\"scheduler_policy\":\"least_loaded\","
+              << "\"queue_depth\":" << queued_request_count_ << ','
+              << "\"queue_capacity\":" << queue_capacity_ << ','
+              << "\"workers\":[";
+      for (std::size_t index = 0; index < slots_.size(); ++index)
+      {
+        if (index > 0)
+        {
+          payload << ',';
+        }
+        const std::shared_ptr<WorkerSlot> &slot = slots_[index];
+        payload << '{'
+                << "\"worker_index\":" << slot->state->worker_index << ','
+                << "\"active_channels\":" << inflight_count_locked(*slot) << ','
+                << "\"channel_capacity\":" << slot->channels.size() << ','
+                << "\"available\":" << (slot->state->available.load(std::memory_order_acquire) ? "true" : "false")
+                << ",\"lifecycle_state\":" << static_cast<int>(slot->state->lifecycle_state.load(std::memory_order_acquire))
+                << ",\"health_state\":" << static_cast<int>(slot->state->health_state.load(std::memory_order_acquire))
+                << '}';
+      }
+      payload << "]}";
+      return payload.str();
+    }
+
+    std::string metrics_payload_text() const override
+    {
+      std::lock_guard<std::mutex> lock(scheduler_mutex_);
+      std::ostringstream payload;
+      payload << "vajra_scheduler_queue_depth " << queued_request_count_ << '\n';
+      payload << "vajra_scheduler_queue_capacity " << queue_capacity_ << '\n';
+      for (const auto &slot : slots_)
+      {
+        const std::size_t worker_index = slot->state->worker_index;
+        payload << "vajra_worker_active_channels{worker=\"" << worker_index << "\"} "
+                << inflight_count_locked(*slot) << '\n';
+        payload << "vajra_worker_channel_capacity{worker=\"" << worker_index << "\"} "
+                << slot->channels.size() << '\n';
+        payload << "vajra_worker_available{worker=\"" << worker_index << "\"} "
+                << (slot->state->available.load(std::memory_order_acquire) ? 1 : 0) << '\n';
+      }
+      return payload.str();
+    }
+
     std::shared_ptr<WorkerSlot> slot_for(std::size_t worker_index) const
     {
       return slots_.at(worker_index);
@@ -1380,14 +1435,22 @@ namespace
           {
             const std::shared_ptr<WorkerSlot> slot = slot_for(assignment->first);
             slot->channels[assignment->second].busy = true;
+            const std::size_t inflight = inflight_count_locked(*slot);
             pending_request->assigned = true;
             pending_request->worker_index = assignment->first;
             pending_request->channel_index = assignment->second;
+            slot->state->active_execution_count.store(inflight, std::memory_order_release);
+            slot->state->idle_execution_count.store(slot->channels.size() - inflight, std::memory_order_release);
+            slot->state->last_progress_nanoseconds.store(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count(),
+                std::memory_order_release);
             log_scheduler_debug_event(
                 "event=request_assigned policy=least_loaded request_id=" + std::to_string(pending_request->request_id) +
                     " selected_worker=" + std::to_string(assignment->first) +
                     " channel=" + std::to_string(assignment->second) +
-                    " inflight=" + std::to_string(inflight_count_locked(*slot)) +
+                    " inflight=" + std::to_string(inflight) +
                     " queue_depth=" + std::to_string(queued_request_count_ - 1),
                 debug_logging_);
             pending_request->enqueued = false;
@@ -1424,7 +1487,15 @@ namespace
         std::lock_guard<std::mutex> lock(scheduler_mutex_);
         const std::shared_ptr<WorkerSlot> slot = slot_for(pending_request->worker_index);
         slot->channels.at(pending_request->channel_index).busy = false;
+        const std::size_t inflight = inflight_count_locked(*slot);
         pending_request->assigned = false;
+        slot->state->active_execution_count.store(inflight, std::memory_order_release);
+        slot->state->idle_execution_count.store(slot->channels.size() - inflight, std::memory_order_release);
+        slot->state->last_progress_nanoseconds.store(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count(),
+            std::memory_order_release);
         while (slot->active_channels > slot->min_channels &&
                !slot->channels[slot->active_channels - 1].busy &&
                pending_requests_.empty())
@@ -1462,6 +1533,8 @@ namespace
     static bool worker_schedulable(const WorkerSlot &slot)
     {
       return slot.state->available.load(std::memory_order_acquire) &&
+             (slot.state->health_state.load(std::memory_order_acquire) == Vajra::runtime::WorkerHealthState::healthy ||
+              slot.state->health_state.load(std::memory_order_acquire) == Vajra::runtime::WorkerHealthState::busy) &&
              slot.state->lifecycle_state.load(std::memory_order_acquire) == Vajra::runtime::WorkerLifecycleState::ready;
     }
 
@@ -2391,19 +2464,60 @@ std::unique_ptr<Vajra::rack::RackExecutionSession> Vajra::rack::RackExecutionTra
   return std::make_unique<BufferedRackExecutionSession>(*this, env_entries);
 }
 
+std::string Vajra::rack::RackExecutionTransport::stats_payload_json() const
+{
+  return "{\"scheduler_policy\":\"same_process\"}";
+}
+
+std::string Vajra::rack::RackExecutionTransport::metrics_payload_text() const
+{
+  return "vajra_runtime_up 1\n";
+}
+
 Vajra::rack::RackRequestExecutor::RackRequestExecutor()
     : transport_(std::make_shared<SameProcessRackExecutionTransport>())
 {
 }
 
 Vajra::rack::RackRequestExecutor::RackRequestExecutor(
-    std::shared_ptr<const RackExecutionTransport> transport)
-    : transport_(std::move(transport))
+    std::shared_ptr<const RackExecutionTransport> transport,
+    ControlPlaneConfig control_plane_config)
+    : transport_(std::move(transport)),
+      control_plane_config_(std::move(control_plane_config))
 {
   if (!transport_)
   {
     throw std::invalid_argument("rack execution transport must not be null");
   }
+}
+
+std::optional<Vajra::response::Response> Vajra::rack::RackRequestExecutor::control_response(
+    const request::RequestContext &request_context) const
+{
+  const std::string path = request_path_for(request_context.request.request_line.target);
+  response::Response response;
+  response.status = {200, "OK"};
+  response.headers.push_back({"Cache-Control", "no-store"});
+
+  if (!control_plane_config_.stats_path.empty() &&
+      path == control_plane_config_.stats_path &&
+      request_context.request.request_line.method == "GET")
+  {
+    response.headers.push_back({"Content-Type", "application/json"});
+    response.body = transport_->stats_payload_json();
+    return response;
+  }
+
+  if (!control_plane_config_.metrics_endpoint.empty() &&
+      path == control_plane_config_.metrics_endpoint &&
+      request_context.request.request_line.method == "GET")
+  {
+    response.headers.push_back({"Content-Type", "text/plain; version=0.0.4"});
+    response.body = transport_->metrics_payload_text();
+    return response;
+  }
+
+  return std::nullopt;
 }
 
 std::unique_ptr<Vajra::request::RequestExecutionSession> Vajra::rack::RackRequestExecutor::start(

@@ -43,7 +43,12 @@ namespace
           config.first_data_timeout_seconds,
           config.persistent_timeout_seconds,
           config.worker_timeout_seconds,
-          config.log_level);
+          config.log_level,
+          config.access_log,
+          config.error_log,
+          config.structured_logs,
+          config.stats_path,
+          config.metrics_endpoint);
     }
     catch (const std::exception &error)
     {

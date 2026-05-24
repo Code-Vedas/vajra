@@ -19,6 +19,10 @@ namespace Vajra
     std::string utc_timestamp();
     std::string runtime_environment_name();
     bool debug_logging_enabled(const std::string &log_level);
+    void configure_runtime_logging(
+        bool structured_logs,
+        const std::string &access_log,
+        const std::string &error_log);
     void log_runtime_banner_start(
         const std::string &host,
         int port,
@@ -40,6 +44,8 @@ namespace Vajra
         const std::string &runtime_role,
         int worker_processes);
     void log_worker_booted(int worker_index, pid_t pid, double boot_seconds);
+    void log_runtime_error(const std::string &message);
+    void log_access_event(const std::string &method, const std::string &target, int status_code);
     void log_runtime_shutdown_begin();
     void log_runtime_shutdown_complete();
   }

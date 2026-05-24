@@ -63,6 +63,7 @@ namespace Vajra
       void observe_worker_exit(
           const std::shared_ptr<SharedWorkerState> &worker_state,
           int status);
+      void refresh_worker_health(const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states);
       void handle_worker_timeout(const std::shared_ptr<SharedWorkerState> &worker_state);
       void maybe_escalate_timed_out_workers(const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states);
       void ensure_worker_exit_watcher_started();
@@ -89,6 +90,8 @@ namespace Vajra
       std::vector<std::shared_ptr<SharedWorkerState>> worker_states_;
       bool stop_requested_ = false;
       bool worker_startup_in_progress_ = false;
+      RuntimeConfig current_config_{};
+      bool current_config_loaded_ = false;
       std::atomic_bool debug_logging_{false};
       bool worker_exit_watcher_stop_requested_ = false;
       bool worker_exit_watcher_running_ = false;

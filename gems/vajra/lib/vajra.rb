@@ -112,6 +112,11 @@ module Vajra
       persistent_timeout
       worker_timeout
       log_level
+      access_log
+      error_log
+      structured_logs
+      stats_path
+      metrics_endpoint
     ].freeze
     UNIMPLEMENTED_START_OPTION_KEYS = (DOCUMENTED_START_OPTION_KEYS - NATIVE_START_OPTION_KEYS).freeze
 

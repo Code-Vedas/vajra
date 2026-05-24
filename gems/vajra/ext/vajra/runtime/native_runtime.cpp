@@ -377,6 +377,20 @@ namespace
         .count();
   }
 
+  void mark_lifecycle_transition(
+      const std::shared_ptr<Vajra::runtime::SharedWorkerState> &worker_state,
+      Vajra::runtime::WorkerLifecycleState lifecycle_state)
+  {
+    worker_state->lifecycle_state.store(lifecycle_state, std::memory_order_release);
+    worker_state->last_lifecycle_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
+  }
+
+  bool health_schedulable(Vajra::runtime::WorkerHealthState state)
+  {
+    return state == Vajra::runtime::WorkerHealthState::healthy ||
+           state == Vajra::runtime::WorkerHealthState::busy;
+  }
+
   std::chrono::steady_clock::duration watcher_sleep_interval(
       const std::vector<std::shared_ptr<Vajra::runtime::SharedWorkerState>> &worker_states)
   {
@@ -503,6 +517,10 @@ std::shared_ptr<Vajra::runtime::SharedWorkerState> Vajra::runtime::NativeRuntime
     worker_states_.push_back(worker_state);
     worker_startup_in_progress_ = false;
   }
+  worker_state->last_progress_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
+  worker_state->last_lifecycle_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
+  worker_state->last_health_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
+  worker_state->idle_execution_count.store(worker_state->request_channel_fds.size(), std::memory_order_release);
   if (debug_logging_.load(std::memory_order_acquire))
   {
     log_worker_lifecycle_event(
@@ -522,7 +540,9 @@ std::shared_ptr<Vajra::runtime::SharedWorkerState> Vajra::runtime::NativeRuntime
 void Vajra::runtime::NativeRuntime::mark_worker_ready(const std::shared_ptr<SharedWorkerState> &worker_state)
 {
   worker_state->available.store(true, std::memory_order_release);
-  worker_state->lifecycle_state.store(WorkerLifecycleState::ready, std::memory_order_release);
+  mark_lifecycle_transition(worker_state, WorkerLifecycleState::ready);
+  worker_state->health_state.store(WorkerHealthState::healthy, std::memory_order_release);
+  worker_state->last_health_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
   if (debug_logging_.load(std::memory_order_acquire))
   {
     log_worker_lifecycle_event(
@@ -547,7 +567,10 @@ void Vajra::runtime::NativeRuntime::mark_worker_stopping(const std::shared_ptr<S
     return;
   }
 
+  worker_state->last_lifecycle_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
   worker_state->available.store(false, std::memory_order_release);
+  worker_state->health_state.store(WorkerHealthState::degraded, std::memory_order_release);
+  worker_state->last_health_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
   if (debug_logging_.load(std::memory_order_acquire))
   {
     log_worker_lifecycle_event(
@@ -575,12 +598,27 @@ void Vajra::runtime::NativeRuntime::mark_worker_exit(
     return;
   }
 
+  worker_state->last_lifecycle_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
   worker_state->available.store(false, std::memory_order_release);
   worker_state->last_exit_classification.store(exit_classification, std::memory_order_release);
   worker_state->last_exit_detail.store(exit_detail, std::memory_order_release);
   worker_state->timeout_escalation_pending.store(false, std::memory_order_release);
   worker_state->timeout_kill_deadline_nanoseconds.store(0, std::memory_order_release);
   worker_state->timeout_handling_started.store(false, std::memory_order_release);
+  worker_state->active_execution_count.store(0, std::memory_order_release);
+  worker_state->idle_execution_count.store(0, std::memory_order_release);
+  worker_state->health_state.store(
+      exit_classification == WorkerExitClassification::expected_shutdown
+          ? WorkerHealthState::degraded
+          : WorkerHealthState::wedged,
+      std::memory_order_release);
+  worker_state->last_health_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
+  if (exit_classification == WorkerExitClassification::unexpected_exit ||
+      exit_classification == WorkerExitClassification::unexpected_signal ||
+      exit_classification == WorkerExitClassification::unexpected_status)
+  {
+    worker_state->unexpected_exit_count.fetch_add(1, std::memory_order_acq_rel);
+  }
   const bool replacement_needed =
       exit_classification != WorkerExitClassification::none &&
       exit_classification != WorkerExitClassification::expected_shutdown;
@@ -637,6 +675,7 @@ void Vajra::runtime::NativeRuntime::clear_worker_runtime()
     worker_states_.clear();
     stop_requested_ = false;
     worker_startup_in_progress_ = false;
+    current_config_loaded_ = false;
     debug_logging_.store(false, std::memory_order_release);
   }
 
@@ -895,6 +934,102 @@ void Vajra::runtime::NativeRuntime::observe_worker_exit(
   worker_state->pid.store(-1, std::memory_order_release);
 }
 
+void Vajra::runtime::NativeRuntime::refresh_worker_health(
+    const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states)
+{
+  RuntimeConfig config;
+  bool config_loaded = false;
+  {
+    const std::lock_guard<std::mutex> lock(server_mutex_);
+    config = current_config_;
+    config_loaded = current_config_loaded_;
+  }
+
+  const std::int64_t now_nanoseconds = steady_clock_nanoseconds();
+  const std::int64_t suspect_threshold = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                             std::chrono::seconds(config_loaded ? std::max(5, config.worker_timeout_seconds / 2) : 30))
+                                             .count();
+  const std::int64_t wedged_threshold = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                            std::chrono::seconds(config_loaded ? std::max(10, config.worker_timeout_seconds) : 60))
+                                            .count();
+
+  for (const auto &worker_state : worker_states)
+  {
+    const WorkerLifecycleState lifecycle_state = worker_state->lifecycle_state.load(std::memory_order_acquire);
+    WorkerHealthState next_state = WorkerHealthState::healthy;
+    if (lifecycle_state == WorkerLifecycleState::stopping)
+    {
+      next_state = WorkerHealthState::degraded;
+    }
+    else if (lifecycle_state == WorkerLifecycleState::exited)
+    {
+      next_state = WorkerHealthState::wedged;
+    }
+    else if (worker_state->timeout_escalation_pending.load(std::memory_order_acquire))
+    {
+      next_state = WorkerHealthState::wedged;
+    }
+    else
+    {
+      const std::size_t active_executions = worker_state->active_execution_count.load(std::memory_order_acquire);
+      const std::size_t idle_executions = worker_state->idle_execution_count.load(std::memory_order_acquire);
+      const std::size_t total_executions = active_executions + idle_executions;
+      const std::int64_t last_progress = worker_state->last_progress_nanoseconds.load(std::memory_order_acquire);
+      const std::int64_t progress_age = last_progress == 0 ? 0 : (now_nanoseconds - last_progress);
+      const std::uint64_t unexpected_exits = worker_state->unexpected_exit_count.load(std::memory_order_acquire);
+      if (progress_age >= wedged_threshold && active_executions > 0)
+      {
+        next_state = WorkerHealthState::wedged;
+      }
+      else if (progress_age >= suspect_threshold && active_executions > 0)
+      {
+        next_state = WorkerHealthState::suspect;
+      }
+      else if (unexpected_exits > 0)
+      {
+        next_state = WorkerHealthState::degraded;
+      }
+      else if (total_executions > 0 && active_executions >= total_executions)
+      {
+        next_state = WorkerHealthState::busy;
+      }
+      else
+      {
+        next_state = WorkerHealthState::healthy;
+      }
+    }
+
+    const WorkerHealthState previous_state = worker_state->health_state.load(std::memory_order_acquire);
+    if (previous_state != next_state)
+    {
+      worker_state->health_state.store(next_state, std::memory_order_release);
+      worker_state->last_health_transition_nanoseconds.store(now_nanoseconds, std::memory_order_release);
+      worker_state->health_transition_count.fetch_add(1, std::memory_order_acq_rel);
+      if (!health_schedulable(next_state))
+      {
+        worker_state->available.store(false, std::memory_order_release);
+      }
+      else if (lifecycle_state == WorkerLifecycleState::ready)
+      {
+        worker_state->available.store(true, std::memory_order_release);
+      }
+
+      if (debug_logging_.load(std::memory_order_acquire))
+      {
+        log_worker_lifecycle_event(
+            "worker_health_changed",
+            worker_state->worker_index,
+            worker_state->pid.load(std::memory_order_acquire),
+            lifecycle_state,
+            worker_state->available.load(std::memory_order_acquire),
+            worker_state->last_exit_classification.load(std::memory_order_acquire),
+            worker_state->replacement_needed.load(std::memory_order_acquire),
+            static_cast<int>(next_state));
+      }
+    }
+  }
+}
+
 void Vajra::runtime::NativeRuntime::handle_worker_timeout(const std::shared_ptr<SharedWorkerState> &worker_state)
 {
   const WorkerLifecycleState current_state = worker_state->lifecycle_state.load(std::memory_order_acquire);
@@ -916,6 +1051,7 @@ void Vajra::runtime::NativeRuntime::handle_worker_timeout(const std::shared_ptr<
   worker_state->available.store(false, std::memory_order_release);
   worker_state->expected_shutdown.store(false, std::memory_order_release);
   worker_state->timeout_escalation_pending.store(true, std::memory_order_release);
+  worker_state->timeout_escalation_count.fetch_add(1, std::memory_order_acq_rel);
   worker_state->timeout_kill_deadline_nanoseconds.store(
       steady_clock_nanoseconds_after(kWorkerTimeoutGracePeriod),
       std::memory_order_release);
@@ -1003,6 +1139,7 @@ void Vajra::runtime::NativeRuntime::watch_worker_exits()
       }
 
       maybe_escalate_timed_out_workers(worker_states);
+      refresh_worker_health(worker_states);
 
       bool observed_exit = false;
       bool any_live_workers = false;
@@ -1165,7 +1302,8 @@ void Vajra::runtime::NativeRuntime::run_master_runtime_server(
               [this](const std::shared_ptr<SharedWorkerState> &worker_state) {
                 handle_worker_timeout(worker_state);
               },
-              debug_logging)),
+              debug_logging),
+          Vajra::rack::ControlPlaneConfig{config.stats_path, config.metrics_endpoint}),
       kNativeRuntimeControlRole,
       kMasterWorkerMode,
       config.workers,
@@ -1241,8 +1379,11 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
     const bool debug_logging = debug_logging_enabled(config.log_level);
     {
       const std::lock_guard<std::mutex> lock(server_mutex_);
+      current_config_ = config;
+      current_config_loaded_ = true;
       debug_logging_.store(debug_logging, std::memory_order_release);
     }
+    configure_runtime_logging(config.structured_logs, config.access_log, config.error_log);
     log_runtime_banner_start(config.host, config.port, config.workers, config.min_threads, config.max_threads);
     const BootContractResult master_boot_result = BootContract::run(
         BootContractConfig{config.port, config.max_request_head_bytes, kMasterPreloadRuntimeRole});
@@ -1438,7 +1579,12 @@ void VajraNative::start(
     int first_data_timeout_seconds,
     int persistent_timeout_seconds,
     int worker_timeout_seconds,
-    std::string log_level)
+    std::string log_level,
+    std::string access_log,
+    std::string error_log,
+    bool structured_logs,
+    std::string stats_path,
+    std::string metrics_endpoint)
 {
   Vajra::runtime::NativeRuntime::instance().start(Vajra::runtime::RuntimeConfig{
       std::move(host),
@@ -1455,7 +1601,12 @@ void VajraNative::start(
       first_data_timeout_seconds,
       persistent_timeout_seconds,
       worker_timeout_seconds,
-      std::move(log_level)});
+      std::move(log_level),
+      std::move(access_log),
+      std::move(error_log),
+      structured_logs,
+      std::move(stats_path),
+      std::move(metrics_endpoint)});
 }
 
 void VajraNative::stop()

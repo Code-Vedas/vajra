@@ -9,10 +9,8 @@
 #include "request_context.hpp"
 #include "response/http_header_utils.hpp"
 #include "response/response_serializer.hpp"
+#include "runtime/runtime_logging.hpp"
 
-#include <chrono>
-#include <ctime>
-#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -22,21 +20,9 @@
 
 namespace
 {
-  std::string utc_timestamp()
-  {
-    const auto now = std::chrono::system_clock::now();
-    const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
-    std::tm utc_time{};
-    gmtime_r(&now_time, &utc_time);
-
-    std::ostringstream timestamp;
-    timestamp << std::put_time(&utc_time, "%Y-%m-%dT%H:%M:%SZ");
-    return timestamp.str();
-  }
-
   void log_request_error(const std::string &message)
   {
-    std::cerr << "[Vajra][error] " << utc_timestamp() << ' ' << message << std::endl;
+    Vajra::runtime::log_runtime_error(message);
   }
 
   bool header_named(const Vajra::request::ParsedHeader &header, const std::string &expected_name)
@@ -155,6 +141,32 @@ void Vajra::request::RequestProcessor::handle(int client_fd, const SocketContext
     }
 
     const Vajra::response::ConnectionBehavior connection_behavior = connection_behavior_for(request_context.request);
+    if (request_executor_)
+    {
+      std::optional<Vajra::response::Response> control_response = request_executor_->control_response(request_context);
+      if (control_response)
+      {
+        control_response->headers = Vajra::response::strip_framing_headers(control_response->headers);
+        control_response->connection_behavior = connection_behavior;
+        Vajra::response::ResponseSerializer serializer;
+        serializer.validate(*control_response);
+        if (!response_writer_.send(client_fd, *control_response))
+        {
+          return;
+        }
+        Vajra::runtime::log_access_event(
+            request_context.request.request_line.method,
+            request_context.request.request_line.target,
+            control_response->status.code);
+        if (connection_behavior == Vajra::response::ConnectionBehavior::close)
+        {
+          return;
+        }
+        first_request = false;
+        continue;
+      }
+    }
+
     Vajra::response::Response response;
     try
     {
@@ -221,6 +233,10 @@ void Vajra::request::RequestProcessor::handle(int client_fd, const SocketContext
     {
       return;
     }
+    Vajra::runtime::log_access_event(
+        request_context.request.request_line.method,
+        request_context.request.request_line.target,
+        response.status.code);
 
     if (connection_behavior == Vajra::response::ConnectionBehavior::close)
     {

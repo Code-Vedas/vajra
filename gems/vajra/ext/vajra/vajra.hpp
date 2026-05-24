@@ -33,7 +33,12 @@ namespace VajraNative
       int first_data_timeout_seconds = 30,
       int persistent_timeout_seconds = 30,
       int worker_timeout_seconds = 60,
-      std::string log_level = "info");
+      std::string log_level = "info",
+      std::string access_log = "",
+      std::string error_log = "",
+      bool structured_logs = false,
+      std::string stats_path = "",
+      std::string metrics_endpoint = "");
   void stop();
 }
 

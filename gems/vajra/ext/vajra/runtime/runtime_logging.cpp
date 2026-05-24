@@ -164,7 +164,22 @@ namespace
 
   void write_line(std::ostream &stream, const std::string &line)
   {
-    stream << line << std::endl;
+    stream << line << '\n';
+  }
+
+  void flush_runtime_streams()
+  {
+    std::lock_guard<std::mutex> lock(logging_mutex);
+    std::cout.flush();
+    std::cerr.flush();
+    if (logging_config.access_log_stream)
+    {
+      logging_config.access_log_stream->flush();
+    }
+    if (logging_config.error_log_stream)
+    {
+      logging_config.error_log_stream->flush();
+    }
   }
 
   void write_runtime_line(const std::string &line)
@@ -205,6 +220,7 @@ void Vajra::runtime::configure_runtime_logging(
     const std::string &access_log,
     const std::string &error_log)
 {
+  std::string warning_message;
   std::lock_guard<std::mutex> lock(logging_mutex);
   logging_config.structured_logs = structured_logs;
   logging_config.access_log_path = access_log;
@@ -214,11 +230,37 @@ void Vajra::runtime::configure_runtime_logging(
 
   if (!access_log.empty())
   {
-    logging_config.access_log_stream = std::make_unique<std::ofstream>(access_log, std::ios::app);
+    auto access_stream = std::make_unique<std::ofstream>(access_log, std::ios::app);
+    if (access_stream->is_open() && access_stream->good())
+    {
+      logging_config.access_log_stream = std::move(access_stream);
+    }
+    else
+    {
+      warning_message = "unable to open access_log at " + escaped_log_value(access_log) + "; falling back to stdout";
+    }
   }
   if (!error_log.empty())
   {
-    logging_config.error_log_stream = std::make_unique<std::ofstream>(error_log, std::ios::app);
+    auto error_stream = std::make_unique<std::ofstream>(error_log, std::ios::app);
+    if (error_stream->is_open() && error_stream->good())
+    {
+      logging_config.error_log_stream = std::move(error_stream);
+    }
+    else
+    {
+      if (!warning_message.empty())
+      {
+        warning_message.append("; ");
+      }
+      warning_message.append(
+          "unable to open error_log at " + escaped_log_value(error_log) + "; falling back to stderr");
+    }
+  }
+
+  if (!warning_message.empty())
+  {
+    write_line(std::cerr, "[Vajra][error] " + utc_timestamp() + ' ' + warning_message);
   }
 }
 
@@ -247,25 +289,44 @@ void Vajra::runtime::log_worker_lifecycle_event(
     std::size_t worker_index,
     pid_t pid,
     WorkerLifecycleState lifecycle_state,
+    WorkerHealthState health_state,
     bool available,
     WorkerExitClassification exit_classification,
     bool replacement_needed,
     int exit_detail)
 {
+  if (logging_config.structured_logs)
+  {
+    std::ostringstream line;
+    line << "{\"component\":\"lifecycle\""
+         << ",\"timestamp\":\"" << utc_timestamp() << "\""
+         << ",\"event\":\"" << event_name << "\""
+         << ",\"worker_index\":" << worker_index
+         << ",\"pid\":" << pid
+         << ",\"lifecycle\":\"" << worker_lifecycle_state_name(lifecycle_state) << "\""
+         << ",\"health_state\":\"" << worker_health_state_name(health_state) << "\""
+         << ",\"availability\":\"" << (available ? "available" : "unavailable") << "\""
+         << ",\"exit_classification\":\"" << worker_exit_classification_name(exit_classification) << "\""
+         << ",\"replacement_needed\":" << (replacement_needed ? "true" : "false");
+    if (exit_detail != 0)
+    {
+      line << ",\"exit_detail\":" << exit_detail;
+    }
+    line << '}';
+    write_runtime_line(line.str());
+    return;
+  }
+
   std::ostringstream line;
   line << "[Vajra][lifecycle] " << utc_timestamp()
        << " event=" << event_name
        << " worker_index=" << worker_index
        << " pid=" << pid
        << " lifecycle=" << worker_lifecycle_state_name(lifecycle_state)
+       << " health_state=" << worker_health_state_name(health_state)
        << " availability=" << (available ? "available" : "unavailable")
        << " exit_classification=" << worker_exit_classification_name(exit_classification)
-       << " replacement_needed=" << (replacement_needed ? "true" : "false")
-       << " health_state=" << worker_health_state_name(
-              exit_detail >= static_cast<int>(Vajra::runtime::WorkerHealthState::healthy) &&
-                      exit_detail <= static_cast<int>(Vajra::runtime::WorkerHealthState::wedged)
-                  ? static_cast<Vajra::runtime::WorkerHealthState>(exit_detail)
-                  : Vajra::runtime::WorkerHealthState::healthy);
+       << " replacement_needed=" << (replacement_needed ? "true" : "false");
   if (exit_detail != 0)
   {
     line << " exit_detail=" << exit_detail;
@@ -308,6 +369,7 @@ void Vajra::runtime::log_worker_bootstrap_ready(
        << " request_execution_role=" << runtime_role
        << " worker_processes=" << worker_processes;
   write_runtime_line(line.str());
+  flush_runtime_streams();
 }
 
 void Vajra::runtime::log_worker_booted(int worker_index, pid_t pid, double boot_seconds)
@@ -317,15 +379,37 @@ void Vajra::runtime::log_worker_booted(int worker_index, pid_t pid, double boot_
           << " (PID: " << pid << ") booted in "
           << std::fixed << std::setprecision(2) << boot_seconds << "s";
   write_runtime_line(message.str());
+  flush_runtime_streams();
 }
 
 void Vajra::runtime::log_runtime_error(const std::string &message)
 {
+  if (logging_config.structured_logs)
+  {
+    write_error_line(
+        "{\"component\":\"error\",\"timestamp\":\"" + utc_timestamp() + "\",\"message\":" +
+        escaped_log_value(message) + "}");
+    return;
+  }
+
   write_error_line("[Vajra][error] " + utc_timestamp() + ' ' + message);
 }
 
 void Vajra::runtime::log_access_event(const std::string &method, const std::string &target, int status_code)
 {
+  if (logging_config.structured_logs)
+  {
+    std::ostringstream line;
+    line << "{\"component\":\"access\""
+         << ",\"timestamp\":\"" << utc_timestamp() << "\""
+         << ",\"method\":" << escaped_log_value(method)
+         << ",\"target\":" << escaped_log_value(target)
+         << ",\"status\":" << status_code
+         << '}';
+    write_access_line(line.str());
+    return;
+  }
+
   std::ostringstream line;
   line << "[Vajra][access] " << utc_timestamp()
        << " method=" << escaped_log_value(method)

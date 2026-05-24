@@ -34,6 +34,7 @@ namespace Vajra
         std::size_t worker_index,
         pid_t pid,
         WorkerLifecycleState lifecycle_state,
+        WorkerHealthState health_state,
         bool available,
         WorkerExitClassification exit_classification,
         bool replacement_needed,

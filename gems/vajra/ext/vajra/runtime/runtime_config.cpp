@@ -270,12 +270,26 @@ namespace
       return default_value;
     }
 
-    return option_value != Qfalse;
+    if (option_value == Qtrue)
+    {
+      return true;
+    }
+    if (option_value == Qfalse)
+    {
+      return false;
+    }
+
+    throw std::runtime_error(
+        "invalid boolean option: expected true or false for " + std::string(rb_id2name(key)));
   }
 
   bool configured_boolean_from_env(const char *name, bool default_value)
   {
-    const std::string value = configured_string_from_env(name, default_value ? "true" : "false");
+    std::string value = configured_string_from_env(name, default_value ? "true" : "false");
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
+      return static_cast<char>(std::tolower(character));
+    });
+
     if (value == "true" || value == "1" || value == "yes" || value == "on")
     {
       return true;

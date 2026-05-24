@@ -224,16 +224,19 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
       selected_port = wait_for_banner(output, captured_lines: startup_output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
-      socket.write("GET #{path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-      response = parse_http_response(
-        read_raw_http_response(
-          socket,
-          wait_thread:,
-          output:,
-          request_label: "control_plane_response_result:#{path}"
+      begin
+        socket.write("GET #{path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        response = parse_http_response(
+          read_raw_http_response(
+            socket,
+            wait_thread:,
+            output:,
+            request_label: "control_plane_response_result:#{path}"
+          )
         )
-      )
-      socket.close
+      ensure
+        socket.close unless socket.closed?
+      end
 
       status = stop_process(wait_thread)
       { exitstatus: status.exitstatus, response:, output: "#{startup_output.join}#{output.read}" }

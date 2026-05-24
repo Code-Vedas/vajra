@@ -29,7 +29,12 @@ module Vajra
     ?persistent_timeout: Integer,
     ?worker_timeout: Integer,
     ?request_head_timeout: Integer,
-    ?log_level: String
+    ?log_level: String,
+    ?access_log: String,
+    ?error_log: String,
+    ?structured_logs: bool,
+    ?stats_path: String,
+    ?metrics_endpoint: String
   ) -> nil
   def self.stop: () -> nil
 end

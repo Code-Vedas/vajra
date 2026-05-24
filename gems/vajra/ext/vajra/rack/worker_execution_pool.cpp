@@ -52,6 +52,9 @@ std::shared_ptr<Vajra::rack::WorkerExecutionTask> Vajra::rack::WorkerExecutionPo
 
   if (active_execution_count_ >= max_active_executions_)
   {
+    // Treat capacity oversubscription as an internal invariant violation.
+    // The queued task stays at the front so the caller can fail fast and
+    // tear down the worker loop instead of silently dropping work.
     throw std::logic_error("worker execution pool exceeded configured active execution capacity");
   }
   std::shared_ptr<WorkerExecutionTask> task = std::move(queued_tasks_.front());

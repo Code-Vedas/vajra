@@ -24,6 +24,13 @@ namespace Vajra
 {
   namespace runtime
   {
+    struct HealthPolicy
+    {
+      std::int64_t suspect_threshold_nanoseconds = 0;
+      std::int64_t wedged_threshold_nanoseconds = 0;
+      std::int64_t degraded_decay_nanoseconds = 0;
+    };
+
     class NativeRuntime final
     {
     public:
@@ -90,8 +97,7 @@ namespace Vajra
       std::vector<std::shared_ptr<SharedWorkerState>> worker_states_;
       bool stop_requested_ = false;
       bool worker_startup_in_progress_ = false;
-      RuntimeConfig current_config_{};
-      bool current_config_loaded_ = false;
+      HealthPolicy health_policy_{};
       std::atomic_bool debug_logging_{false};
       bool worker_exit_watcher_stop_requested_ = false;
       bool worker_exit_watcher_running_ = false;

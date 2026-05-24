@@ -385,10 +385,26 @@ namespace
     worker_state->last_lifecycle_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
   }
 
-  bool health_schedulable(Vajra::runtime::WorkerHealthState state)
+  bool health_requires_quarantine(Vajra::runtime::WorkerHealthState state)
   {
-    return state == Vajra::runtime::WorkerHealthState::healthy ||
-           state == Vajra::runtime::WorkerHealthState::busy;
+    return state == Vajra::runtime::WorkerHealthState::overloaded ||
+           state == Vajra::runtime::WorkerHealthState::degraded ||
+           state == Vajra::runtime::WorkerHealthState::suspect ||
+           state == Vajra::runtime::WorkerHealthState::wedged;
+  }
+
+  Vajra::runtime::HealthPolicy health_policy_for(const Vajra::runtime::RuntimeConfig &config)
+  {
+    return Vajra::runtime::HealthPolicy{
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::seconds(std::max(5, config.worker_timeout_seconds / 2)))
+            .count(),
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::seconds(std::max(10, config.worker_timeout_seconds)))
+            .count(),
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::seconds(std::max(30, config.worker_timeout_seconds * 2)))
+            .count()};
   }
 
   std::chrono::steady_clock::duration watcher_sleep_interval(
@@ -618,6 +634,7 @@ void Vajra::runtime::NativeRuntime::mark_worker_exit(
       exit_classification == WorkerExitClassification::unexpected_status)
   {
     worker_state->unexpected_exit_count.fetch_add(1, std::memory_order_acq_rel);
+    worker_state->last_unexpected_exit_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
   }
   const bool replacement_needed =
       exit_classification != WorkerExitClassification::none &&
@@ -675,7 +692,7 @@ void Vajra::runtime::NativeRuntime::clear_worker_runtime()
     worker_states_.clear();
     stop_requested_ = false;
     worker_startup_in_progress_ = false;
-    current_config_loaded_ = false;
+    health_policy_ = HealthPolicy{};
     debug_logging_.store(false, std::memory_order_release);
   }
 
@@ -937,26 +954,19 @@ void Vajra::runtime::NativeRuntime::observe_worker_exit(
 void Vajra::runtime::NativeRuntime::refresh_worker_health(
     const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states)
 {
-  RuntimeConfig config;
-  bool config_loaded = false;
+  HealthPolicy health_policy;
   {
     const std::lock_guard<std::mutex> lock(server_mutex_);
-    config = current_config_;
-    config_loaded = current_config_loaded_;
+    health_policy = health_policy_;
   }
 
   const std::int64_t now_nanoseconds = steady_clock_nanoseconds();
-  const std::int64_t suspect_threshold = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                             std::chrono::seconds(config_loaded ? std::max(5, config.worker_timeout_seconds / 2) : 30))
-                                             .count();
-  const std::int64_t wedged_threshold = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                            std::chrono::seconds(config_loaded ? std::max(10, config.worker_timeout_seconds) : 60))
-                                            .count();
 
   for (const auto &worker_state : worker_states)
   {
     const WorkerLifecycleState lifecycle_state = worker_state->lifecycle_state.load(std::memory_order_acquire);
     WorkerHealthState next_state = WorkerHealthState::healthy;
+    std::int64_t sampled_last_progress = 0;
     if (lifecycle_state == WorkerLifecycleState::stopping)
     {
       next_state = WorkerHealthState::degraded;
@@ -974,18 +984,22 @@ void Vajra::runtime::NativeRuntime::refresh_worker_health(
       const std::size_t active_executions = worker_state->active_execution_count.load(std::memory_order_acquire);
       const std::size_t idle_executions = worker_state->idle_execution_count.load(std::memory_order_acquire);
       const std::size_t total_executions = active_executions + idle_executions;
-      const std::int64_t last_progress = worker_state->last_progress_nanoseconds.load(std::memory_order_acquire);
-      const std::int64_t progress_age = last_progress == 0 ? 0 : (now_nanoseconds - last_progress);
+      sampled_last_progress = worker_state->last_progress_nanoseconds.load(std::memory_order_acquire);
+      const std::int64_t progress_age = sampled_last_progress == 0 ? 0 : (now_nanoseconds - sampled_last_progress);
       const std::uint64_t unexpected_exits = worker_state->unexpected_exit_count.load(std::memory_order_acquire);
-      if (progress_age >= wedged_threshold && active_executions > 0)
+      const std::int64_t last_unexpected_exit =
+          worker_state->last_unexpected_exit_nanoseconds.load(std::memory_order_acquire);
+      if (progress_age >= health_policy.wedged_threshold_nanoseconds && active_executions > 0)
       {
         next_state = WorkerHealthState::wedged;
       }
-      else if (progress_age >= suspect_threshold && active_executions > 0)
+      else if (progress_age >= health_policy.suspect_threshold_nanoseconds && active_executions > 0)
       {
         next_state = WorkerHealthState::suspect;
       }
-      else if (unexpected_exits > 0)
+      else if (unexpected_exits > 0 &&
+               last_unexpected_exit != 0 &&
+               (now_nanoseconds - last_unexpected_exit) < health_policy.degraded_decay_nanoseconds)
       {
         next_state = WorkerHealthState::degraded;
       }
@@ -997,15 +1011,38 @@ void Vajra::runtime::NativeRuntime::refresh_worker_health(
       {
         next_state = WorkerHealthState::healthy;
       }
+
+      if (unexpected_exits > 0 &&
+          last_unexpected_exit != 0 &&
+          (now_nanoseconds - last_unexpected_exit) >= health_policy.degraded_decay_nanoseconds)
+      {
+        worker_state->unexpected_exit_count.store(0, std::memory_order_release);
+        worker_state->last_unexpected_exit_nanoseconds.store(0, std::memory_order_release);
+      }
     }
 
     const WorkerHealthState previous_state = worker_state->health_state.load(std::memory_order_acquire);
     if (previous_state != next_state)
     {
+      if ((next_state == WorkerHealthState::suspect || next_state == WorkerHealthState::wedged) &&
+          lifecycle_state == WorkerLifecycleState::ready &&
+          !worker_state->timeout_escalation_pending.load(std::memory_order_acquire))
+      {
+        const std::int64_t latest_progress = worker_state->last_progress_nanoseconds.load(std::memory_order_acquire);
+        const std::size_t latest_active_executions = worker_state->active_execution_count.load(std::memory_order_acquire);
+        const std::int64_t latest_progress_age = latest_progress == 0 ? 0 : (now_nanoseconds - latest_progress);
+        if (latest_progress != 0 &&
+            latest_progress != sampled_last_progress &&
+            latest_progress_age < health_policy.suspect_threshold_nanoseconds)
+        {
+          next_state = latest_active_executions > 0 ? WorkerHealthState::busy : WorkerHealthState::healthy;
+        }
+      }
+
       worker_state->health_state.store(next_state, std::memory_order_release);
       worker_state->last_health_transition_nanoseconds.store(now_nanoseconds, std::memory_order_release);
       worker_state->health_transition_count.fetch_add(1, std::memory_order_acq_rel);
-      if (!health_schedulable(next_state))
+      if (health_requires_quarantine(next_state))
       {
         worker_state->available.store(false, std::memory_order_release);
       }
@@ -1379,8 +1416,7 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
     const bool debug_logging = debug_logging_enabled(config.log_level);
     {
       const std::lock_guard<std::mutex> lock(server_mutex_);
-      current_config_ = config;
-      current_config_loaded_ = true;
+      health_policy_ = health_policy_for(config);
       debug_logging_.store(debug_logging, std::memory_order_release);
     }
     configure_runtime_logging(config.structured_logs, config.access_log, config.error_log);

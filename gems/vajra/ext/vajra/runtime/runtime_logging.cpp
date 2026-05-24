@@ -6,6 +6,7 @@
 #include "runtime/runtime_logging.hpp"
 
 #include <chrono>
+#include <cctype>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
@@ -118,6 +119,47 @@ namespace
     }
 
     return "unknown";
+  }
+
+  std::string escaped_log_value(const std::string &value)
+  {
+    std::ostringstream escaped;
+    escaped << '"';
+    for (unsigned char character : value)
+    {
+      switch (character)
+      {
+        case '\\':
+          escaped << "\\\\";
+          break;
+        case '"':
+          escaped << "\\\"";
+          break;
+        case '\n':
+          escaped << "\\n";
+          break;
+        case '\r':
+          escaped << "\\r";
+          break;
+        case '\t':
+          escaped << "\\t";
+          break;
+        default:
+          if (std::isprint(character))
+          {
+            escaped << static_cast<char>(character);
+          }
+          else
+          {
+            escaped << "\\x" << std::hex << std::setw(2) << std::setfill('0')
+                    << static_cast<int>(character)
+                    << std::dec << std::setfill(' ');
+          }
+          break;
+      }
+    }
+    escaped << '"';
+    return escaped.str();
   }
 
   void write_line(std::ostream &stream, const std::string &line)
@@ -286,8 +328,8 @@ void Vajra::runtime::log_access_event(const std::string &method, const std::stri
 {
   std::ostringstream line;
   line << "[Vajra][access] " << utc_timestamp()
-       << " method=" << method
-       << " target=" << target
+       << " method=" << escaped_log_value(method)
+       << " target=" << escaped_log_value(target)
        << " status=" << status_code;
   write_access_line(line.str());
 }

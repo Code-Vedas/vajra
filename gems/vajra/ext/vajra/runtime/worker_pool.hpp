@@ -85,6 +85,7 @@ namespace Vajra
       std::atomic<std::uint64_t> health_transition_count{0};
       std::atomic<std::uint64_t> timeout_escalation_count{0};
       std::atomic<std::uint64_t> unexpected_exit_count{0};
+      std::atomic<std::int64_t> last_unexpected_exit_nanoseconds{0};
       std::atomic<std::uint64_t> replacement_attempt_count{0};
       std::atomic<std::uint64_t> replacement_success_count{0};
       std::atomic<std::uint64_t> replacement_failure_count{0};

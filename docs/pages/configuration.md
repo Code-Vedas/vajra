@@ -58,6 +58,11 @@ documented runtime directive that is not yet native-backed raises
 Vajra uses one pending request queue. That queue is global and FIFO.
 `queue_capacity` applies to that one global queue. The scheduler assigns the
 oldest live queued request to the least-busy worker.
+After assignment, each worker runs accepted requests through a bounded local
+FIFO execution queue. `threads.max` caps active executions per worker. Current
+worker-local ingress still matches `max_threads`, so the global queue remains
+the primary waiting backlog and worker-local queueing stays intentionally
+shallow.
 
 ## Configuration Reference
 

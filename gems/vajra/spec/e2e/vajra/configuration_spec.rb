@@ -74,6 +74,62 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     RUBY
   end
 
+  def worker_thread_pool_script
+    <<~RUBY
+      require "json"
+      require "vajra"
+
+      state_mutex = Mutex.new
+      state_condition = ConditionVariable.new
+      active = 0
+      max_active = 0
+      started = []
+      release_holds = false
+      release_thread_started = false
+
+      Vajra::Internal::RackExecution.install!(
+        lambda do |rack_env|
+          body = rack_env.fetch("rack.input").read
+          snapshot = nil
+
+          state_mutex.synchronize do
+            active += 1
+            max_active = [max_active, active].max
+            started << body
+
+            if body.start_with?("hold") && started.count { |value| value.start_with?("hold") } == 2 && !release_thread_started
+              release_thread_started = true
+              Thread.new do
+                sleep 0.35
+                state_mutex.synchronize do
+                  release_holds = true
+                  state_condition.broadcast
+                end
+              end
+            end
+
+            while body.start_with?("hold") && !release_holds
+              state_condition.wait(state_mutex)
+            end
+
+            snapshot = { max_active:, started: started.dup }
+            active -= 1
+          end
+
+          [200, { "Content-Type" => "application/json" }, [JSON.generate(body:, max_active: snapshot.fetch(:max_active), started: snapshot.fetch(:started))]]
+        end
+      )
+
+      Vajra.start(
+        workers: 1,
+        threads: [2, 2],
+        queue_capacity: 10,
+        scheduler_policy: "least_loaded",
+        log_level: "debug"
+      )
+    RUBY
+  end
+
   def queue_capacity_request_head(body)
     "POST / HTTP/1.1\r\n" \
       "Host: localhost\r\n" \
@@ -734,6 +790,21 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
       'event=worker_replacement_pending',
       'replacement_needed=true'
     )
+  end
+
+  it 'caps active execution at the configured worker thread count under concurrent load' do
+    result = staged_request_result(
+      script: worker_thread_pool_script,
+      env: {},
+      request_bodies: %w[hold-a hold-b queued-c queued-d]
+    )
+
+    expect(result[:exitstatus]).to eq(0), result[:output]
+    payloads = result[:responses].map { |response| JSON.parse(parse_http_response(response)[:body]) }
+    expect(payloads.map { |payload| payload.fetch('max_active') }.max).to eq(2)
+    expect(payloads.map { |payload| payload.fetch('max_active') }).to all(be <= 2)
+    expect(payloads.first.fetch('started').first(2)).to match_array(%w[hold-a hold-b])
+    expect(payloads.last.fetch('started').index('queued-c')).to be < payloads.last.fetch('started').index('queued-d')
   end
 
   it 'applies the configured request head timeout to fragmented request headers' do

@@ -19,10 +19,12 @@ add_executable(vajra_server_test
   request_head_test.cpp
   response_test.cpp
   server_test.cpp
+  worker_execution_pool_test.cpp
   ../../ext/vajra/ipc/protocol_contract.cpp
   ../../ext/vajra/lifecycle/lifecycle_controller.cpp
   ../../ext/vajra/ipc/frame_header.cpp
   ../../ext/vajra/listener/listener_socket.cpp
+  ../../ext/vajra/rack/worker_execution_pool.cpp
   ../../ext/vajra/request/request_body_reader.cpp
   ../../ext/vajra/request/request_executor.cpp
   ../../ext/vajra/request/request_head_reader.cpp

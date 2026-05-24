@@ -27,6 +27,7 @@ int main()
     VajraSpecCpp::run_server_lifecycle_tests();
     VajraSpecCpp::run_request_head_tests();
     VajraSpecCpp::run_response_tests();
+    VajraSpecCpp::run_worker_execution_pool_tests();
   }
   catch (const std::exception &error)
   {

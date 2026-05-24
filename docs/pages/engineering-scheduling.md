@@ -28,11 +28,12 @@ Vajra's scheduler defines:
 
 The scheduler model is:
 
-- one pending queue
+- one pending queue before worker assignment
 - that queue is global
 - that queue is FIFO
 - scheduler push to the least-busy worker
-- no worker-owned pending queues
+- assigned work enters a bounded worker-local execution queue before a worker execution thread starts it
+- current worker-local ingress still matches configured `max_threads`, so the global queue remains the primary backlog surface
 - queue-first behavior until execution starts, `request_timeout` expires, or the client disconnects
 - `queue_capacity` as the hard finite guardrail
 

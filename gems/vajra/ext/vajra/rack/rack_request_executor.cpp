@@ -4,6 +4,7 @@
 // LICENSE file in the root directory of this source tree.
 
 #include "rack_request_executor.hpp"
+#include "rack/worker_execution_pool.hpp"
 
 #include "ipc/frame_header.hpp"
 #include "request/http_field_utils.hpp"
@@ -1490,7 +1491,9 @@ namespace
         int client_fd) const
     {
       std::lock_guard<std::mutex> lock(scheduler_mutex_);
-      prune_queue_head_locked(std::chrono::steady_clock::now());
+      const auto now = std::chrono::steady_clock::now();
+      prune_queue_locked(now);
+      prune_queue_head_locked(now);
       if (queued_request_count_ >= queue_capacity_)
       {
         log_scheduler_debug_event(
@@ -1864,6 +1867,145 @@ namespace
     std::string error_message;
   };
 
+  struct WorkerRequestExecutionTask final : public Vajra::rack::WorkerExecutionTask
+  {
+    explicit WorkerRequestExecutionTask(
+        std::vector<Vajra::request::RackEnvEntry> request_env_entries,
+        std::string request_payload)
+        : env_entries(std::move(request_env_entries)),
+          request_body(std::move(request_payload))
+    {
+    }
+
+    void execute() override
+    {
+      CurrentThreadRackExecutionTransport transport;
+      try
+      {
+        response = transport.execute(env_entries, request_body);
+        metadata_kind = response ? ResponseMetadataKind::response : ResponseMetadataKind::no_response;
+      }
+      catch (const Vajra::request::HeadError &error)
+      {
+        metadata_kind = ResponseMetadataKind::head_error;
+        error_message = error.what();
+      }
+      catch (const std::exception &error)
+      {
+        metadata_kind = ResponseMetadataKind::execution_error;
+        error_message = error.what();
+      }
+
+      mark_complete();
+    }
+
+    void cancel_due_to_pool_abort() override
+    {
+      metadata_kind = ResponseMetadataKind::execution_error;
+      error_message = "worker local execution pool aborted before execution started";
+      mark_complete();
+    }
+
+    void wait_for_completion()
+    {
+      std::unique_lock<std::mutex> lock(result_mutex);
+      result_condition.wait(lock, [this]() { return completed; });
+    }
+
+    std::vector<Vajra::request::RackEnvEntry> env_entries;
+    std::string request_body;
+    ResponseMetadataKind metadata_kind = ResponseMetadataKind::no_response;
+    std::optional<Vajra::response::Response> response;
+    std::string error_message;
+
+  private:
+    void mark_complete()
+    {
+      {
+        const std::lock_guard<std::mutex> lock(result_mutex);
+        completed = true;
+      }
+      result_condition.notify_all();
+    }
+
+    std::mutex result_mutex;
+    std::condition_variable result_condition;
+    bool completed = false;
+  };
+
+  struct WorkerRequestExecutionPoolWaitContext
+  {
+    Vajra::rack::WorkerExecutionPool *pool = nullptr;
+    std::shared_ptr<Vajra::rack::WorkerExecutionTask> task;
+  };
+
+  struct WorkerRequestExecutionTaskWaitContext
+  {
+    WorkerRequestExecutionTask *task = nullptr;
+  };
+
+  struct WorkerRequestLoopSharedState
+  {
+    WorkerRequestLoopSharedState(std::vector<int> owned_channel_fds, std::size_t max_threads)
+        : channel_fds(std::move(owned_channel_fds)),
+          execution_pool(max_threads),
+          remaining_readers(channel_fds.size())
+    {
+    }
+
+    void abort(const std::string &message)
+    {
+      bool expected = false;
+      if (!abort_requested.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+      {
+        return;
+      }
+
+      {
+        const std::lock_guard<std::mutex> lock(error_mutex);
+        error_message = message;
+      }
+
+      execution_pool.abort();
+      for (int channel_fd : channel_fds)
+      {
+        if (channel_fd < 0)
+        {
+          continue;
+        }
+        if (shutdown(channel_fd, SHUT_RDWR) != 0 && errno != ENOTCONN && errno != EINVAL && errno != EBADF)
+        {
+          continue;
+        }
+      }
+    }
+
+    void mark_reader_finished()
+    {
+      if (remaining_readers.fetch_sub(1, std::memory_order_acq_rel) == 1)
+      {
+        execution_pool.close_input();
+      }
+    }
+
+    std::optional<std::string> fatal_error() const
+    {
+      const std::lock_guard<std::mutex> lock(error_mutex);
+      if (error_message.empty())
+      {
+        return std::nullopt;
+      }
+      return error_message;
+    }
+
+    const std::vector<int> channel_fds;
+    Vajra::rack::WorkerExecutionPool execution_pool;
+    std::atomic<std::size_t> remaining_readers;
+    std::atomic_bool abort_requested{false};
+    mutable std::mutex error_mutex;
+    std::string error_message;
+  };
+
   void *read_worker_request_from_channel_without_gvl(void *data)
   {
     auto *result = static_cast<ChannelRequestReadResult *>(data);
@@ -1921,14 +2063,38 @@ namespace
     return nullptr;
   }
 
-  struct WorkerChannelThreadContext
+  void *wait_for_worker_execution_task_without_gvl(void *data)
   {
-    int channel_fd = -1;
+    auto *context = static_cast<WorkerRequestExecutionPoolWaitContext *>(data);
+    context->task = context->pool->wait_for_task();
+    return nullptr;
+  }
+
+  void *wait_for_worker_request_task_completion_without_gvl(void *data)
+  {
+    auto *context = static_cast<WorkerRequestExecutionTaskWaitContext *>(data);
+    context->task->wait_for_completion();
+    return nullptr;
+  }
+
+  struct WorkerLoopThreadContext
+  {
     int completion_signal_fd = -1;
     std::atomic_bool completed{false};
     std::atomic_bool failed{false};
     mutable std::mutex error_mutex;
     std::string error_message;
+  };
+
+  struct WorkerRequestReaderThreadContext final : public WorkerLoopThreadContext
+  {
+    int channel_fd = -1;
+    std::shared_ptr<WorkerRequestLoopSharedState> shared_state;
+  };
+
+  struct WorkerRequestExecutorThreadContext final : public WorkerLoopThreadContext
+  {
+    std::shared_ptr<WorkerRequestLoopSharedState> shared_state;
   };
 
   struct WorkerChannelSignalReadContext
@@ -1938,7 +2104,7 @@ namespace
     int error_number = 0;
   };
 
-  std::optional<std::string> take_worker_channel_error(const WorkerChannelThreadContext &context)
+  std::optional<std::string> take_worker_loop_thread_error(const WorkerLoopThreadContext &context)
   {
     if (!context.failed.load(std::memory_order_acquire))
     {
@@ -1949,8 +2115,8 @@ namespace
     return context.error_message;
   }
 
-  void notify_worker_channel_thread_completion(
-      WorkerChannelThreadContext *context,
+  void notify_worker_loop_thread_completion(
+      WorkerLoopThreadContext *context,
       const std::optional<std::string> &error_message = std::nullopt)
   {
     if (error_message)
@@ -2007,78 +2173,150 @@ namespace
     }
   }
 
-  VALUE run_worker_request_channel_thread(void *data)
+  void write_worker_request_task_result(
+      int channel_fd,
+      const WorkerRequestExecutionTask &task)
   {
-    auto *context = static_cast<WorkerChannelThreadContext *>(data);
-    CurrentThreadRackExecutionTransport transport;
+    switch (task.metadata_kind)
+    {
+    case ResponseMetadataKind::no_response:
+      write_frame(
+          channel_fd,
+          Vajra::ipc::FrameFamily::response_metadata_result,
+          encode_response_metadata(std::nullopt));
+      return;
+    case ResponseMetadataKind::response:
+    {
+      write_frame(
+          channel_fd,
+          Vajra::ipc::FrameFamily::response_metadata_result,
+          encode_response_metadata(task.response));
+      if (!task.response)
+      {
+        return;
+      }
+
+      std::size_t cursor = 0;
+      while (cursor < task.response->body.size())
+      {
+        const std::size_t length = std::min(kInlineBodyChunkBytes, task.response->body.size() - cursor);
+        write_frame(
+            channel_fd,
+            Vajra::ipc::FrameFamily::response_body_continuation,
+            encode_response_body_event(ResponseBodyEvent::chunk, task.response->body.substr(cursor, length)));
+        cursor += length;
+      }
+      write_frame(
+          channel_fd,
+          Vajra::ipc::FrameFamily::response_body_continuation,
+          encode_response_body_event(ResponseBodyEvent::complete, ""));
+      return;
+    }
+    case ResponseMetadataKind::head_error:
+    case ResponseMetadataKind::execution_error:
+      write_frame(
+          channel_fd,
+          Vajra::ipc::FrameFamily::response_metadata_result,
+          encode_response_error(task.metadata_kind, task.error_message));
+      return;
+    }
+  }
+
+  VALUE run_worker_request_reader_thread(void *data)
+  {
+    auto *context = static_cast<WorkerRequestReaderThreadContext *>(data);
+    bool reader_finished = false;
 
     for (;;)
     {
-      ChannelRequestReadResult read_result{context->channel_fd, false, false, {}, "", ""};
-      rb_thread_call_without_gvl(
-          read_worker_request_from_channel_without_gvl,
-          &read_result,
-          RUBY_UBF_IO,
-          nullptr);
-
-      if (!read_result.error_message.empty())
-      {
-        notify_worker_channel_thread_completion(context, read_result.error_message);
-        return Qnil;
-      }
-      if (read_result.eof)
-      {
-        notify_worker_channel_thread_completion(context);
-        return Qnil;
-      }
-      if (read_result.request_canceled)
-      {
-        continue;
-      }
-
       try
       {
-        const std::optional<Vajra::response::Response> response =
-            transport.execute(read_result.env_entries, read_result.request_body);
-        write_frame(
-            context->channel_fd,
-            Vajra::ipc::FrameFamily::response_metadata_result,
-            encode_response_metadata(response));
-        if (!response)
+        ChannelRequestReadResult read_result{context->channel_fd, false, false, {}, "", ""};
+        rb_thread_call_without_gvl(
+            read_worker_request_from_channel_without_gvl,
+            &read_result,
+            RUBY_UBF_IO,
+            nullptr);
+
+        if (!read_result.error_message.empty())
+        {
+          throw std::runtime_error(read_result.error_message);
+        }
+        if (read_result.eof)
+        {
+          break;
+        }
+        if (read_result.request_canceled)
         {
           continue;
         }
 
-        std::size_t cursor = 0;
-        while (cursor < response->body.size())
-        {
-          const std::size_t length = std::min(kInlineBodyChunkBytes, response->body.size() - cursor);
-          write_frame(
-              context->channel_fd,
-              Vajra::ipc::FrameFamily::response_body_continuation,
-              encode_response_body_event(ResponseBodyEvent::chunk, response->body.substr(cursor, length)));
-          cursor += length;
-        }
-        write_frame(
-            context->channel_fd,
-            Vajra::ipc::FrameFamily::response_body_continuation,
-            encode_response_body_event(ResponseBodyEvent::complete, ""));
-      }
-      catch (const Vajra::request::HeadError &error)
-      {
-        write_frame(
-            context->channel_fd,
-            Vajra::ipc::FrameFamily::response_metadata_result,
-            encode_response_error(ResponseMetadataKind::head_error, error.what()));
+        auto task = std::make_shared<WorkerRequestExecutionTask>(
+            std::move(read_result.env_entries),
+            std::move(read_result.request_body));
+        (void)context->shared_state->execution_pool.enqueue(task);
+
+        WorkerRequestExecutionTaskWaitContext wait_context{task.get()};
+        rb_thread_call_without_gvl(
+            wait_for_worker_request_task_completion_without_gvl,
+            &wait_context,
+            RUBY_UBF_IO,
+            nullptr);
+        write_worker_request_task_result(context->channel_fd, *task);
       }
       catch (const std::exception &error)
       {
-        write_frame(
-            context->channel_fd,
-            Vajra::ipc::FrameFamily::response_metadata_result,
-            encode_response_error(ResponseMetadataKind::execution_error, error.what()));
+        context->shared_state->abort(error.what());
+        if (!reader_finished)
+        {
+          context->shared_state->mark_reader_finished();
+          reader_finished = true;
+        }
+        notify_worker_loop_thread_completion(context, error.what());
+        return Qnil;
       }
     }
+
+    if (!reader_finished)
+    {
+      context->shared_state->mark_reader_finished();
+    }
+    notify_worker_loop_thread_completion(context);
+    return Qnil;
+  }
+
+  VALUE run_worker_request_executor_thread(void *data)
+  {
+    auto *context = static_cast<WorkerRequestExecutorThreadContext *>(data);
+
+    try
+    {
+      for (;;)
+      {
+        WorkerRequestExecutionPoolWaitContext wait_context{&context->shared_state->execution_pool, nullptr};
+        rb_thread_call_without_gvl(
+            wait_for_worker_execution_task_without_gvl,
+            &wait_context,
+            RUBY_UBF_IO,
+            nullptr);
+        if (!wait_context.task)
+        {
+          break;
+        }
+
+        wait_context.task->execute();
+        context->shared_state->execution_pool.finish_task();
+      }
+    }
+    catch (const std::exception &error)
+    {
+      context->shared_state->abort(error.what());
+      notify_worker_loop_thread_completion(context, error.what());
+      return Qnil;
+    }
+
+    notify_worker_loop_thread_completion(context);
+    return Qnil;
   }
 
   class RequestExecutionBridgeSession final : public Vajra::request::RequestExecutionSession
@@ -2188,9 +2426,9 @@ void Vajra::rack::run_worker_request_execution_loop(
     const std::vector<int> &channel_fds,
     std::size_t max_threads)
 {
-  if (channel_fds.size() != max_threads)
+  if (channel_fds.size() < max_threads)
   {
-    throw std::runtime_error("worker request channel count must match max_threads");
+    throw std::runtime_error("worker request channel count must be at least max_threads");
   }
 
   int completion_signal_pipe[2] = {-1, -1};
@@ -2199,18 +2437,36 @@ void Vajra::rack::run_worker_request_execution_loop(
     throw std::runtime_error("worker request completion signal pipe failed");
   }
 
-  std::vector<std::unique_ptr<WorkerChannelThreadContext>> contexts;
-  contexts.reserve(channel_fds.size());
+  auto shared_state = std::make_shared<WorkerRequestLoopSharedState>(channel_fds, max_threads);
+  const std::size_t total_thread_count = channel_fds.size() + max_threads;
+  std::vector<WorkerLoopThreadContext *> contexts;
+  contexts.reserve(total_thread_count);
   std::vector<VALUE> threads;
-  threads.reserve(channel_fds.size());
+  threads.reserve(total_thread_count);
+  std::vector<std::unique_ptr<WorkerRequestReaderThreadContext>> reader_contexts;
+  reader_contexts.reserve(channel_fds.size());
+  std::vector<std::unique_ptr<WorkerRequestExecutorThreadContext>> executor_contexts;
+  executor_contexts.reserve(max_threads);
 
   for (int channel_fd : channel_fds)
   {
-    auto context = std::make_unique<WorkerChannelThreadContext>();
+    auto context = std::make_unique<WorkerRequestReaderThreadContext>();
     context->channel_fd = channel_fd;
     context->completion_signal_fd = completion_signal_pipe[1];
-    contexts.push_back(std::move(context));
-    threads.push_back(rb_thread_create(run_worker_request_channel_thread, contexts.back().get()));
+    context->shared_state = shared_state;
+    contexts.push_back(context.get());
+    threads.push_back(rb_thread_create(run_worker_request_reader_thread, context.get()));
+    reader_contexts.push_back(std::move(context));
+  }
+
+  for (std::size_t thread_index = 0; thread_index < max_threads; ++thread_index)
+  {
+    auto context = std::make_unique<WorkerRequestExecutorThreadContext>();
+    context->completion_signal_fd = completion_signal_pipe[1];
+    context->shared_state = shared_state;
+    contexts.push_back(context.get());
+    threads.push_back(rb_thread_create(run_worker_request_executor_thread, context.get()));
+    executor_contexts.push_back(std::move(context));
   }
 
   ID id_join = rb_intern("join");
@@ -2250,23 +2506,22 @@ void Vajra::rack::run_worker_request_execution_loop(
       rb_funcall(threads[index], id_join, 0);
       joined[index] = true;
       ++joined_count;
-      if (const std::optional<std::string> error_message = take_worker_channel_error(*contexts[index]))
-      {
-        close(completion_signal_pipe[0]);
-        close(completion_signal_pipe[1]);
-        throw std::runtime_error(*error_message);
-      }
     }
   }
 
   close(completion_signal_pipe[0]);
   close(completion_signal_pipe[1]);
 
-  for (const std::unique_ptr<WorkerChannelThreadContext> &context : contexts)
+  for (WorkerLoopThreadContext *context : contexts)
   {
-    if (const std::optional<std::string> error_message = take_worker_channel_error(*context))
+    if (const std::optional<std::string> error_message = take_worker_loop_thread_error(*context))
     {
       throw std::runtime_error(*error_message);
     }
+  }
+
+  if (const std::optional<std::string> error_message = shared_state->fatal_error())
+  {
+    throw std::runtime_error(*error_message);
   }
 }

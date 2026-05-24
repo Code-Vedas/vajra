@@ -66,6 +66,8 @@ The lifecycle log vocabulary is intentionally split:
 - `listener_owned` identifies whether the emitting process owns the active listener
 - scheduler debug events expose `selected_worker`, `queue_depth`, `inflight`, and `queue_capacity`
 - queue depth refers to the one global FIFO queue, not a worker-local backlog
+- worker-local execution backlog is internal today and not yet surfaced as a
+  first-class observable signal
 
 This prevents operator confusion between:
 

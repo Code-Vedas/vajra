@@ -2020,7 +2020,7 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
     clear_worker_runtime();
     if (debug_logging)
     {
-      std::cout << "[Vajra][lifecycle] " << utc_timestamp() << " event=stop_completed" << '\n';
+      log_runtime_stop_completed();
     }
     log_runtime_shutdown_complete();
   }

@@ -191,21 +191,25 @@ namespace
   void write_runtime_line(const std::string &line)
   {
     std::lock_guard<std::mutex> lock(logging_mutex);
-    write_line(std::cout, line);
     if (logging_config.error_log_stream)
     {
       write_line(*logging_config.error_log_stream, line);
+      return;
     }
+
+    write_line(std::cout, line);
   }
 
   void write_error_line(const std::string &line)
   {
     std::lock_guard<std::mutex> lock(logging_mutex);
-    write_line(std::cerr, line);
     if (logging_config.error_log_stream)
     {
       write_line(*logging_config.error_log_stream, line);
+      return;
     }
+
+    write_line(std::cerr, line);
   }
 
   void write_access_line(const std::string &line)
@@ -311,7 +315,7 @@ void Vajra::runtime::log_worker_lifecycle_event(
     std::ostringstream line;
     line << "{\"component\":\"lifecycle\""
          << ",\"timestamp\":\"" << utc_timestamp() << "\""
-         << ",\"event\":\"" << event_name << "\""
+         << ",\"event\":" << escaped_log_value(event_name)
          << ",\"worker_index\":" << worker_index
          << ",\"pid\":" << pid
          << ",\"lifecycle\":\"" << worker_lifecycle_state_name(lifecycle_state) << "\""
@@ -439,10 +443,18 @@ void Vajra::runtime::log_access_event(const std::string &method, const std::stri
 void Vajra::runtime::log_runtime_shutdown_begin()
 {
   write_runtime_line("[" + std::to_string(getpid()) + "] - Gracefully shutting down workers...");
+  flush_runtime_streams();
+}
+
+void Vajra::runtime::log_runtime_stop_completed()
+{
+  write_runtime_line("[Vajra][lifecycle] " + utc_timestamp() + " event=stop_completed");
+  flush_runtime_streams();
 }
 
 void Vajra::runtime::log_runtime_shutdown_complete()
 {
   write_runtime_line("[" + std::to_string(getpid()) + "] === vajra shutdown: " + utc_timestamp() + " ===");
   write_runtime_line("[" + std::to_string(getpid()) + "] - Goodbye!");
+  flush_runtime_streams();
 }

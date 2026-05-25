@@ -49,6 +49,7 @@ namespace Vajra
     void log_runtime_error(const std::string &message);
     void log_access_event(const std::string &method, const std::string &target, int status_code);
     void log_runtime_shutdown_begin();
+    void log_runtime_stop_completed();
     void log_runtime_shutdown_complete();
   }
 }

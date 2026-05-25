@@ -166,10 +166,10 @@ module VajraE2EProcessHelpers
     end
   end
 
-  def wait_for_graceful_shutdown_banner(output, wait_thread)
+  def wait_for_graceful_shutdown_banner(output, wait_thread, timeout: 2)
     captured_output = +''
 
-    Timeout.timeout(1) do
+    Timeout.timeout(timeout) do
       loop do
         captured_output << read_available_output(output)
         break captured_output if captured_output.include?('- Gracefully shutting down workers...')

@@ -573,8 +573,20 @@ void Vajra::runtime::NativeRuntime::mark_worker_ready(const std::shared_ptr<Shar
 
 void Vajra::runtime::NativeRuntime::mark_worker_stopping(const std::shared_ptr<SharedWorkerState> &worker_state)
 {
-  const WorkerLifecycleState previous_state =
-      worker_state->lifecycle_state.exchange(WorkerLifecycleState::stopping, std::memory_order_acq_rel);
+  WorkerLifecycleState previous_state = worker_state->lifecycle_state.load(std::memory_order_acquire);
+  while (previous_state != WorkerLifecycleState::stopping &&
+         previous_state != WorkerLifecycleState::exited)
+  {
+    if (worker_state->lifecycle_state.compare_exchange_weak(
+            previous_state,
+            WorkerLifecycleState::stopping,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire))
+    {
+      break;
+    }
+  }
+
   if (previous_state == WorkerLifecycleState::stopping || previous_state == WorkerLifecycleState::exited)
   {
     return;
@@ -1910,10 +1922,12 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
     std::atomic_bool server_thread_completed{false};
     std::mutex server_thread_mutex;
     std::string server_thread_error;
-    std::thread server_thread([this, &config, &booted_worker_states, debug_logging, &server_thread_completed, &server_thread_mutex, &server_thread_error]() {
+    const RuntimeConfig server_config = config;
+    const std::vector<std::shared_ptr<SharedWorkerState>> server_worker_states = booted_worker_states;
+    std::thread server_thread([this, server_config, server_worker_states, debug_logging, &server_thread_completed, &server_thread_mutex, &server_thread_error]() mutable {
       try
       {
-        run_master_runtime_server(config, booted_worker_states, debug_logging);
+        run_master_runtime_server(server_config, server_worker_states, debug_logging);
       }
       catch (const std::exception &error)
       {
@@ -1942,14 +1956,25 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
         const std::lock_guard<std::mutex> lock(server_mutex_);
         shutdown_in_progress = runtime_shutdown_started_ || stop_requested_;
       }
+      if (shutdown_requested() || shutdown_in_progress)
+      {
+        begin_runtime_shutdown();
+        (void)stop_worker_processes();
+        Vajra::Server *server = nullptr;
+        std::shared_ptr<Vajra::Server> server_handle;
+        {
+          std::lock_guard<std::mutex> lock(server_mutex_);
+          server_handle = server_instance_;
+          server = server_handle.get();
+        }
+        if (server != nullptr)
+        {
+          server->stop();
+        }
+      }
       if (server_thread_completed.load(std::memory_order_acquire))
       {
         break;
-      }
-      if (shutdown_requested())
-      {
-        begin_runtime_shutdown();
-        stop();
       }
       if ((shutdown_in_progress || shutting_down != 0) && all_workers_exited)
       {
@@ -1965,14 +1990,21 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
 
     if (server_thread.joinable())
     {
-      if (server_thread_completed.load(std::memory_order_acquire))
+      if (!server_thread_completed.load(std::memory_order_acquire))
       {
-        server_thread.join();
+        Vajra::Server *server = nullptr;
+        std::shared_ptr<Vajra::Server> server_handle;
+        {
+          std::lock_guard<std::mutex> lock(server_mutex_);
+          server_handle = server_instance_;
+          server = server_handle.get();
+        }
+        if (server != nullptr)
+        {
+          server->stop();
+        }
       }
-      else
-      {
-        server_thread.detach();
-      }
+      server_thread.join();
     }
     {
       const std::lock_guard<std::mutex> lock(server_thread_mutex);
@@ -1986,6 +2018,10 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
     stop_worker_processes();
     wait_for_worker_exit(booted_worker_states);
     clear_worker_runtime();
+    if (debug_logging)
+    {
+      std::cout << "[Vajra][lifecycle] " << utc_timestamp() << " event=stop_completed" << '\n';
+    }
     log_runtime_shutdown_complete();
   }
   catch (...)
@@ -2005,18 +2041,9 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
 void Vajra::runtime::NativeRuntime::stop()
 {
   const bool had_runtime = runtime_running();
-  const bool called_from_ruby_main_thread = start_called_from_ruby_main_thread();
   if (had_runtime)
   {
     begin_runtime_shutdown();
-  }
-  (void)stop_worker_processes();
-
-  if (had_runtime && !called_from_ruby_main_thread)
-  {
-    log_runtime_shutdown_complete();
-    flush_runtime_logs();
-    std::_Exit(0);
   }
 
   Vajra::Server *server = nullptr;
@@ -2030,17 +2057,6 @@ void Vajra::runtime::NativeRuntime::stop()
   if (server != nullptr)
   {
     server->stop();
-  }
-
-  if (had_runtime)
-  {
-    if (debug_logging_.load(std::memory_order_acquire))
-    {
-      std::cout << "[Vajra][lifecycle] " << utc_timestamp() << " event=stop_completed" << '\n';
-    }
-    log_runtime_shutdown_complete();
-    flush_runtime_logs();
-    std::_Exit(0);
   }
 }
 

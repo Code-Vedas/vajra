@@ -1416,6 +1416,20 @@ namespace
       return slots_.at(worker_index);
     }
 
+    std::shared_ptr<WorkerProcessRackExecutionTransport> assigned_channel_transport(
+        const std::shared_ptr<PendingRequest> &pending_request) const
+    {
+      std::lock_guard<std::mutex> lock(scheduler_mutex_);
+      const std::shared_ptr<WorkerSlot> slot = slot_for(pending_request->worker_index);
+      sync_slot_channels_locked(slot);
+      if (pending_request->channel_index >= slot->channels.size())
+      {
+        throw std::runtime_error("assigned worker channel is no longer available");
+      }
+      pending_request->channel_generation = slot->channel_generation;
+      return slot->channels.at(pending_request->channel_index).transport;
+    }
+
     std::pair<std::size_t, std::size_t> await_assignment(const std::shared_ptr<PendingRequest> &pending_request) const
     {
       std::unique_lock<std::mutex> lock(scheduler_mutex_);
@@ -1941,15 +1955,14 @@ namespace
       return;
     }
 
-    const auto [worker_index, channel_index] = transport_.await_assignment(pending_request_);
+    (void)transport_.await_assignment(pending_request_);
 
     try
     {
-      const std::shared_ptr<GlobalQueuedWorkerProcessRackExecutionTransport::WorkerSlot> slot =
-          transport_.slot_for(worker_index);
-      pending_request_->channel_generation = slot->channel_generation;
+      const std::shared_ptr<WorkerProcessRackExecutionTransport> channel_transport =
+          transport_.assigned_channel_transport(pending_request_);
       live_session_ =
-          slot->channels.at(channel_index).transport->start(
+          channel_transport->start(
               pending_request_->env_entries,
               pending_request_->client_fd);
     }

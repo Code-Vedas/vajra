@@ -151,7 +151,7 @@ namespace
           }
           else
           {
-            escaped << "\\x" << std::hex << std::setw(2) << std::setfill('0')
+            escaped << "\\u00" << std::hex << std::setw(2) << std::setfill('0')
                     << static_cast<int>(character)
                     << std::dec << std::setfill(' ');
           }
@@ -180,6 +180,12 @@ namespace
     {
       logging_config.error_log_stream->flush();
     }
+  }
+
+  bool structured_logging_enabled()
+  {
+    const std::lock_guard<std::mutex> lock(logging_mutex);
+    return logging_config.structured_logs;
   }
 
   void write_runtime_line(const std::string &line)
@@ -264,6 +270,11 @@ void Vajra::runtime::configure_runtime_logging(
   }
 }
 
+void Vajra::runtime::flush_runtime_logs()
+{
+  flush_runtime_streams();
+}
+
 void Vajra::runtime::log_runtime_banner_start(
     const std::string &host,
     int port,
@@ -295,7 +306,7 @@ void Vajra::runtime::log_worker_lifecycle_event(
     bool replacement_needed,
     int exit_detail)
 {
-  if (logging_config.structured_logs)
+  if (structured_logging_enabled())
   {
     std::ostringstream line;
     line << "{\"component\":\"lifecycle\""
@@ -389,7 +400,7 @@ void Vajra::runtime::log_worker_booted(int worker_index, pid_t pid, double boot_
 
 void Vajra::runtime::log_runtime_error(const std::string &message)
 {
-  if (logging_config.structured_logs)
+  if (structured_logging_enabled())
   {
     write_error_line(
         "{\"component\":\"error\",\"timestamp\":\"" + utc_timestamp() + "\",\"message\":" +
@@ -404,7 +415,7 @@ void Vajra::runtime::log_runtime_error(const std::string &message)
 
 void Vajra::runtime::log_access_event(const std::string &method, const std::string &target, int status_code)
 {
-  if (logging_config.structured_logs)
+  if (structured_logging_enabled())
   {
     std::ostringstream line;
     line << "{\"component\":\"access\""

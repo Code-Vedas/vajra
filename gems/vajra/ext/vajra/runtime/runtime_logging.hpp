@@ -23,6 +23,7 @@ namespace Vajra
         bool structured_logs,
         const std::string &access_log,
         const std::string &error_log);
+    void flush_runtime_logs();
     void log_runtime_banner_start(
         const std::string &host,
         int port,

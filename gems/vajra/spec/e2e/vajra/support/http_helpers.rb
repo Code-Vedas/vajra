@@ -489,7 +489,7 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
           socket,
           wait_thread:,
           output:,
-          request_label:
+          request_label: request_label
         )
       )
     ensure

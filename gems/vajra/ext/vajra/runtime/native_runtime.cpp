@@ -702,7 +702,13 @@ void Vajra::runtime::NativeRuntime::close_worker_request_channels(const std::sha
     return;
   }
 
-  for (int request_channel_fd : worker_state->request_channel_fds)
+  std::vector<int> request_channel_fds;
+  {
+    const std::lock_guard<std::mutex> lock(worker_state->request_channel_mutex);
+    request_channel_fds = worker_state->request_channel_fds;
+  }
+
+  for (int request_channel_fd : request_channel_fds)
   {
     shutdown(request_channel_fd, SHUT_RDWR);
     close_fd_if_open(request_channel_fd);
@@ -1414,7 +1420,7 @@ void Vajra::runtime::NativeRuntime::refresh_worker_health(
             worker_state->available.load(std::memory_order_acquire),
             worker_state->last_exit_classification.load(std::memory_order_acquire),
             worker_state->replacement_needed.load(std::memory_order_acquire),
-            static_cast<int>(next_state));
+            0);
       }
     }
   }
@@ -1774,6 +1780,7 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
     }
     configure_runtime_logging(config.structured_logs, config.access_log, config.error_log);
     log_runtime_banner_start(config.host, config.port, config.workers, config.min_threads, config.max_threads);
+    flush_runtime_logs();
     const BootContractResult master_boot_result = BootContract::run(
         BootContractConfig{config.port, config.max_request_head_bytes, kMasterPreloadRuntimeRole});
     BootContract::ensure_ready(master_boot_result);
@@ -2008,8 +2015,7 @@ void Vajra::runtime::NativeRuntime::stop()
   if (had_runtime && !called_from_ruby_main_thread)
   {
     log_runtime_shutdown_complete();
-    std::cout.flush();
-    std::cerr.flush();
+    flush_runtime_logs();
     std::_Exit(0);
   }
 
@@ -2033,8 +2039,7 @@ void Vajra::runtime::NativeRuntime::stop()
       std::cout << "[Vajra][lifecycle] " << utc_timestamp() << " event=stop_completed" << '\n';
     }
     log_runtime_shutdown_complete();
-    std::cout.flush();
-    std::cerr.flush();
+    flush_runtime_logs();
     std::_Exit(0);
   }
 }

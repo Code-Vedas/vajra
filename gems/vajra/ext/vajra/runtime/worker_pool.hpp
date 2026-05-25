@@ -89,6 +89,8 @@ namespace Vajra
       std::atomic<std::uint64_t> replacement_attempt_count{0};
       std::atomic<std::uint64_t> replacement_success_count{0};
       std::atomic<std::uint64_t> replacement_failure_count{0};
+      std::atomic_bool recovery_requested{false};
+      std::atomic_bool replacement_scheduled{false};
     };
   }
 }

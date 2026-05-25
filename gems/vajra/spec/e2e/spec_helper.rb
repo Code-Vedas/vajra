@@ -59,11 +59,13 @@ module VajraE2EHelpers
   end
 
   def vajra_env(host: nil, port: nil, max_request_head_bytes: nil)
+    # rubocop:disable Rails/IndexWith
     RUNTIME_ENV_OVERRIDE_KEYS.to_h { |key| [key, nil] }.tap do |env|
       env['VAJRA_HOST'] = host unless host.nil?
       env['VAJRA_PORT'] = port.to_s unless port.nil?
       env['VAJRA_MAX_REQUEST_HEAD_BYTES'] = max_request_head_bytes.to_s unless max_request_head_bytes.nil?
     end
+    # rubocop:enable Rails/IndexWith
   end
 
   def listener_banner(port)

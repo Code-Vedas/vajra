@@ -161,9 +161,11 @@ module Vajra
 
     def validate_start_options!(options)
       option_keys = options.keys
+      # rubocop:disable Rails/NegateInclude
       invalid_option = option_keys.find do |key|
         !DOCUMENTED_START_OPTION_KEYS.include?(key) || UNIMPLEMENTED_START_OPTION_KEYS.include?(key)
       end
+      # rubocop:enable Rails/NegateInclude
       return unless invalid_option
 
       raise Error, "start option not implemented yet: #{invalid_option}" if UNIMPLEMENTED_START_OPTION_KEYS.include?(invalid_option)

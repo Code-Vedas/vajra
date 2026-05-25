@@ -383,6 +383,120 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
   end
   # rubocop:enable Metrics/AbcSize, ThreadSafety/NewThread
 
+  def wait_for_runtime_output(output, runtime_output, pattern, count: 1, timeout: 2)
+    Timeout.timeout(timeout) do
+      loop do
+        runtime_output << read_available_output(output)
+        break if runtime_output.scan(pattern).size >= count
+
+        sleep 0.01
+      end
+    end
+  end
+
+  def worker_replacement_request_results(script:, initial_requests:, follow_up_request:, port: disposable_listener_port, env: {})
+    Open3.popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
+      runtime_output = +''
+      initial_responses = synchronized_request_responses(
+        selected_port:,
+        requests: initial_requests,
+        wait_thread:,
+        output:,
+        request_label_prefix: 'worker_replacement_request_results'
+      )
+      wait_for_runtime_output(output, runtime_output, 'event=worker_replacement_ready', timeout: 5)
+      follow_up_response = single_rack_app_response(
+        selected_port:,
+        request: follow_up_request,
+        wait_thread:,
+        output:,
+        request_label: 'worker_replacement_follow_up'
+      )
+
+      status = stop_process(wait_thread)
+
+      {
+        exitstatus: status.exitstatus,
+        responses: initial_responses,
+        follow_up_response:,
+        output: "#{startup_output.join}#{runtime_output}#{output.read}",
+        port: selected_port
+      }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
+  # rubocop:disable Metrics/AbcSize, ThreadSafety/NewThread
+  def synchronized_request_responses(selected_port:, requests:, wait_thread:, output:, request_label_prefix:)
+    responses = Array.new(requests.length)
+    ready_mutex = Mutex.new
+    ready_condition = ConditionVariable.new
+    ready_count = 0
+    release_requests = false
+    wait_timeout = VajraE2EHelpers::HTTP_RESPONSE_READ_TIMEOUT_SECONDS
+    workers = requests.each_with_index.map do |request, index|
+      Thread.new do
+        socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+        begin
+          ready_mutex.synchronize do
+            ready_count += 1
+            ready_condition.broadcast
+            Timeout.timeout(wait_timeout) do
+              ready_condition.wait(ready_mutex) until release_requests
+            end
+          end
+          socket.write(request)
+          responses[index] = parse_http_response(
+            read_raw_http_response(
+              socket,
+              wait_thread:,
+              output:,
+              request_label: "#{request_label_prefix}:#{index}"
+            )
+          )
+        ensure
+          socket.close unless socket.closed?
+        end
+      end
+    end
+
+    ready_mutex.synchronize do
+      Timeout.timeout(wait_timeout) do
+        ready_condition.wait(ready_mutex) until ready_count == requests.length
+      end
+      release_requests = true
+      ready_condition.broadcast
+    end
+    workers.each(&:value)
+    responses
+  ensure
+    ready_mutex&.synchronize do
+      release_requests = true
+      ready_condition.broadcast
+    end
+  end
+  # rubocop:enable Metrics/AbcSize, ThreadSafety/NewThread
+
+  def single_rack_app_response(selected_port:, request:, wait_thread:, output:, request_label:)
+    socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+    begin
+      socket.write(request)
+      parse_http_response(
+        read_raw_http_response(
+          socket,
+          wait_thread:,
+          output:,
+          request_label:
+        )
+      )
+    ensure
+      socket.close unless socket.closed?
+    end
+  end
+
   def packaged_app_request_result(files:, request:, env: {}, args: [])
     packaged_app_command_request_result(
       files:,

@@ -110,7 +110,11 @@ module VajraE2EProcessHelpers
         sleep initial_pause
         socket.write(request)
         socket.close_write
-        response = Timeout.timeout(timeout) { socket.read }
+        response = begin
+          Timeout.timeout(timeout) { socket.read }
+        rescue Errno::ECONNRESET
+          ''
+        end
       ensure
         socket.close unless socket.closed?
       end

@@ -1235,6 +1235,7 @@ namespace
     bool enqueued = false;
     std::size_t worker_index = 0;
     std::size_t channel_index = 0;
+    std::uint64_t channel_generation = 0;
   };
 
   class GlobalQueuedWorkerProcessRackExecutionTransport final : public Vajra::rack::RackExecutionTransport
@@ -1243,13 +1244,15 @@ namespace
     struct WorkerChannel
     {
       WorkerChannel(int fd, std::size_t worker_timeout_seconds, const std::function<void()> &timeout_handler)
-          : transport(std::make_shared<WorkerProcessRackExecutionTransport>(
+          : worker_timeout_seconds(worker_timeout_seconds),
+            transport(std::make_shared<WorkerProcessRackExecutionTransport>(
                 fd,
                 worker_timeout_seconds,
                 timeout_handler))
       {
       }
 
+      std::size_t worker_timeout_seconds;
       std::shared_ptr<WorkerProcessRackExecutionTransport> transport;
       bool busy = false;
     };
@@ -1262,6 +1265,7 @@ namespace
           std::size_t min_channel_count)
           : channels(std::move(worker_channels)),
             state(std::move(worker_state)),
+            channel_generation(state->channel_generation.load(std::memory_order_acquire)),
             min_channels(std::min(min_channel_count, channels.size())),
             active_channels(std::min(min_channel_count, channels.size()))
       {
@@ -1269,6 +1273,7 @@ namespace
 
       std::vector<WorkerChannel> channels;
       std::shared_ptr<Vajra::runtime::SharedWorkerState> state;
+      std::uint64_t channel_generation;
       std::size_t min_channels;
       std::size_t active_channels;
     };
@@ -1372,6 +1377,7 @@ namespace
           payload << ',';
         }
         const std::shared_ptr<WorkerSlot> &slot = slots_[index];
+        sync_slot_channels_locked(slot);
         payload << '{'
                 << "\"worker_index\":" << slot->state->worker_index << ','
                 << "\"active_channels\":" << inflight_count_locked(*slot) << ','
@@ -1393,6 +1399,7 @@ namespace
       payload << "vajra_scheduler_queue_capacity " << queue_capacity_ << '\n';
       for (const auto &slot : slots_)
       {
+        sync_slot_channels_locked(slot);
         const std::size_t worker_index = slot->state->worker_index;
         payload << "vajra_worker_active_channels{worker=\"" << worker_index << "\"} "
                 << inflight_count_locked(*slot) << '\n';
@@ -1433,12 +1440,14 @@ namespace
           const std::optional<std::pair<std::size_t, std::size_t>> assignment = least_busy_channel_locked();
           if (assignment.has_value())
           {
-            const std::shared_ptr<WorkerSlot> slot = slot_for(assignment->first);
-            slot->channels[assignment->second].busy = true;
+        const std::shared_ptr<WorkerSlot> slot = slot_for(assignment->first);
+        sync_slot_channels_locked(slot);
+        slot->channels[assignment->second].busy = true;
             const std::size_t inflight = inflight_count_locked(*slot);
             pending_request->assigned = true;
             pending_request->worker_index = assignment->first;
             pending_request->channel_index = assignment->second;
+            pending_request->channel_generation = slot->channel_generation;
             slot->state->active_execution_count.store(inflight, std::memory_order_release);
             slot->state->idle_execution_count.store(slot->channels.size() - inflight, std::memory_order_release);
             slot->state->last_progress_nanoseconds.store(
@@ -1486,7 +1495,12 @@ namespace
       {
         std::lock_guard<std::mutex> lock(scheduler_mutex_);
         const std::shared_ptr<WorkerSlot> slot = slot_for(pending_request->worker_index);
-        slot->channels.at(pending_request->channel_index).busy = false;
+        sync_slot_channels_locked(slot);
+        if (pending_request->channel_generation == slot->channel_generation &&
+            pending_request->channel_index < slot->channels.size())
+        {
+          slot->channels.at(pending_request->channel_index).busy = false;
+        }
         const std::size_t inflight = inflight_count_locked(*slot);
         pending_request->assigned = false;
         slot->state->active_execution_count.store(inflight, std::memory_order_release);
@@ -1530,6 +1544,33 @@ namespace
     }
 
   private:
+    void sync_slot_channels_locked(const std::shared_ptr<WorkerSlot> &slot) const
+    {
+      const std::uint64_t latest_generation = slot->state->channel_generation.load(std::memory_order_acquire);
+      if (slot->channel_generation == latest_generation)
+      {
+        return;
+      }
+
+      std::lock_guard<std::mutex> lock(slot->state->request_channel_mutex);
+      const std::vector<int> &channel_fds = slot->state->request_channel_fds;
+      std::vector<WorkerChannel> worker_channels;
+      worker_channels.reserve(channel_fds.size());
+      for (int channel_fd : channel_fds)
+      {
+        worker_channels.emplace_back(
+            channel_fd,
+            slot->channels.empty() ? 60 : slot->channels.front().worker_timeout_seconds,
+            [this, worker_index = slot->state->worker_index]() { mark_worker_timed_out(worker_index); });
+      }
+
+      slot->channels = std::move(worker_channels);
+      slot->active_channels = std::min(slot->min_channels, slot->channels.size());
+      slot->channel_generation = latest_generation;
+      slot->state->active_execution_count.store(0, std::memory_order_release);
+      slot->state->idle_execution_count.store(slot->channels.size(), std::memory_order_release);
+    }
+
     static bool worker_schedulable(const WorkerSlot &slot)
     {
       return slot.state->available.load(std::memory_order_acquire) &&
@@ -1652,6 +1693,7 @@ namespace
       {
         const std::size_t worker_index = (next_preferred_worker_ + offset) % worker_count;
         const std::shared_ptr<WorkerSlot> slot = slots_[worker_index];
+        sync_slot_channels_locked(slot);
         if (!worker_schedulable(*slot))
         {
           continue;
@@ -1903,8 +1945,11 @@ namespace
 
     try
     {
+      const std::shared_ptr<GlobalQueuedWorkerProcessRackExecutionTransport::WorkerSlot> slot =
+          transport_.slot_for(worker_index);
+      pending_request_->channel_generation = slot->channel_generation;
       live_session_ =
-          transport_.slot_for(worker_index)->channels.at(channel_index).transport->start(
+          slot->channels.at(channel_index).transport->start(
               pending_request_->env_entries,
               pending_request_->client_fd);
     }

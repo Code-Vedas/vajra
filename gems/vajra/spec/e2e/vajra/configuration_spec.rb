@@ -153,8 +153,8 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     runtime_output
   end
 
-  def wait_for_runtime_output(output, runtime_output, pattern, count: 1)
-    Timeout.timeout(2) do
+  def wait_for_runtime_output(output, runtime_output, pattern, count: 1, timeout: 2)
+    Timeout.timeout(timeout) do
       loop do
         runtime_output << read_available_output(output)
         break if runtime_output.scan(pattern).size >= count
@@ -202,7 +202,12 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
       startup_output = []
       selected_port = wait_for_banner(output, captured_lines: startup_output)
       responses, runtime_output = queue_capacity_responses(selected_port, wait_thread, output)
-      status = stop_process(wait_thread)
+      status = begin
+        stop_process(wait_thread)
+      rescue Timeout::Error
+        Process.kill('KILL', wait_thread.pid)
+        wait_thread.value
+      end
 
       {
         exitstatus: status.exitstatus,
@@ -822,23 +827,31 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
         "#{body}"
     end
 
-    result = concurrent_rack_app_request_results(
+    result = worker_replacement_request_results(
       script:,
-      requests: [request.call('hang'), request.call('fast'), request.call('queued')]
+      initial_requests: [request.call('hang'), request.call('fast'), request.call('queued')],
+      follow_up_request: request.call('after-replacement')
     )
 
-    responses = result[:responses].map { |response| parse_http_response(response) }
+    responses = result[:responses]
     expect(responses.count { |response| response[:status_line] == 'HTTP/1.1 200 OK' }).to eq(2)
     expect(responses.count { |response| response[:status_line] == 'HTTP/1.1 500 Internal Server Error' }).to eq(1)
+    # rubocop:disable Rails/Pluck
     expect(responses.select { |response| response[:status_line] == 'HTTP/1.1 200 OK' }.map { |response| response[:body] })
       .to include('fast', 'queued')
+    # rubocop:enable Rails/Pluck
+    expect(result[:follow_up_response]).to include(
+      status_line: 'HTTP/1.1 200 OK',
+      body: 'after-replacement'
+    )
     expect(result[:output]).to include('event=worker_timeout')
     expect(result[:output]).to include('worker process exited unexpectedly due to signal 9')
     expect(result[:output]).to include(
       'event=worker_exited',
       'exit_classification=unexpected_signal',
       'event=worker_replacement_pending',
-      'replacement_needed=true'
+      'replacement_needed=true',
+      'event=worker_replacement_ready'
     )
   end
 

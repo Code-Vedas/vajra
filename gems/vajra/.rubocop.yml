@@ -3,6 +3,7 @@ plugins:
   - rubocop-performance
   - rubocop-thread_safety
   - rubocop-rake
+  - rubocop-rails
 AllCops:
   NewCops: enable
   TargetRubyVersion: 3.2

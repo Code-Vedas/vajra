@@ -314,6 +314,7 @@ void Vajra::runtime::log_worker_lifecycle_event(
     }
     line << '}';
     write_runtime_line(line.str());
+    flush_runtime_streams();
     return;
   }
 
@@ -332,6 +333,7 @@ void Vajra::runtime::log_worker_lifecycle_event(
     line << " exit_detail=" << exit_detail;
   }
   write_runtime_line(line.str());
+  flush_runtime_streams();
 }
 
 void Vajra::runtime::log_unexpected_worker_exit(
@@ -342,12 +344,15 @@ void Vajra::runtime::log_unexpected_worker_exit(
   {
     case WorkerExitClassification::unexpected_status:
       write_runtime_line("worker process exited unexpectedly with status " + std::to_string(exit_detail));
+      flush_runtime_streams();
       return;
     case WorkerExitClassification::unexpected_signal:
       write_runtime_line("worker process exited unexpectedly due to signal " + std::to_string(exit_detail));
+      flush_runtime_streams();
       return;
     case WorkerExitClassification::unexpected_exit:
       write_runtime_line("worker process exited unexpectedly");
+      flush_runtime_streams();
       return;
     default:
       return;
@@ -389,10 +394,12 @@ void Vajra::runtime::log_runtime_error(const std::string &message)
     write_error_line(
         "{\"component\":\"error\",\"timestamp\":\"" + utc_timestamp() + "\",\"message\":" +
         escaped_log_value(message) + "}");
+    flush_runtime_streams();
     return;
   }
 
   write_error_line("[Vajra][error] " + utc_timestamp() + ' ' + message);
+  flush_runtime_streams();
 }
 
 void Vajra::runtime::log_access_event(const std::string &method, const std::string &target, int status_code)

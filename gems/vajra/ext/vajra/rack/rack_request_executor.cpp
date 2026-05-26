@@ -1195,6 +1195,65 @@ namespace
     std::cout << "[Vajra][scheduler] " << message << std::endl;
   }
 
+  const char *worker_lifecycle_state_name(Vajra::runtime::WorkerLifecycleState lifecycle_state)
+  {
+    switch (lifecycle_state)
+    {
+      case Vajra::runtime::WorkerLifecycleState::booting:
+        return "booting";
+      case Vajra::runtime::WorkerLifecycleState::ready:
+        return "ready";
+      case Vajra::runtime::WorkerLifecycleState::stopping:
+        return "stopping";
+      case Vajra::runtime::WorkerLifecycleState::exited:
+        return "exited";
+    }
+
+    return "unknown";
+  }
+
+  const char *worker_health_state_name(Vajra::runtime::WorkerHealthState state)
+  {
+    switch (state)
+    {
+      case Vajra::runtime::WorkerHealthState::healthy:
+        return "healthy";
+      case Vajra::runtime::WorkerHealthState::busy:
+        return "busy";
+      case Vajra::runtime::WorkerHealthState::overloaded:
+        return "overloaded";
+      case Vajra::runtime::WorkerHealthState::degraded:
+        return "degraded";
+      case Vajra::runtime::WorkerHealthState::suspect:
+        return "suspect";
+      case Vajra::runtime::WorkerHealthState::wedged:
+        return "wedged";
+    }
+
+    return "unknown";
+  }
+
+  const char *worker_recovery_state_name(Vajra::runtime::WorkerRecoveryState state)
+  {
+    switch (state)
+    {
+      case Vajra::runtime::WorkerRecoveryState::none:
+        return "none";
+      case Vajra::runtime::WorkerRecoveryState::draining:
+        return "draining";
+      case Vajra::runtime::WorkerRecoveryState::terminating:
+        return "terminating";
+      case Vajra::runtime::WorkerRecoveryState::replacing:
+        return "replacing";
+      case Vajra::runtime::WorkerRecoveryState::rejoin_pending:
+        return "rejoin_pending";
+      case Vajra::runtime::WorkerRecoveryState::terminal_failure:
+        return "terminal_failure";
+    }
+
+    return "unknown";
+  }
+
   struct PendingRequest;
   class GlobalQueuedWorkerProcessRackExecutionTransport;
 
@@ -1226,6 +1285,7 @@ namespace
     std::uint64_t request_id = 0;
     int client_fd = -1;
     std::vector<Vajra::request::RackEnvEntry> env_entries;
+    std::chrono::steady_clock::time_point enqueued_at;
     std::chrono::steady_clock::time_point deadline;
     std::atomic_bool assigned = false;
     std::atomic_bool released = false;
@@ -1364,11 +1424,26 @@ namespace
     std::string stats_payload_json() const override
     {
       std::lock_guard<std::mutex> lock(scheduler_mutex_);
+      const auto now = std::chrono::steady_clock::now();
+      update_worker_queue_pressure_locked(now);
+      std::size_t healthy_workers = 0;
+      std::size_t busy_workers = 0;
+      std::size_t overloaded_workers = 0;
+      std::size_t degraded_workers = 0;
+      std::size_t suspect_workers = 0;
+      std::size_t wedged_workers = 0;
       std::ostringstream payload;
       payload << '{'
               << "\"scheduler_policy\":\"least_loaded\","
               << "\"queue_depth\":" << queued_request_count_ << ','
               << "\"queue_capacity\":" << queue_capacity_ << ','
+              << "\"oldest_queue_age_nanoseconds\":"
+              << std::chrono::duration_cast<std::chrono::nanoseconds>(oldest_queue_age_locked(now)).count() << ','
+              << "\"tracing\":{\"enabled\":" << (Vajra::runtime::runtime_tracing_enabled() ? "true" : "false")
+              << ",\"available\":" << (Vajra::runtime::runtime_tracing_available() ? "true" : "false")
+              << ",\"endpoint\":\"" << Vajra::runtime::runtime_tracing_endpoint() << "\""
+              << ",\"service_name\":\"" << Vajra::runtime::runtime_tracing_service_name() << "\"},"
+              << "\"request_admission_rejections\":" << request_admission_rejection_count_ << ','
               << "\"workers\":[";
       for (std::size_t index = 0; index < slots_.size(); ++index)
       {
@@ -1378,35 +1453,96 @@ namespace
         }
         const std::shared_ptr<WorkerSlot> &slot = slots_[index];
         sync_slot_channels_locked(slot);
+        const auto health_state = slot->state->health_state.load(std::memory_order_acquire);
+        switch (health_state)
+        {
+          case Vajra::runtime::WorkerHealthState::healthy: ++healthy_workers; break;
+          case Vajra::runtime::WorkerHealthState::busy: ++busy_workers; break;
+          case Vajra::runtime::WorkerHealthState::overloaded: ++overloaded_workers; break;
+          case Vajra::runtime::WorkerHealthState::degraded: ++degraded_workers; break;
+          case Vajra::runtime::WorkerHealthState::suspect: ++suspect_workers; break;
+          case Vajra::runtime::WorkerHealthState::wedged: ++wedged_workers; break;
+        }
         payload << '{'
                 << "\"worker_index\":" << slot->state->worker_index << ','
                 << "\"active_channels\":" << inflight_count_locked(*slot) << ','
                 << "\"channel_capacity\":" << slot->channels.size() << ','
+                << "\"active_execution_count\":" << slot->state->active_execution_count.load(std::memory_order_acquire) << ','
+                << "\"idle_execution_count\":" << slot->state->idle_execution_count.load(std::memory_order_acquire) << ','
+                << "\"local_queue_depth\":" << slot->state->local_queue_depth.load(std::memory_order_acquire) << ','
+                << "\"oldest_local_queue_age_nanoseconds\":"
+                << slot->state->oldest_local_queue_age_nanoseconds.load(std::memory_order_acquire) << ','
                 << "\"available\":" << (slot->state->available.load(std::memory_order_acquire) ? "true" : "false")
                 << ",\"lifecycle_state\":" << static_cast<int>(slot->state->lifecycle_state.load(std::memory_order_acquire))
-                << ",\"health_state\":" << static_cast<int>(slot->state->health_state.load(std::memory_order_acquire))
+                << ",\"lifecycle_state_name\":\""
+                << worker_lifecycle_state_name(slot->state->lifecycle_state.load(std::memory_order_acquire)) << "\""
+                << ",\"health_state\":" << static_cast<int>(health_state)
+                << ",\"health_state_name\":\"" << worker_health_state_name(health_state) << "\""
+                << ",\"recovery_state_name\":\""
+                << worker_recovery_state_name(slot->state->recovery_state.load(std::memory_order_acquire)) << "\""
+                << ",\"replacement_attempt_count\":" << slot->state->replacement_attempt_count.load(std::memory_order_acquire)
+                << ",\"replacement_success_count\":" << slot->state->replacement_success_count.load(std::memory_order_acquire)
+                << ",\"replacement_failure_count\":" << slot->state->replacement_failure_count.load(std::memory_order_acquire)
+                << ",\"health_transition_count\":" << slot->state->health_transition_count.load(std::memory_order_acquire)
+                << ",\"timeout_escalation_count\":" << slot->state->timeout_escalation_count.load(std::memory_order_acquire)
+                << ",\"terminal_replacement_failure\":"
+                << (slot->state->terminal_replacement_failure.load(std::memory_order_acquire) ? "true" : "false")
                 << '}';
       }
-      payload << "]}";
+      payload << "],\"health_counts\":{\"healthy\":" << healthy_workers
+              << ",\"busy\":" << busy_workers
+              << ",\"overloaded\":" << overloaded_workers
+              << ",\"degraded\":" << degraded_workers
+              << ",\"suspect\":" << suspect_workers
+              << ",\"wedged\":" << wedged_workers
+              << "}}";
       return payload.str();
     }
 
     std::string metrics_payload_text() const override
     {
       std::lock_guard<std::mutex> lock(scheduler_mutex_);
+      const auto now = std::chrono::steady_clock::now();
+      update_worker_queue_pressure_locked(now);
       std::ostringstream payload;
       payload << "vajra_scheduler_queue_depth " << queued_request_count_ << '\n';
       payload << "vajra_scheduler_queue_capacity " << queue_capacity_ << '\n';
+      payload << "vajra_scheduler_oldest_queue_age_nanoseconds "
+              << std::chrono::duration_cast<std::chrono::nanoseconds>(oldest_queue_age_locked(now)).count() << '\n';
+      payload << "vajra_request_admission_rejections_total " << request_admission_rejection_count_ << '\n';
+      payload << "vajra_tracing_enabled " << (Vajra::runtime::runtime_tracing_enabled() ? 1 : 0) << '\n';
+      payload << "vajra_tracing_available " << (Vajra::runtime::runtime_tracing_available() ? 1 : 0) << '\n';
       for (const auto &slot : slots_)
       {
         sync_slot_channels_locked(slot);
         const std::size_t worker_index = slot->state->worker_index;
+        const auto health_state = slot->state->health_state.load(std::memory_order_acquire);
         payload << "vajra_worker_active_channels{worker=\"" << worker_index << "\"} "
                 << inflight_count_locked(*slot) << '\n';
         payload << "vajra_worker_channel_capacity{worker=\"" << worker_index << "\"} "
                 << slot->channels.size() << '\n';
         payload << "vajra_worker_available{worker=\"" << worker_index << "\"} "
                 << (slot->state->available.load(std::memory_order_acquire) ? 1 : 0) << '\n';
+        payload << "vajra_worker_active_executions{worker=\"" << worker_index << "\"} "
+                << slot->state->active_execution_count.load(std::memory_order_acquire) << '\n';
+        payload << "vajra_worker_idle_executions{worker=\"" << worker_index << "\"} "
+                << slot->state->idle_execution_count.load(std::memory_order_acquire) << '\n';
+        payload << "vajra_worker_local_queue_depth{worker=\"" << worker_index << "\"} "
+                << slot->state->local_queue_depth.load(std::memory_order_acquire) << '\n';
+        payload << "vajra_worker_oldest_queue_age_nanoseconds{worker=\"" << worker_index << "\"} "
+                << slot->state->oldest_local_queue_age_nanoseconds.load(std::memory_order_acquire) << '\n';
+        payload << "vajra_worker_health_state{worker=\"" << worker_index
+                << "\",state=\"" << worker_health_state_name(health_state) << "\"} 1\n";
+        payload << "vajra_worker_replacements_started_total{worker=\"" << worker_index << "\"} "
+                << slot->state->replacement_attempt_count.load(std::memory_order_acquire) << '\n';
+        payload << "vajra_worker_replacements_completed_total{worker=\"" << worker_index << "\"} "
+                << slot->state->replacement_success_count.load(std::memory_order_acquire) << '\n';
+        payload << "vajra_worker_replacements_failed_total{worker=\"" << worker_index << "\"} "
+                << slot->state->replacement_failure_count.load(std::memory_order_acquire) << '\n';
+        payload << "vajra_worker_timeout_escalations_total{worker=\"" << worker_index << "\"} "
+                << slot->state->timeout_escalation_count.load(std::memory_order_acquire) << '\n';
+        payload << "vajra_worker_terminal_replacement_failure{worker=\"" << worker_index << "\"} "
+                << (slot->state->terminal_replacement_failure.load(std::memory_order_acquire) ? 1 : 0) << '\n';
       }
       return payload.str();
     }
@@ -1454,9 +1590,9 @@ namespace
           const std::optional<std::pair<std::size_t, std::size_t>> assignment = least_busy_channel_locked();
           if (assignment.has_value())
           {
-        const std::shared_ptr<WorkerSlot> slot = slot_for(assignment->first);
-        sync_slot_channels_locked(slot);
-        slot->channels[assignment->second].busy = true;
+            const std::shared_ptr<WorkerSlot> slot = slot_for(assignment->first);
+            sync_slot_channels_locked(slot);
+            slot->channels[assignment->second].busy = true;
             const std::size_t inflight = inflight_count_locked(*slot);
             pending_request->assigned = true;
             pending_request->worker_index = assignment->first;
@@ -1479,6 +1615,7 @@ namespace
             pending_request->enqueued = false;
             --queued_request_count_;
             pending_requests_.pop_front();
+            update_worker_queue_pressure_locked(now);
             break;
           }
         }
@@ -1530,6 +1667,7 @@ namespace
         {
           --slot->active_channels;
         }
+        update_worker_queue_pressure_locked(std::chrono::steady_clock::now());
       }
       scheduler_condition_.notify_all();
     }
@@ -1547,6 +1685,7 @@ namespace
         {
           pending_request->canceled = true;
           erase_pending_request_locked(pending_request);
+          update_worker_queue_pressure_locked(std::chrono::steady_clock::now());
         }
       }
       if (release_assigned_channel)
@@ -1614,6 +1753,50 @@ namespace
           [](const WorkerChannel &channel) { return channel.busy; }));
     }
 
+    std::chrono::steady_clock::duration oldest_queue_age_locked(std::chrono::steady_clock::time_point now) const
+    {
+      for (const auto &pending_request : pending_requests_)
+      {
+        if (pending_request->assigned.load() ||
+            pending_request->canceled.load() ||
+            pending_request->timed_out.load() ||
+            pending_request->client_gone.load())
+        {
+          continue;
+        }
+        return now - pending_request->enqueued_at;
+      }
+
+      return std::chrono::steady_clock::duration::zero();
+    }
+
+    void update_worker_queue_pressure_locked(std::chrono::steady_clock::time_point now) const
+    {
+      const auto oldest_queue_age = oldest_queue_age_locked(now);
+      const auto oldest_queue_age_nanoseconds =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(oldest_queue_age).count();
+
+      for (const auto &slot : slots_)
+      {
+        sync_slot_channels_locked(slot);
+        const std::size_t inflight = inflight_count_locked(*slot);
+        const std::size_t channel_capacity = slot->channels.size();
+        const bool saturated = channel_capacity > 0 && inflight >= channel_capacity;
+        const std::size_t local_queue_depth = saturated ? queued_request_count_ : 0;
+
+        slot->state->active_execution_count.store(inflight, std::memory_order_release);
+        slot->state->idle_execution_count.store(channel_capacity - std::min(inflight, channel_capacity), std::memory_order_release);
+        slot->state->local_queue_depth.store(local_queue_depth, std::memory_order_release);
+        slot->state->oldest_local_queue_age_nanoseconds.store(
+            local_queue_depth > 0 ? oldest_queue_age_nanoseconds : 0,
+            std::memory_order_release);
+        if (local_queue_depth == 0)
+        {
+          slot->state->overload_started_nanoseconds.store(0, std::memory_order_release);
+        }
+      }
+    }
+
     std::shared_ptr<PendingRequest> admit_request(
         const std::vector<Vajra::request::RackEnvEntry> &env_entries,
         int client_fd) const
@@ -1622,8 +1805,10 @@ namespace
       const auto now = std::chrono::steady_clock::now();
       prune_queue_locked(now);
       prune_queue_head_locked(now);
+      update_worker_queue_pressure_locked(now);
       if (queued_request_count_ >= queue_capacity_)
       {
+        ++request_admission_rejection_count_;
         log_scheduler_debug_event(
             "event=queue_capacity_reached policy=least_loaded queue_capacity=" + std::to_string(queue_capacity_),
             debug_logging_);
@@ -1635,10 +1820,12 @@ namespace
       pending_request->request_id = next_request_id_++;
       pending_request->client_fd = client_fd;
       pending_request->env_entries = env_entries;
+      pending_request->enqueued_at = now;
       pending_request->deadline = std::chrono::steady_clock::now() + request_timeout_;
       pending_request->enqueued = true;
       pending_requests_.push_back(pending_request);
       ++queued_request_count_;
+      update_worker_queue_pressure_locked(now);
       scheduler_condition_.notify_all();
       return pending_request;
     }
@@ -1787,6 +1974,7 @@ namespace
         pending_request->enqueued = false;
         --queued_request_count_;
         pending_requests_.pop_front();
+        update_worker_queue_pressure_locked(now);
       }
     }
 
@@ -1817,6 +2005,7 @@ namespace
                 return true;
               }),
           pending_requests_.end());
+      update_worker_queue_pressure_locked(now);
     }
 
     void erase_pending_request_locked(const std::shared_ptr<PendingRequest> &pending_request) const
@@ -1833,6 +2022,7 @@ namespace
         --queued_request_count_;
       }
       pending_requests_.erase(iterator);
+      update_worker_queue_pressure_locked(std::chrono::steady_clock::now());
     }
 
     std::size_t queue_depth() const
@@ -1861,6 +2051,7 @@ namespace
         {
           prune_queue_locked(std::chrono::steady_clock::now());
           prune_queue_head_locked(std::chrono::steady_clock::now());
+          update_worker_queue_pressure_locked(std::chrono::steady_clock::now());
           scheduler_condition_.notify_all();
           scheduler_condition_.wait_for(lock, kQueueHousekeepingInterval, [this]() {
             return housekeeping_stop_requested_ || queued_request_count_ == 0;
@@ -1882,6 +2073,7 @@ namespace
     mutable std::condition_variable scheduler_condition_;
     mutable std::deque<std::shared_ptr<PendingRequest>> pending_requests_;
     mutable std::size_t queued_request_count_ = 0;
+    mutable std::uint64_t request_admission_rejection_count_ = 0;
     mutable std::uint64_t next_request_id_ = 0;
     mutable std::size_t next_preferred_worker_ = 0;
     mutable bool housekeeping_stop_requested_ = false;

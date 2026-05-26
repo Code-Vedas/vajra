@@ -64,6 +64,8 @@ module Vajra
         error_log
         stats_path
         metrics_endpoint
+        trace_endpoint
+        trace_service_name
         pidfile
         state_path
         control_socket
@@ -75,6 +77,7 @@ module Vajra
         tls
         http2
         structured_logs
+        trace_enabled
       ].freeze
     }.freeze
     DOCUMENTED_SERVER_SETTINGS = SETTING_TYPE_GROUPS.values.flatten.freeze

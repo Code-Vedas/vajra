@@ -38,7 +38,10 @@ namespace VajraNative
       std::string error_log = "",
       bool structured_logs = false,
       std::string stats_path = "",
-      std::string metrics_endpoint = "");
+      std::string metrics_endpoint = "",
+      bool trace_enabled = false,
+      std::string trace_endpoint = "",
+      std::string trace_service_name = "");
   void stop();
 }
 

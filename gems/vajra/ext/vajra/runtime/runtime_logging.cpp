@@ -5,6 +5,12 @@
 
 #include "runtime/runtime_logging.hpp"
 
+#if __has_include("ruby.h")
+#include "ruby.h"
+#include "ruby/thread.h"
+#define VAJRA_RUNTIME_HAS_RUBY 1
+#endif
+
 #include <chrono>
 #include <cctype>
 #include <cstdlib>
@@ -15,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <cstdint>
 #include <unistd.h>
 
 std::string Vajra::runtime::utc_timestamp()
@@ -53,14 +60,38 @@ namespace
   struct LoggingConfig
   {
     bool structured_logs = false;
+    bool trace_enabled = false;
+    bool trace_available = false;
     std::string access_log_path;
     std::string error_log_path;
+    std::string trace_endpoint;
+    std::string trace_service_name;
     std::unique_ptr<std::ofstream> access_log_stream;
     std::unique_ptr<std::ofstream> error_log_stream;
   };
 
   std::mutex logging_mutex;
   LoggingConfig logging_config;
+#ifdef VAJRA_RUNTIME_HAS_RUBY
+  VALUE runtime_lifecycle_callback = Qnil;
+
+  struct LifecycleCallbackContext
+  {
+    VALUE callback = Qnil;
+    std::string event_name;
+    std::size_t worker_index = 0;
+    pid_t pid = -1;
+    std::string lifecycle_state;
+    std::string health_state;
+    std::string recovery_state;
+    bool available = false;
+    std::string exit_classification;
+    bool terminal_replacement_failure = false;
+    bool replacement_needed = false;
+    int exit_detail = 0;
+    std::string timestamp;
+  };
+#endif
 
   const char *worker_lifecycle_state_name(Vajra::runtime::WorkerLifecycleState lifecycle_state)
   {
@@ -116,6 +147,27 @@ namespace
         return "suspect";
       case Vajra::runtime::WorkerHealthState::wedged:
         return "wedged";
+    }
+
+    return "unknown";
+  }
+
+  const char *worker_recovery_state_name(Vajra::runtime::WorkerRecoveryState state)
+  {
+    switch (state)
+    {
+      case Vajra::runtime::WorkerRecoveryState::none:
+        return "none";
+      case Vajra::runtime::WorkerRecoveryState::draining:
+        return "draining";
+      case Vajra::runtime::WorkerRecoveryState::terminating:
+        return "terminating";
+      case Vajra::runtime::WorkerRecoveryState::replacing:
+        return "replacing";
+      case Vajra::runtime::WorkerRecoveryState::rejoin_pending:
+        return "rejoin_pending";
+      case Vajra::runtime::WorkerRecoveryState::terminal_failure:
+        return "terminal_failure";
     }
 
     return "unknown";
@@ -186,6 +238,97 @@ namespace
   {
     const std::lock_guard<std::mutex> lock(logging_mutex);
     return logging_config.structured_logs;
+  }
+
+#ifdef VAJRA_RUNTIME_HAS_RUBY
+  VALUE invoke_runtime_lifecycle_callback(VALUE payload)
+  {
+    auto *callback_context = reinterpret_cast<LifecycleCallbackContext *>(payload);
+    VALUE event = rb_hash_new();
+    rb_hash_aset(event, ID2SYM(rb_intern("event")), rb_str_new_cstr(callback_context->event_name.c_str()));
+    rb_hash_aset(event, ID2SYM(rb_intern("worker_index")), ULL2NUM(callback_context->worker_index));
+    rb_hash_aset(event, ID2SYM(rb_intern("pid")), INT2NUM(callback_context->pid));
+    rb_hash_aset(event, ID2SYM(rb_intern("lifecycle_state")), rb_str_new_cstr(callback_context->lifecycle_state.c_str()));
+    rb_hash_aset(event, ID2SYM(rb_intern("health_state")), rb_str_new_cstr(callback_context->health_state.c_str()));
+    rb_hash_aset(event, ID2SYM(rb_intern("recovery_state")), rb_str_new_cstr(callback_context->recovery_state.c_str()));
+    rb_hash_aset(event, ID2SYM(rb_intern("available")), callback_context->available ? Qtrue : Qfalse);
+    rb_hash_aset(event, ID2SYM(rb_intern("exit_classification")), rb_str_new_cstr(callback_context->exit_classification.c_str()));
+    rb_hash_aset(
+        event,
+        ID2SYM(rb_intern("terminal_replacement_failure")),
+        callback_context->terminal_replacement_failure ? Qtrue : Qfalse);
+    rb_hash_aset(event, ID2SYM(rb_intern("replacement_needed")), callback_context->replacement_needed ? Qtrue : Qfalse);
+    rb_hash_aset(event, ID2SYM(rb_intern("exit_detail")), INT2NUM(callback_context->exit_detail));
+    rb_hash_aset(event, ID2SYM(rb_intern("timestamp")), rb_str_new_cstr(callback_context->timestamp.c_str()));
+    return rb_funcall(callback_context->callback, rb_intern("call"), 1, event);
+  }
+
+  void *emit_lifecycle_callback_with_gvl(void *data)
+  {
+    auto *context = reinterpret_cast<LifecycleCallbackContext *>(data);
+    if (NIL_P(context->callback))
+    {
+      return nullptr;
+    }
+
+    int state = 0;
+    rb_protect(invoke_runtime_lifecycle_callback, reinterpret_cast<VALUE>(context), &state);
+    return nullptr;
+  }
+#endif
+
+  void emit_runtime_lifecycle_callback(
+      const char *event_name,
+      std::size_t worker_index,
+      pid_t pid,
+      Vajra::runtime::WorkerLifecycleState lifecycle_state,
+      Vajra::runtime::WorkerHealthState health_state,
+      Vajra::runtime::WorkerRecoveryState recovery_state,
+      bool available,
+      Vajra::runtime::WorkerExitClassification exit_classification,
+      bool terminal_replacement_failure,
+      bool replacement_needed,
+      int exit_detail)
+  {
+#ifdef VAJRA_RUNTIME_HAS_RUBY
+    VALUE callback = Qnil;
+    {
+      const std::lock_guard<std::mutex> lock(logging_mutex);
+      callback = runtime_lifecycle_callback;
+    }
+    if (NIL_P(callback))
+    {
+      return;
+    }
+
+    LifecycleCallbackContext context;
+    context.callback = callback;
+    context.event_name = event_name;
+    context.worker_index = worker_index;
+    context.pid = pid;
+    context.lifecycle_state = worker_lifecycle_state_name(lifecycle_state);
+    context.health_state = worker_health_state_name(health_state);
+    context.recovery_state = worker_recovery_state_name(recovery_state);
+    context.available = available;
+    context.exit_classification = worker_exit_classification_name(exit_classification);
+    context.terminal_replacement_failure = terminal_replacement_failure;
+    context.replacement_needed = replacement_needed;
+    context.exit_detail = exit_detail;
+    context.timestamp = Vajra::runtime::utc_timestamp();
+    rb_thread_call_with_gvl(emit_lifecycle_callback_with_gvl, &context);
+#else
+    (void)event_name;
+    (void)worker_index;
+    (void)pid;
+    (void)lifecycle_state;
+    (void)health_state;
+    (void)recovery_state;
+    (void)available;
+    (void)exit_classification;
+    (void)terminal_replacement_failure;
+    (void)replacement_needed;
+    (void)exit_detail;
+#endif
   }
 
   void write_runtime_line(const std::string &line)
@@ -274,6 +417,67 @@ void Vajra::runtime::configure_runtime_logging(
   }
 }
 
+void Vajra::runtime::configure_runtime_tracing(
+    bool trace_enabled,
+    const std::string &trace_endpoint,
+    const std::string &trace_service_name)
+{
+  const std::lock_guard<std::mutex> lock(logging_mutex);
+  logging_config.trace_enabled = trace_enabled;
+  logging_config.trace_endpoint = trace_endpoint;
+  logging_config.trace_service_name = trace_service_name;
+  if (!trace_enabled)
+  {
+    logging_config.trace_available = false;
+  }
+}
+
+void Vajra::runtime::set_runtime_tracing_available(bool available)
+{
+  const std::lock_guard<std::mutex> lock(logging_mutex);
+  logging_config.trace_available = available;
+}
+
+bool Vajra::runtime::runtime_tracing_enabled()
+{
+  const std::lock_guard<std::mutex> lock(logging_mutex);
+  return logging_config.trace_enabled;
+}
+
+bool Vajra::runtime::runtime_tracing_available()
+{
+  const std::lock_guard<std::mutex> lock(logging_mutex);
+  return logging_config.trace_available;
+}
+
+std::string Vajra::runtime::runtime_tracing_endpoint()
+{
+  const std::lock_guard<std::mutex> lock(logging_mutex);
+  return logging_config.trace_endpoint;
+}
+
+std::string Vajra::runtime::runtime_tracing_service_name()
+{
+  const std::lock_guard<std::mutex> lock(logging_mutex);
+  return logging_config.trace_service_name;
+}
+
+void Vajra::runtime::set_runtime_lifecycle_callback(void *callback)
+{
+#ifdef VAJRA_RUNTIME_HAS_RUBY
+  static bool callback_rooted = false;
+  if (!callback_rooted)
+  {
+    rb_global_variable(&runtime_lifecycle_callback);
+    callback_rooted = true;
+  }
+  const std::lock_guard<std::mutex> lock(logging_mutex);
+  runtime_lifecycle_callback = reinterpret_cast<VALUE>(callback);
+#else
+  (void)callback;
+#endif
+}
+
 void Vajra::runtime::flush_runtime_logs()
 {
   flush_runtime_streams();
@@ -305,8 +509,10 @@ void Vajra::runtime::log_worker_lifecycle_event(
     pid_t pid,
     WorkerLifecycleState lifecycle_state,
     WorkerHealthState health_state,
+    WorkerRecoveryState recovery_state,
     bool available,
     WorkerExitClassification exit_classification,
+    bool terminal_replacement_failure,
     bool replacement_needed,
     int exit_detail)
 {
@@ -320,8 +526,12 @@ void Vajra::runtime::log_worker_lifecycle_event(
          << ",\"pid\":" << pid
          << ",\"lifecycle\":\"" << worker_lifecycle_state_name(lifecycle_state) << "\""
          << ",\"health_state\":\"" << worker_health_state_name(health_state) << "\""
+         << ",\"recovery_state\":\"" << worker_recovery_state_name(recovery_state) << "\""
          << ",\"availability\":\"" << (available ? "available" : "unavailable") << "\""
          << ",\"exit_classification\":\"" << worker_exit_classification_name(exit_classification) << "\""
+         << ",\"terminal_replacement_failure\":" << (terminal_replacement_failure ? "true" : "false")
+         << ",\"tracing_enabled\":" << (runtime_tracing_enabled() ? "true" : "false")
+         << ",\"tracing_available\":" << (runtime_tracing_available() ? "true" : "false")
          << ",\"replacement_needed\":" << (replacement_needed ? "true" : "false");
     if (exit_detail != 0)
     {
@@ -330,6 +540,18 @@ void Vajra::runtime::log_worker_lifecycle_event(
     line << '}';
     write_runtime_line(line.str());
     flush_runtime_streams();
+    emit_runtime_lifecycle_callback(
+        event_name,
+        worker_index,
+        pid,
+        lifecycle_state,
+        health_state,
+        recovery_state,
+        available,
+        exit_classification,
+        terminal_replacement_failure,
+        replacement_needed,
+        exit_detail);
     return;
   }
 
@@ -340,8 +562,12 @@ void Vajra::runtime::log_worker_lifecycle_event(
        << " pid=" << pid
        << " lifecycle=" << worker_lifecycle_state_name(lifecycle_state)
        << " health_state=" << worker_health_state_name(health_state)
+       << " recovery_state=" << worker_recovery_state_name(recovery_state)
        << " availability=" << (available ? "available" : "unavailable")
        << " exit_classification=" << worker_exit_classification_name(exit_classification)
+       << " terminal_replacement_failure=" << (terminal_replacement_failure ? "true" : "false")
+       << " tracing_enabled=" << (runtime_tracing_enabled() ? "true" : "false")
+       << " tracing_available=" << (runtime_tracing_available() ? "true" : "false")
        << " replacement_needed=" << (replacement_needed ? "true" : "false");
   if (exit_detail != 0)
   {
@@ -349,6 +575,18 @@ void Vajra::runtime::log_worker_lifecycle_event(
   }
   write_runtime_line(line.str());
   flush_runtime_streams();
+  emit_runtime_lifecycle_callback(
+      event_name,
+      worker_index,
+      pid,
+      lifecycle_state,
+      health_state,
+      recovery_state,
+      available,
+      exit_classification,
+      terminal_replacement_failure,
+      replacement_needed,
+      exit_detail);
 }
 
 void Vajra::runtime::log_unexpected_worker_exit(

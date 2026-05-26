@@ -27,9 +27,12 @@ namespace Vajra
   {
     struct HealthPolicy
     {
+      std::int64_t overload_oldest_queue_age_nanoseconds = 0;
+      std::int64_t overload_recovery_threshold_nanoseconds = 0;
       std::int64_t suspect_threshold_nanoseconds = 0;
       std::int64_t wedged_threshold_nanoseconds = 0;
       std::int64_t degraded_decay_nanoseconds = 0;
+      std::int64_t drain_deadline_nanoseconds = 0;
     };
 
     struct WorkerSpawnConfig

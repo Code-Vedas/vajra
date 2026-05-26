@@ -50,7 +50,7 @@ module Vajra
         return nil if app.equal?(nil)
 
         env = build_env(env_entries, request_body)
-        status, headers, body = app.call(env)
+        status, headers, body = Vajra::Internal::Tracing.with_request_span(env) { app.call(env) }
         normalize_response(status, headers, body) do
           body_close_managed = true
         end

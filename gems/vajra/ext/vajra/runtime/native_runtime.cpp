@@ -374,6 +374,13 @@ namespace
     worker_state->last_lifecycle_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
   }
 
+  void mark_recovery_transition(
+      const std::shared_ptr<Vajra::runtime::SharedWorkerState> &worker_state,
+      Vajra::runtime::WorkerRecoveryState recovery_state)
+  {
+    worker_state->recovery_state.store(recovery_state, std::memory_order_release);
+  }
+
   bool health_requires_quarantine(Vajra::runtime::WorkerHealthState state)
   {
     return state == Vajra::runtime::WorkerHealthState::overloaded ||
@@ -385,6 +392,10 @@ namespace
   Vajra::runtime::HealthPolicy health_policy_for(const Vajra::runtime::RuntimeConfig &config)
   {
     return Vajra::runtime::HealthPolicy{
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::milliseconds(250)).count(),
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::seconds(std::max(2, config.worker_timeout_seconds / 2)))
+            .count(),
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::seconds(std::max(5, config.worker_timeout_seconds / 2)))
             .count(),
@@ -393,6 +404,9 @@ namespace
             .count(),
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::seconds(std::max(30, config.worker_timeout_seconds * 2)))
+            .count(),
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::seconds(std::max(1, config.worker_timeout_seconds)))
             .count()};
   }
 
@@ -534,8 +548,10 @@ std::shared_ptr<Vajra::runtime::SharedWorkerState> Vajra::runtime::NativeRuntime
         pid,
         WorkerLifecycleState::booting,
         worker_state->health_state.load(std::memory_order_acquire),
+        worker_state->recovery_state.load(std::memory_order_acquire),
         false,
         WorkerExitClassification::none,
+        worker_state->terminal_replacement_failure.load(std::memory_order_acquire),
         false,
         0);
   }
@@ -552,6 +568,10 @@ void Vajra::runtime::NativeRuntime::mark_worker_ready(const std::shared_ptr<Shar
   worker_state->timeout_kill_deadline_nanoseconds.store(0, std::memory_order_release);
   worker_state->timeout_handling_started.store(false, std::memory_order_release);
   worker_state->available.store(true, std::memory_order_release);
+  worker_state->terminal_replacement_failure.store(false, std::memory_order_release);
+  worker_state->overload_started_nanoseconds.store(0, std::memory_order_release);
+  worker_state->recovery_deadline_nanoseconds.store(0, std::memory_order_release);
+  mark_recovery_transition(worker_state, WorkerRecoveryState::none);
   mark_lifecycle_transition(worker_state, WorkerLifecycleState::ready);
   worker_state->health_state.store(WorkerHealthState::healthy, std::memory_order_release);
   worker_state->last_health_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
@@ -563,8 +583,10 @@ void Vajra::runtime::NativeRuntime::mark_worker_ready(const std::shared_ptr<Shar
         worker_state->pid.load(std::memory_order_acquire),
         WorkerLifecycleState::ready,
         worker_state->health_state.load(std::memory_order_acquire),
+        worker_state->recovery_state.load(std::memory_order_acquire),
         true,
         WorkerExitClassification::none,
+        worker_state->terminal_replacement_failure.load(std::memory_order_acquire),
         false,
         0);
   }
@@ -595,6 +617,7 @@ void Vajra::runtime::NativeRuntime::mark_worker_stopping(const std::shared_ptr<S
   worker_state->last_lifecycle_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
   worker_state->available.store(false, std::memory_order_release);
   worker_state->health_state.store(WorkerHealthState::degraded, std::memory_order_release);
+  mark_recovery_transition(worker_state, WorkerRecoveryState::draining);
   worker_state->last_health_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
   if (debug_logging_.load(std::memory_order_acquire))
   {
@@ -604,8 +627,10 @@ void Vajra::runtime::NativeRuntime::mark_worker_stopping(const std::shared_ptr<S
         worker_state->pid.load(std::memory_order_acquire),
         WorkerLifecycleState::stopping,
         worker_state->health_state.load(std::memory_order_acquire),
+        worker_state->recovery_state.load(std::memory_order_acquire),
         false,
         worker_state->last_exit_classification.load(std::memory_order_acquire),
+        worker_state->terminal_replacement_failure.load(std::memory_order_acquire),
         worker_state->replacement_needed.load(std::memory_order_acquire),
         worker_state->last_exit_detail.load(std::memory_order_acquire));
   }
@@ -653,6 +678,9 @@ void Vajra::runtime::NativeRuntime::mark_worker_exit(
       exit_classification != WorkerExitClassification::expected_shutdown;
   worker_state->replacement_needed.store(replacement_needed, std::memory_order_release);
   worker_state->recovery_requested.store(false, std::memory_order_release);
+  mark_recovery_transition(
+      worker_state,
+      replacement_needed ? WorkerRecoveryState::rejoin_pending : WorkerRecoveryState::none);
   close_worker_request_channels(worker_state);
   if (debug_logging_.load(std::memory_order_acquire))
   {
@@ -662,8 +690,10 @@ void Vajra::runtime::NativeRuntime::mark_worker_exit(
         worker_state->pid.load(std::memory_order_acquire),
         WorkerLifecycleState::exited,
         worker_state->health_state.load(std::memory_order_acquire),
+        worker_state->recovery_state.load(std::memory_order_acquire),
         false,
         exit_classification,
+        worker_state->terminal_replacement_failure.load(std::memory_order_acquire),
         replacement_needed,
         exit_detail);
     if (replacement_needed)
@@ -674,8 +704,10 @@ void Vajra::runtime::NativeRuntime::mark_worker_exit(
           worker_state->pid.load(std::memory_order_acquire),
           WorkerLifecycleState::exited,
           worker_state->health_state.load(std::memory_order_acquire),
+          worker_state->recovery_state.load(std::memory_order_acquire),
           false,
           exit_classification,
+          worker_state->terminal_replacement_failure.load(std::memory_order_acquire),
           true,
           exit_detail);
     }
@@ -700,9 +732,13 @@ void Vajra::runtime::NativeRuntime::prepare_worker_replacement(const std::shared
   worker_state->last_unexpected_exit_nanoseconds.store(0, std::memory_order_release);
   worker_state->last_exit_classification.store(WorkerExitClassification::none, std::memory_order_release);
   worker_state->last_exit_detail.store(0, std::memory_order_release);
+  worker_state->terminal_replacement_failure.store(false, std::memory_order_release);
+  worker_state->overload_started_nanoseconds.store(0, std::memory_order_release);
+  worker_state->recovery_deadline_nanoseconds.store(0, std::memory_order_release);
   worker_state->recovery_requested.store(false, std::memory_order_release);
   worker_state->health_state.store(WorkerHealthState::healthy, std::memory_order_release);
   worker_state->last_health_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
+  mark_recovery_transition(worker_state, WorkerRecoveryState::replacing);
   mark_lifecycle_transition(worker_state, WorkerLifecycleState::booting);
 }
 
@@ -858,6 +894,9 @@ void Vajra::runtime::NativeRuntime::replace_worker(const std::shared_ptr<SharedW
   {
     worker_state->replacement_failure_count.fetch_add(1, std::memory_order_acq_rel);
     worker_state->replacement_needed.store(false, std::memory_order_release);
+    worker_state->available.store(false, std::memory_order_release);
+    worker_state->terminal_replacement_failure.store(true, std::memory_order_release);
+    mark_recovery_transition(worker_state, WorkerRecoveryState::terminal_failure);
     if (debug_logging_.load(std::memory_order_acquire))
     {
       log_worker_lifecycle_event(
@@ -866,8 +905,10 @@ void Vajra::runtime::NativeRuntime::replace_worker(const std::shared_ptr<SharedW
           worker_state->pid.load(std::memory_order_acquire),
           worker_state->lifecycle_state.load(std::memory_order_acquire),
           worker_state->health_state.load(std::memory_order_acquire),
+          worker_state->recovery_state.load(std::memory_order_acquire),
           false,
           worker_state->last_exit_classification.load(std::memory_order_acquire),
+          true,
           false,
           static_cast<int>(attempt_number));
     }
@@ -882,8 +923,10 @@ void Vajra::runtime::NativeRuntime::replace_worker(const std::shared_ptr<SharedW
         worker_state->pid.load(std::memory_order_acquire),
         WorkerLifecycleState::booting,
         WorkerHealthState::healthy,
+        WorkerRecoveryState::replacing,
         false,
         worker_state->last_exit_classification.load(std::memory_order_acquire),
+        false,
         true,
         static_cast<int>(attempt_number));
   }
@@ -900,6 +943,7 @@ void Vajra::runtime::NativeRuntime::replace_worker(const std::shared_ptr<SharedW
   {
     worker_state->replacement_failure_count.fetch_add(1, std::memory_order_acq_rel);
     worker_state->replacement_needed.store(true, std::memory_order_release);
+    mark_recovery_transition(worker_state, WorkerRecoveryState::rejoin_pending);
     throw;
   }
 
@@ -907,6 +951,7 @@ void Vajra::runtime::NativeRuntime::replace_worker(const std::shared_ptr<SharedW
   {
     worker_state->replacement_failure_count.fetch_add(1, std::memory_order_acq_rel);
     worker_state->replacement_needed.store(true, std::memory_order_release);
+    mark_recovery_transition(worker_state, WorkerRecoveryState::rejoin_pending);
     int status = 0;
     while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
     {
@@ -928,8 +973,10 @@ void Vajra::runtime::NativeRuntime::replace_worker(const std::shared_ptr<SharedW
         pid,
         WorkerLifecycleState::ready,
         WorkerHealthState::healthy,
+        worker_state->recovery_state.load(std::memory_order_acquire),
         true,
         WorkerExitClassification::none,
+        worker_state->terminal_replacement_failure.load(std::memory_order_acquire),
         false,
         static_cast<int>(attempt_number));
   }
@@ -977,9 +1024,14 @@ void Vajra::runtime::NativeRuntime::initiate_worker_recovery(const std::shared_p
   worker_state->available.store(false, std::memory_order_release);
   worker_state->expected_shutdown.store(false, std::memory_order_release);
   worker_state->timeout_escalation_pending.store(true, std::memory_order_release);
+  worker_state->replacement_needed.store(true, std::memory_order_release);
   worker_state->timeout_kill_deadline_nanoseconds.store(
       steady_clock_nanoseconds_after(kWorkerTimeoutGracePeriod),
       std::memory_order_release);
+  worker_state->recovery_deadline_nanoseconds.store(
+      steady_clock_nanoseconds() + health_policy_.drain_deadline_nanoseconds,
+      std::memory_order_release);
+  mark_recovery_transition(worker_state, WorkerRecoveryState::draining);
   mark_worker_stopping(worker_state);
 
   const pid_t pid = worker_state->pid.load(std::memory_order_acquire);
@@ -994,9 +1046,11 @@ void Vajra::runtime::NativeRuntime::maybe_recover_unhealthy_workers(
     const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states)
 {
   bool runtime_stopping = false;
+  HealthPolicy health_policy;
   {
     const std::lock_guard<std::mutex> lock(server_mutex_);
     runtime_stopping = runtime_shutdown_started_ || stop_requested_ || shutting_down != 0;
+    health_policy = health_policy_;
   }
   if (runtime_stopping)
   {
@@ -1011,8 +1065,17 @@ void Vajra::runtime::NativeRuntime::maybe_recover_unhealthy_workers(
     }
 
     const WorkerHealthState health_state = worker_state->health_state.load(std::memory_order_acquire);
-    if (health_state != WorkerHealthState::suspect &&
-        health_state != WorkerHealthState::wedged)
+    if (health_state == WorkerHealthState::overloaded)
+    {
+      const std::int64_t overload_started = worker_state->overload_started_nanoseconds.load(std::memory_order_acquire);
+      if (overload_started == 0 ||
+          (steady_clock_nanoseconds() - overload_started) < health_policy.overload_recovery_threshold_nanoseconds)
+      {
+        continue;
+      }
+    }
+    else if (health_state != WorkerHealthState::suspect &&
+             health_state != WorkerHealthState::wedged)
     {
       continue;
     }
@@ -1065,6 +1128,9 @@ void Vajra::runtime::NativeRuntime::clear_worker_runtime()
     recovery_policy_ = RecoveryPolicy{};
     debug_logging_.store(false, std::memory_order_release);
   }
+
+  configure_runtime_tracing(false, "", "");
+  set_runtime_tracing_available(false);
 
   for (const auto &worker_state : worker_states)
   {
@@ -1335,6 +1401,7 @@ void Vajra::runtime::NativeRuntime::refresh_worker_health(
   for (const auto &worker_state : worker_states)
   {
     const WorkerLifecycleState lifecycle_state = worker_state->lifecycle_state.load(std::memory_order_acquire);
+    const WorkerRecoveryState recovery_state = worker_state->recovery_state.load(std::memory_order_acquire);
     WorkerHealthState next_state = WorkerHealthState::healthy;
     std::int64_t sampled_last_progress = 0;
     if (lifecycle_state == WorkerLifecycleState::stopping)
@@ -1354,11 +1421,20 @@ void Vajra::runtime::NativeRuntime::refresh_worker_health(
       const std::size_t active_executions = worker_state->active_execution_count.load(std::memory_order_acquire);
       const std::size_t idle_executions = worker_state->idle_execution_count.load(std::memory_order_acquire);
       const std::size_t total_executions = active_executions + idle_executions;
+      const std::size_t local_queue_depth = worker_state->local_queue_depth.load(std::memory_order_acquire);
+      const std::int64_t oldest_local_queue_age =
+          worker_state->oldest_local_queue_age_nanoseconds.load(std::memory_order_acquire);
       sampled_last_progress = worker_state->last_progress_nanoseconds.load(std::memory_order_acquire);
       const std::int64_t progress_age = sampled_last_progress == 0 ? 0 : (now_nanoseconds - sampled_last_progress);
       const std::uint64_t unexpected_exits = worker_state->unexpected_exit_count.load(std::memory_order_acquire);
       const std::int64_t last_unexpected_exit =
           worker_state->last_unexpected_exit_nanoseconds.load(std::memory_order_acquire);
+      const bool recovering =
+          recovery_state == WorkerRecoveryState::draining ||
+          recovery_state == WorkerRecoveryState::terminating ||
+          recovery_state == WorkerRecoveryState::replacing ||
+          recovery_state == WorkerRecoveryState::rejoin_pending;
+
       if (progress_age >= health_policy.wedged_threshold_nanoseconds && active_executions > 0)
       {
         next_state = WorkerHealthState::wedged;
@@ -1373,6 +1449,26 @@ void Vajra::runtime::NativeRuntime::refresh_worker_health(
       {
         next_state = WorkerHealthState::degraded;
       }
+      else if (worker_state->terminal_replacement_failure.load(std::memory_order_acquire))
+      {
+        next_state = WorkerHealthState::wedged;
+      }
+      else if (recovering)
+      {
+        next_state = WorkerHealthState::degraded;
+      }
+      else if (total_executions > 0 &&
+               active_executions >= total_executions &&
+               local_queue_depth > 0 &&
+               oldest_local_queue_age >= health_policy.overload_oldest_queue_age_nanoseconds)
+      {
+        next_state = WorkerHealthState::overloaded;
+        std::int64_t overload_started = worker_state->overload_started_nanoseconds.load(std::memory_order_acquire);
+        if (overload_started == 0)
+        {
+          worker_state->overload_started_nanoseconds.store(now_nanoseconds, std::memory_order_release);
+        }
+      }
       else if (total_executions > 0 && active_executions >= total_executions)
       {
         next_state = WorkerHealthState::busy;
@@ -1380,6 +1476,7 @@ void Vajra::runtime::NativeRuntime::refresh_worker_health(
       else
       {
         next_state = WorkerHealthState::healthy;
+        worker_state->overload_started_nanoseconds.store(0, std::memory_order_release);
       }
 
       if (unexpected_exits > 0 &&
@@ -1405,8 +1502,13 @@ void Vajra::runtime::NativeRuntime::refresh_worker_health(
             latest_progress != sampled_last_progress &&
             latest_progress_age < health_policy.suspect_threshold_nanoseconds)
         {
-          next_state = latest_active_executions > 0 ? WorkerHealthState::busy : WorkerHealthState::healthy;
+            next_state = latest_active_executions > 0 ? WorkerHealthState::busy : WorkerHealthState::healthy;
         }
+      }
+
+      if (next_state != WorkerHealthState::overloaded)
+      {
+        worker_state->overload_started_nanoseconds.store(0, std::memory_order_release);
       }
 
       worker_state->health_state.store(next_state, std::memory_order_release);
@@ -1429,8 +1531,10 @@ void Vajra::runtime::NativeRuntime::refresh_worker_health(
             worker_state->pid.load(std::memory_order_acquire),
             lifecycle_state,
             next_state,
+            worker_state->recovery_state.load(std::memory_order_acquire),
             worker_state->available.load(std::memory_order_acquire),
             worker_state->last_exit_classification.load(std::memory_order_acquire),
+            worker_state->terminal_replacement_failure.load(std::memory_order_acquire),
             worker_state->replacement_needed.load(std::memory_order_acquire),
             0);
       }
@@ -1493,6 +1597,7 @@ void Vajra::runtime::NativeRuntime::maybe_escalate_timed_out_workers(
     const pid_t pid = worker_state->pid.load(std::memory_order_acquire);
     if (pid > 0)
     {
+      mark_recovery_transition(worker_state, WorkerRecoveryState::terminating);
       (void)signal_process_with_retry(pid, SIGKILL, "failed to force kill timed out worker");
     }
     worker_state->timeout_escalation_pending.store(false, std::memory_order_release);
@@ -1791,6 +1896,7 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
       debug_logging_.store(debug_logging, std::memory_order_release);
     }
     configure_runtime_logging(config.structured_logs, config.access_log, config.error_log);
+    configure_runtime_tracing(config.trace_enabled, config.trace_endpoint, config.trace_service_name);
     log_runtime_banner_start(config.host, config.port, config.workers, config.min_threads, config.max_threads);
     flush_runtime_logs();
     const BootContractResult master_boot_result = BootContract::run(
@@ -2090,7 +2196,10 @@ void VajraNative::start(
     std::string error_log,
     bool structured_logs,
     std::string stats_path,
-    std::string metrics_endpoint)
+    std::string metrics_endpoint,
+    bool trace_enabled,
+    std::string trace_endpoint,
+    std::string trace_service_name)
 {
   Vajra::runtime::NativeRuntime::instance().start(Vajra::runtime::RuntimeConfig{
       std::move(host),
@@ -2112,7 +2221,10 @@ void VajraNative::start(
       std::move(error_log),
       structured_logs,
       std::move(stats_path),
-      std::move(metrics_endpoint)});
+      std::move(metrics_endpoint),
+      trace_enabled,
+      std::move(trace_endpoint),
+      std::move(trace_service_name)});
 }
 
 void VajraNative::stop()

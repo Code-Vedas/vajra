@@ -23,6 +23,16 @@ namespace Vajra
         bool structured_logs,
         const std::string &access_log,
         const std::string &error_log);
+    void configure_runtime_tracing(
+        bool trace_enabled,
+        const std::string &trace_endpoint,
+        const std::string &trace_service_name);
+    void set_runtime_tracing_available(bool available);
+    bool runtime_tracing_enabled();
+    bool runtime_tracing_available();
+    std::string runtime_tracing_endpoint();
+    std::string runtime_tracing_service_name();
+    void set_runtime_lifecycle_callback(void *callback);
     void flush_runtime_logs();
     void log_runtime_banner_start(
         const std::string &host,
@@ -36,8 +46,10 @@ namespace Vajra
         pid_t pid,
         WorkerLifecycleState lifecycle_state,
         WorkerHealthState health_state,
+        WorkerRecoveryState recovery_state,
         bool available,
         WorkerExitClassification exit_classification,
+        bool terminal_replacement_failure,
         bool replacement_needed,
         int exit_detail);
     void log_unexpected_worker_exit(WorkerExitClassification exit_classification, int exit_detail);

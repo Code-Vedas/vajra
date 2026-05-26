@@ -54,6 +54,9 @@ module DocumentedServerOptions
         config.structured_logs
         config.stats_path "/__vajra/stats"
         config.metrics_endpoint "/metrics"
+        config.trace_enabled
+        config.trace_endpoint "http://127.0.0.1:4318/v1/traces"
+        config.trace_service_name "vajra-test"
         config.pidfile "tmp/pids/vajra.pid"
         config.state_path "tmp/vajra.state"
         config.control_socket "tmp/vajra-control.sock"
@@ -86,6 +89,9 @@ module DocumentedServerOptions
         config.structured_logs
         config.stats_path "/__vajra/stats"
         config.metrics_endpoint "/metrics"
+        config.trace_enabled
+        config.trace_endpoint "http://127.0.0.1:4318/v1/traces"
+        config.trace_service_name "vajra-test"
         config.max_request_head_bytes 2048
         config.app ->(_env) { [200, { "Content-Type" => "text/plain" }, ["OK"]] }
       end
@@ -131,6 +137,9 @@ module DocumentedServerOptions
       state_path: 'tmp/vajra.state',
       stats_path: '/__vajra/stats',
       structured_logs: true,
+      trace_enabled: true,
+      trace_endpoint: 'http://127.0.0.1:4318/v1/traces',
+      trace_service_name: 'vajra-test',
       threads: [5, 5],
       tls: true,
       tls_ca_certificate: 'config/certs/ca.crt',
@@ -166,6 +175,9 @@ module DocumentedServerOptions
       structured_logs: true,
       stats_path: '/__vajra/stats',
       metrics_endpoint: '/metrics',
+      trace_enabled: true,
+      trace_endpoint: 'http://127.0.0.1:4318/v1/traces',
+      trace_service_name: 'vajra-test',
       max_request_head_bytes: 2048
     }
   end

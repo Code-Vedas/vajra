@@ -47,6 +47,16 @@ namespace Vajra
       wedged = 6,
     };
 
+    enum class WorkerRecoveryState : std::uint8_t
+    {
+      none = 0,
+      draining = 1,
+      terminating = 2,
+      replacing = 3,
+      rejoin_pending = 4,
+      terminal_failure = 5,
+    };
+
     struct SharedWorkerState
     {
       SharedWorkerState(
@@ -89,6 +99,10 @@ namespace Vajra
       std::atomic<std::uint64_t> replacement_attempt_count{0};
       std::atomic<std::uint64_t> replacement_success_count{0};
       std::atomic<std::uint64_t> replacement_failure_count{0};
+      std::atomic<WorkerRecoveryState> recovery_state{WorkerRecoveryState::none};
+      std::atomic_bool terminal_replacement_failure{false};
+      std::atomic<std::int64_t> overload_started_nanoseconds{0};
+      std::atomic<std::int64_t> recovery_deadline_nanoseconds{0};
       std::atomic_bool recovery_requested{false};
       std::atomic_bool replacement_scheduled{false};
     };

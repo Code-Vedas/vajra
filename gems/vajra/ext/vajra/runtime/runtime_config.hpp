@@ -37,6 +37,9 @@ namespace Vajra
       bool structured_logs;
       std::string stats_path;
       std::string metrics_endpoint;
+      bool trace_enabled;
+      std::string trace_endpoint;
+      std::string trace_service_name;
     };
 
     class RuntimeConfigLoader final

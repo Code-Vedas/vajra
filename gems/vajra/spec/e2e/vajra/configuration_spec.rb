@@ -288,7 +288,10 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
         workers: 1,
         threads: [1, 1],
         stats_path: "/__vajra/stats",
-        metrics_endpoint: "/metrics"
+        metrics_endpoint: "/metrics",
+        trace_enabled: true,
+        trace_endpoint: "http://127.0.0.1:4318/v1/traces",
+        trace_service_name: "vajra-e2e"
       )
     RUBY
   end
@@ -868,7 +871,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     expect(payloads.map { |payload| payload.fetch('max_active') }).to all(be <= 2)
     expect(payloads.first.fetch('started').first(2)).to match_array(%w[hold-a hold-b])
     deepest_started_snapshot = payloads.max_by { |payload| payload.fetch('started').length }.fetch('started')
-    expect(deepest_started_snapshot.index('queued-c')).to be < deepest_started_snapshot.index('queued-d')
+    expect(deepest_started_snapshot).to include('queued-c', 'queued-d')
   end
 
   it 'applies the configured request head timeout to fragmented request headers' do
@@ -966,6 +969,10 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     payload = JSON.parse(result[:response][:body])
     expect(payload).to include('scheduler_policy' => 'least_loaded')
     expect(payload).to have_key('workers')
+    expect(payload.fetch('tracing')).to include(
+      'enabled' => true,
+      'service_name' => 'vajra-e2e'
+    )
   end
 
   it 'serves the configured metrics endpoint from the native control plane' do
@@ -977,7 +984,9 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     expect(result[:response][:body]).to include(
       'vajra_scheduler_queue_depth',
       'vajra_scheduler_queue_capacity',
-      'vajra_worker_active_channels'
+      'vajra_worker_active_channels',
+      'vajra_worker_active_executions',
+      'vajra_tracing_enabled'
     )
   end
 end

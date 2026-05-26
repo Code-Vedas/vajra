@@ -2150,6 +2150,7 @@ void Vajra::runtime::NativeRuntime::stop()
   if (had_runtime)
   {
     begin_runtime_shutdown();
+    (void)stop_worker_processes();
   }
 
   Vajra::Server *server = nullptr;

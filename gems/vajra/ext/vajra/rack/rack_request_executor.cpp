@@ -23,6 +23,7 @@
 #include <deque>
 #include <chrono>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -100,6 +101,47 @@ namespace
                                                  ? kMaxPollTimeoutMilliseconds
                                                  : timeout_seconds * kMillisecondsPerSecond;
     return static_cast<int>(timeout_milliseconds);
+  }
+
+  std::string escaped_json_string(const std::string &value)
+  {
+    std::ostringstream escaped;
+    escaped << '"';
+    for (unsigned char character : value)
+    {
+      switch (character)
+      {
+        case '\\':
+          escaped << "\\\\";
+          break;
+        case '"':
+          escaped << "\\\"";
+          break;
+        case '\n':
+          escaped << "\\n";
+          break;
+        case '\r':
+          escaped << "\\r";
+          break;
+        case '\t':
+          escaped << "\\t";
+          break;
+        default:
+          if (character >= 0x20)
+          {
+            escaped << static_cast<char>(character);
+          }
+          else
+          {
+            escaped << "\\u00" << std::hex << std::setw(2) << std::setfill('0')
+                    << static_cast<int>(character)
+                    << std::dec << std::setfill(' ');
+          }
+          break;
+      }
+    }
+    escaped << '"';
+    return escaped.str();
   }
 
   void write_all_or_throw(int fd, const void *buffer, std::size_t length)
@@ -1441,8 +1483,8 @@ namespace
               << std::chrono::duration_cast<std::chrono::nanoseconds>(oldest_queue_age_locked(now)).count() << ','
               << "\"tracing\":{\"enabled\":" << (Vajra::runtime::runtime_tracing_enabled() ? "true" : "false")
               << ",\"available\":" << (Vajra::runtime::runtime_tracing_available() ? "true" : "false")
-              << ",\"endpoint\":\"" << Vajra::runtime::runtime_tracing_endpoint() << "\""
-              << ",\"service_name\":\"" << Vajra::runtime::runtime_tracing_service_name() << "\"},"
+              << ",\"endpoint\":" << escaped_json_string(Vajra::runtime::runtime_tracing_endpoint())
+              << ",\"service_name\":" << escaped_json_string(Vajra::runtime::runtime_tracing_service_name()) << "},"
               << "\"request_admission_rejections\":" << request_admission_rejection_count_ << ','
               << "\"workers\":[";
       for (std::size_t index = 0; index < slots_.size(); ++index)

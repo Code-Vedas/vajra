@@ -49,6 +49,8 @@ RSpec.describe Vajra::Internal::Tracing do
       described_class::TRACE_STATE.tracer = nil
       described_class::TRACE_STATE.warning_emitted = false
     end
+    allow(described_class).to receive(:require).and_call_original
+    allow(Kernel).to receive(:require).and_call_original
     allow(described_class).to receive(:__native_set_tracing_status__)
     allow(described_class).to receive(:__native_set_lifecycle_callback__)
     allow(described_class).to receive(:warn)
@@ -180,6 +182,7 @@ RSpec.describe Vajra::Internal::Tracing do
     provider = provider_class.new(tracer)
     stub_open_telemetry_classes(provider:)
     allow(described_class).to receive(:require).with('opentelemetry/sdk').and_return(true)
+    allow(Kernel).to receive(:require).with('opentelemetry/sdk').and_return(true)
 
     expect(described_class.send(:build_tracer, '', 'vajra-test')).to eq(tracer)
     expect(provider.processors).to be_empty
@@ -208,6 +211,8 @@ RSpec.describe Vajra::Internal::Tracing do
     stub_open_telemetry_classes(provider:, exporter:, processor:)
     allow(described_class).to receive(:require).with('opentelemetry/sdk').and_return(true)
     allow(described_class).to receive(:require).with('opentelemetry/exporter/otlp').and_return(true)
+    allow(Kernel).to receive(:require).with('opentelemetry/sdk').and_return(true)
+    allow(Kernel).to receive(:require).with('opentelemetry/exporter/otlp').and_return(true)
 
     expect(
       described_class.send(:build_tracer, 'http://127.0.0.1:4318/v1/traces', 'vajra-test')
@@ -225,6 +230,8 @@ RSpec.describe Vajra::Internal::Tracing do
     stub_open_telemetry_classes(provider:)
     allow(described_class).to receive(:require).with('opentelemetry/sdk').and_return(true)
     allow(described_class).to receive(:require).with('opentelemetry/exporter/otlp').and_raise(LoadError)
+    allow(Kernel).to receive(:require).with('opentelemetry/sdk').and_return(true)
+    allow(Kernel).to receive(:require).with('opentelemetry/exporter/otlp').and_raise(LoadError)
 
     expect(
       described_class.send(:build_tracer, 'http://127.0.0.1:4318/v1/traces', 'vajra-test')

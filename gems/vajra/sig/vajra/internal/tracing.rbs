@@ -11,17 +11,40 @@ module Vajra
         ?trace_endpoint: String?,
         ?trace_service_name: String?
       }
-      type lifecycle_event = Hash[Symbol, untyped]
 
-      TraceState: untyped
+      type lifecycle_event = {
+        event: String,
+        ?worker_index: Integer,
+        ?pid: Integer,
+        ?lifecycle_state: String,
+        ?health_state: String,
+        ?recovery_state: String,
+        ?available: bool,
+        ?exit_classification: String,
+        ?replacement_needed: bool,
+        ?terminal_replacement_failure: bool,
+        ?exit_detail: Integer
+      }
+
+      interface _Tracer
+        def in_span: [T] (String, attributes: Hash[String, String | Integer | bool]) { () -> T } -> T
+      end
+
+      class TraceState
+        attr_accessor enabled: bool
+        attr_accessor available: bool
+        attr_accessor tracer: _Tracer?
+        attr_accessor warning_emitted: bool
+      end
+
       TRACE_MUTEX: ::Mutex
-      TRACE_STATE: untyped
+      TRACE_STATE: TraceState
 
       def self.install_from_start_options!: (start_options) -> bool
       def self.with_request_span: [T] (Hash[String, String]) { () -> T } -> T
-      def self.emit_lifecycle_span: (lifecycle_event) -> void
-      def self.__native_set_tracing_status__: (bool, bool, String, String) -> untyped
-      def self.__native_set_lifecycle_callback__: ((Method | Proc)? callback) -> untyped
+      def self.emit_lifecycle_span: (lifecycle_event) -> nil
+      def self.__native_set_tracing_status__: (bool, bool, String, String) -> nil
+      def self.__native_set_lifecycle_callback__: ((Method | Proc)? callback) -> ((Method | Proc)?)
     end
   end
 end

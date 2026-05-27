@@ -7,7 +7,7 @@
 
 module VajraE2EStartupHelpers
   def startup_failure(port:)
-    Open3.popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       status = Timeout.timeout(15) { wait_thread.value }
       { exitstatus: status.exitstatus, output: output.read }
     ensure
@@ -16,7 +16,7 @@ module VajraE2EStartupHelpers
   end
 
   def startup_failure_with_env(port_value)
-    Open3.popen2e(
+    managed_popen2e(
       vajra_env.merge('VAJRA_PORT' => port_value),
       *vajra_command,
       chdir: VajraE2EHelpers::PACKAGE_ROOT
@@ -29,7 +29,7 @@ module VajraE2EStartupHelpers
   end
 
   def startup_failure_with_config_env(env)
-    Open3.popen2e(vajra_env.merge(env), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env.merge(env), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       status = Timeout.timeout(15) { wait_thread.value }
       { exitstatus: status.exitstatus, output: output.read }
     ensure
@@ -38,7 +38,7 @@ module VajraE2EStartupHelpers
   end
 
   def startup_failure_with_inline_start(env)
-    Open3.popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       status = Timeout.timeout(15) { wait_thread.value }
       { exitstatus: status.exitstatus, output: output.read }
     ensure
@@ -47,7 +47,7 @@ module VajraE2EStartupHelpers
   end
 
   def startup_failure_with_inline_script(script, env: {})
-    Open3.popen2e(vajra_env.merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env.merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       status = Timeout.timeout(15) { wait_thread.value }
       { exitstatus: status.exitstatus, output: output.read }
     ensure
@@ -139,7 +139,7 @@ module VajraE2EStartupHelpers
       ensure
         server&.close
       end
-      result = Open3.popen2e(
+      result = managed_popen2e(
         vajra_env(port: selected_port), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT
       ) do |_stdin, output, wait_thread|
         status = Timeout.timeout(15) { wait_thread.value }
@@ -155,7 +155,7 @@ module VajraE2EStartupHelpers
   end
 
   def oversized_request_result(env:, payload_size:)
-    Open3.popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       startup_output = []
       selected_port = wait_for_banner(output, captured_lines: startup_output)
 
@@ -178,7 +178,7 @@ module VajraE2EStartupHelpers
   end
 
   def request_with_body_result(env:, body:)
-    Open3.popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       startup_output = []
       selected_port = wait_for_banner(output, captured_lines: startup_output)
 

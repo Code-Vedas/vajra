@@ -37,10 +37,16 @@ module VajraE2EProcessHelpers
   end
 
   def stop_process(wait_thread, signal: 'INT', timeout: 5)
-    Process.kill(signal, wait_thread.pid)
+    signal_process_group(wait_thread, signal)
     wait_for_exit(wait_thread, timeout: timeout)
   rescue Errno::ESRCH
     wait_thread.value
+  end
+
+  def signal_process_group(wait_thread, signal)
+    Process.kill(signal, -wait_thread.pid)
+  rescue Errno::ESRCH, Errno::EINVAL
+    Process.kill(signal, wait_thread.pid)
   end
 
   def cleanup_process(wait_thread, output)
@@ -48,7 +54,7 @@ module VajraE2EProcessHelpers
       begin
         stop_process(wait_thread, timeout: 2)
       rescue Timeout::Error
-        Process.kill('KILL', wait_thread.pid)
+        signal_process_group(wait_thread, 'KILL')
         wait_thread.value
       rescue Errno::ESRCH
         nil
@@ -73,7 +79,7 @@ module VajraE2EProcessHelpers
   end
 
   def idle_keep_alive_timeout_result(port: disposable_listener_port, env: {})
-    Open3.popen2e(vajra_env(port:).merge(env), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env(port:).merge(env), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       selected_port = wait_for_banner(output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
@@ -101,7 +107,7 @@ module VajraE2EProcessHelpers
     env: {},
     timeout: 15
   )
-    Open3.popen2e(vajra_env(port:).merge(env), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env(port:).merge(env), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       startup_output = []
       selected_port = wait_for_banner(output, captured_lines: startup_output)
 
@@ -128,7 +134,7 @@ module VajraE2EProcessHelpers
   end
 
   def idle_shutdown(port: disposable_listener_port, signal: 'INT')
-    Open3.popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       startup_output = []
       selected_port = wait_for_banner(output, captured_lines: startup_output)
 
@@ -141,7 +147,7 @@ module VajraE2EProcessHelpers
   end
 
   def active_request_shutdown(request:, port: disposable_listener_port, signal: 'INT')
-    Open3.popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       startup_output = []
       selected_port = wait_for_banner(output, captured_lines: startup_output)
 
@@ -150,7 +156,7 @@ module VajraE2EProcessHelpers
       response = read_raw_http_response(socket, wait_thread:, output:, request_label: 'active_request_shutdown')
       socket.close
 
-      Process.kill(signal, wait_thread.pid)
+      signal_process_group(wait_thread, signal)
       immediate_output = wait_for_graceful_shutdown_banner(output, wait_thread)
       status = wait_for_exit(wait_thread)
 
@@ -196,7 +202,7 @@ module VajraE2EProcessHelpers
     signal: 'INT',
     exit_timeout: 2
   )
-    Open3.popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       startup_output = []
       selected_port = wait_for_banner(output, captured_lines: startup_output)
 
@@ -205,7 +211,7 @@ module VajraE2EProcessHelpers
       response = read_raw_http_response(socket, wait_thread:, output:, request_label: 'keep_alive_shutdown_with_open_socket')
       followup_chunks.each { |chunk| socket.write(chunk) }
 
-      Process.kill(signal, wait_thread.pid)
+      signal_process_group(wait_thread, signal)
       immediate_output = wait_for_graceful_shutdown_banner(output, wait_thread)
       socket_closed = wait_for_socket_close(socket)
       status = wait_for_exit(wait_thread, timeout: exit_timeout)
@@ -239,7 +245,7 @@ module VajraE2EProcessHelpers
       Timeout.timeout(5) { stopper_thread.join }
     RUBY
 
-    Open3.popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |stdin, output, wait_thread|
+    managed_popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |stdin, output, wait_thread|
       startup_output = []
       selected_port = wait_for_banner(output, captured_lines: startup_output)
 

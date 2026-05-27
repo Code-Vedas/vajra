@@ -194,7 +194,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
   end
 
   def queue_capacity_result(script:)
-    Open3.popen2e(
+    managed_popen2e(
       vajra_env(port: disposable_listener_port),
       *inline_ruby_command(script),
       chdir: VajraE2EHelpers::PACKAGE_ROOT
@@ -205,7 +205,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
       status = begin
         stop_process(wait_thread)
       rescue Timeout::Error
-        Process.kill('KILL', wait_thread.pid)
+        signal_process_group(wait_thread, 'KILL')
         wait_thread.value
       end
 
@@ -220,7 +220,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
   end
 
   def control_plane_response_result(script:, path:)
-    Open3.popen2e(
+    managed_popen2e(
       vajra_env(port: disposable_listener_port),
       *inline_ruby_command(script),
       chdir: VajraE2EHelpers::PACKAGE_ROOT
@@ -297,7 +297,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
   end
 
   def staged_request_result(script:, env:, request_bodies:)
-    Open3.popen2e(
+    managed_popen2e(
       vajra_env(port: disposable_listener_port).merge(env),
       *inline_ruby_command(script),
       chdir: VajraE2EHelpers::PACKAGE_ROOT
@@ -483,7 +483,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
         Vajra.start(**options)
       RUBY
 
-      request = Open3.popen2e(
+      request = managed_popen2e(
         vajra_env.merge('RUBY_PORT' => disposable_listener_port.to_s, 'BOOT_TRACE_PATH' => trace_path),
         *inline_ruby_command(script),
         chdir: VajraE2EHelpers::PACKAGE_ROOT

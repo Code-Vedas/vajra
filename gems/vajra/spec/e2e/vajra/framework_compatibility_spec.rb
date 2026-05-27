@@ -242,7 +242,7 @@ RSpec.describe 'Vajra framework compatibility', :e2e, :integration do # rubocop:
     end
 
     with_packaged_app(files: rails_server_files) do |app_root|
-      Open3.popen2e(
+      managed_popen2e(
         app_root_bundle_env.merge('PORT' => port.to_s),
         *packaged_bundle_command(RbConfig.ruby, 'bin/rails', 'server'),
         chdir: app_root

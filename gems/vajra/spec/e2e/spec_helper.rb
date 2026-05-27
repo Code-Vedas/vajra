@@ -80,6 +80,10 @@ module VajraE2EHelpers
     "listening on port #{port}"
   end
 
+  def managed_popen2e(*command, **options, &)
+    Open3.popen2e(*command, **options.merge(pgroup: true), &)
+  end
+
   def wait_for_banner(output, captured_lines: nil)
     Timeout.timeout(15) do
       loop do

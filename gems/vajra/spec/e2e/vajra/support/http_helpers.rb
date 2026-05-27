@@ -88,7 +88,7 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
   end
 
   def request_response(port: disposable_listener_port)
-    Open3.popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       selected_port = wait_for_banner(output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
@@ -105,7 +105,7 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
   end
 
   def request_response_with_env(env:, port: disposable_listener_port)
-    Open3.popen2e(vajra_env(port:).merge(env), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env(port:).merge(env), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       selected_port = wait_for_banner(output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
@@ -122,7 +122,7 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
   end
 
   def request_response_from_inline_start(env:, timeout: 15)
-    Open3.popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env.merge(env), *inline_start_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       startup_output = []
       selected_port = wait_for_banner(output, captured_lines: startup_output)
 
@@ -140,7 +140,7 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
   end
 
   def sequential_request_result(port: disposable_listener_port)
-    Open3.popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       selected_port = wait_for_banner(output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
@@ -181,7 +181,7 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
   end
 
   def pipelined_request_result(port: disposable_listener_port)
-    Open3.popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       selected_port = wait_for_banner(output)
 
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
@@ -258,7 +258,7 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
       Vajra.start
     RUBY
 
-    Open3.popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       startup_output = []
       selected_port = wait_for_banner(output, captured_lines: startup_output)
 
@@ -276,7 +276,7 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
   end
 
   def rack_app_request_result(script:, request:, port: disposable_listener_port, env: {})
-    Open3.popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       startup_output = []
       selected_port = wait_for_banner(output, captured_lines: startup_output)
 
@@ -294,7 +294,7 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
   end
 
   def rack_app_request_chunks_result(script:, chunks:, port: disposable_listener_port, env: {}, pause: nil)
-    Open3.popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       startup_output = []
       selected_port = wait_for_banner(output, captured_lines: startup_output)
 
@@ -320,7 +320,7 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
 
   # rubocop:disable Metrics/AbcSize, ThreadSafety/NewThread
   def concurrent_rack_app_request_results(script:, requests:, port: disposable_listener_port, env: {})
-    Open3.popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       startup_output = []
       selected_port = wait_for_banner(output, captured_lines: startup_output)
 
@@ -395,7 +395,7 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
   end
 
   def worker_replacement_request_results(script:, initial_requests:, follow_up_request:, port: disposable_listener_port, env: {})
-    Open3.popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       startup_output = []
       selected_port = wait_for_banner(output, captured_lines: startup_output)
       runtime_output = +''
@@ -516,7 +516,7 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
 
   def packaged_app_command_request_result(files:, command:, request:, env: {})
     with_packaged_app(files:) do |app_root|
-      Open3.popen2e(app_root_bundle_env.merge(env), *command, chdir: app_root) do |_stdin, output, wait_thread|
+      managed_popen2e(app_root_bundle_env.merge(env), *command, chdir: app_root) do |_stdin, output, wait_thread|
         startup_output = []
         selected_port = wait_for_banner(output, captured_lines: startup_output)
 
@@ -536,7 +536,7 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
 
   def packaged_app_command_request_result_on_port(files:, command:, request:, port:, env: {}, timeout: 15)
     with_packaged_app(files:) do |app_root|
-      Open3.popen2e(app_root_bundle_env.merge(env), *command, chdir: app_root) do |_stdin, output, wait_thread|
+      managed_popen2e(app_root_bundle_env.merge(env), *command, chdir: app_root) do |_stdin, output, wait_thread|
         response = wait_for_http_response(
           port,
           request,
@@ -556,7 +556,7 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
 
   def packaged_app_command_startup_failure(files:, command:, env: {})
     with_packaged_app(files:) do |app_root|
-      Open3.popen2e(app_root_bundle_env.merge(env), *command, chdir: app_root) do |_stdin, output, wait_thread|
+      managed_popen2e(app_root_bundle_env.merge(env), *command, chdir: app_root) do |_stdin, output, wait_thread|
         status = Timeout.timeout(15) { wait_thread.value }
         { exitstatus: status.exitstatus, output: output.read }
       ensure

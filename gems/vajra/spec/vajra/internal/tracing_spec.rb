@@ -56,6 +56,13 @@ RSpec.describe Vajra::Internal::Tracing do
     allow(described_class).to receive(:warn)
   end
 
+  after do
+    described_class.send(:write_trace_state, enabled: false, available: false, tracer: nil)
+    described_class::TRACE_MUTEX.synchronize do
+      described_class::TRACE_STATE.warning_emitted = false
+    end
+  end
+
   it 'disables tracing cleanly when trace_enabled is false' do
     expect(
       described_class.install_from_start_options!(

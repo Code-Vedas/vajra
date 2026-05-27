@@ -667,6 +667,7 @@ void Vajra::runtime::log_access_event(const std::string &method, const std::stri
          << ",\"status\":" << status_code
          << '}';
     write_access_line(line.str());
+    flush_runtime_streams();
     return;
   }
 
@@ -676,6 +677,7 @@ void Vajra::runtime::log_access_event(const std::string &method, const std::stri
        << " target=" << escaped_log_value(target)
        << " status=" << status_code;
   write_access_line(line.str());
+  flush_runtime_streams();
 }
 
 void Vajra::runtime::log_runtime_shutdown_begin()

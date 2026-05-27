@@ -1,0 +1,27 @@
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+module Vajra
+  module Internal
+    module Tracing
+      type start_options = {
+        ?trace_enabled: bool?,
+        ?trace_endpoint: String?,
+        ?trace_service_name: String?
+      }
+      type lifecycle_event = Hash[Symbol, untyped]
+
+      TraceState: untyped
+      TRACE_MUTEX: ::Mutex
+      TRACE_STATE: untyped
+
+      def self.install_from_start_options!: (start_options) -> bool
+      def self.with_request_span: [T] (Hash[String, String]) { () -> T } -> T
+      def self.emit_lifecycle_span: (lifecycle_event) -> void
+      def self.__native_set_tracing_status__: (bool, bool, String, String) -> untyped
+      def self.__native_set_lifecycle_callback__: ((Method | Proc)? callback) -> untyped
+    end
+  end
+end

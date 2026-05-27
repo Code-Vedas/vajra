@@ -426,7 +426,7 @@ DEPENDENCIES
   reek
   roda
   rspec (~> 3.13)
-  rubocop (~> 1.72)
+  rubocop (~> 1.86)
   rubocop-performance
   rubocop-rails
   rubocop-rake

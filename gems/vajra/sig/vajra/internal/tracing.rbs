@@ -6,25 +6,12 @@
 module Vajra
   module Internal
     module Tracing
-      type start_options = {
-        ?trace_enabled: bool?,
-        ?trace_endpoint: String?,
-        ?trace_service_name: String?
-      }
+      type start_options = Hash[Symbol, bool | String]
 
-      type lifecycle_event = {
-        event: String,
-        ?worker_index: Integer,
-        ?pid: Integer,
-        ?lifecycle_state: String,
-        ?health_state: String,
-        ?recovery_state: String,
-        ?available: bool,
-        ?exit_classification: String,
-        ?replacement_needed: bool,
-        ?terminal_replacement_failure: bool,
-        ?exit_detail: Integer
-      }
+      type lifecycle_event = Hash[
+        Symbol,
+        String | Integer | bool
+      ]
 
       interface _Tracer
         def in_span: [T] (String, attributes: Hash[String, String | Integer | bool]) { () -> T } -> T

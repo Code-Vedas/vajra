@@ -8,8 +8,22 @@ module Vajra
     module Tracing
       type start_options = Hash[Symbol, bool | String]
 
+      type lifecycle_event_key =
+        :event |
+        :worker_index |
+        :pid |
+        :lifecycle_state |
+        :health_state |
+        :recovery_state |
+        :available |
+        :exit_classification |
+        :replacement_needed |
+        :terminal_replacement_failure |
+        :exit_detail |
+        :timestamp
+
       type lifecycle_event = Hash[
-        Symbol,
+        lifecycle_event_key,
         String | Integer | bool
       ]
 
@@ -24,7 +38,7 @@ module Vajra
         attr_accessor warning_emitted: bool
       end
 
-      TRACE_MUTEX: ::Mutex
+      TRACE_MUTEX: Thread::Mutex
       TRACE_STATE: TraceState
 
       def self.install_from_start_options!: (start_options) -> bool

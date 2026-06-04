@@ -17,10 +17,12 @@
 #include <cstdint>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <poll.h>
 #include <signal.h>
 #include <sstream>
 #include <stdexcept>
@@ -41,11 +43,18 @@ namespace
   constexpr auto kWorkerTimeoutGracePeriod = std::chrono::seconds(1);
   constexpr auto kWorkerExitWatcherIdlePollInterval = std::chrono::seconds(1);
   constexpr int kSignalRetryLimit = 5;
+  constexpr std::uint64_t kReplacementFailureLimit = 3;
 
   enum class WorkerBootstrapStatus : std::uint8_t
   {
     ready = 1,
     failed = 2,
+  };
+
+  enum class WorkerSpawnerCommand : std::uint8_t
+  {
+    spawn = 1,
+    shutdown = 2,
   };
 
   struct WorkerBootstrapReport
@@ -54,10 +63,11 @@ namespace
     std::optional<Vajra::runtime::BootDiagnostic> diagnostic;
   };
 
-  struct ServerRunContext
+  struct WorkerSpawnerResponseHeader
   {
-    Vajra::Server *server;
-    std::string error_message;
+    WorkerBootstrapStatus status;
+    std::int32_t pid;
+    std::uint32_t request_channel_count;
   };
 
   struct WorkerWaitContext
@@ -65,6 +75,11 @@ namespace
     Vajra::runtime::NativeRuntime *runtime;
     const std::vector<std::shared_ptr<Vajra::runtime::SharedWorkerState>> *worker_states;
     std::string error_message;
+  };
+
+  struct RuntimeSleepContext
+  {
+    std::chrono::milliseconds duration{50};
   };
 
   void handle_signal(int sig)
@@ -196,22 +211,10 @@ namespace
     }
   }
 
-  void *run_server_without_gvl(void *data)
+  void *sleep_runtime_loop_without_gvl(void *data)
   {
-    auto *context = static_cast<ServerRunContext *>(data);
-    try
-    {
-      context->server->start();
-    }
-    catch (const std::exception &error)
-    {
-      context->error_message = error.what();
-    }
-    catch (...)
-    {
-      context->error_message = "server failed with an unknown native error";
-    }
-
+    auto *context = static_cast<RuntimeSleepContext *>(data);
+    std::this_thread::sleep_for(context->duration);
     return nullptr;
   }
 
@@ -341,6 +344,101 @@ namespace
     throw std::runtime_error("worker reported an unknown bootstrap state");
   }
 
+  void send_file_descriptors_or_throw(int socket_fd, const std::vector<int> &fds)
+  {
+    if (fds.empty())
+    {
+      return;
+    }
+
+    char message = 'F';
+    struct iovec io_vector;
+    std::memset(&io_vector, 0, sizeof(io_vector));
+    io_vector.iov_base = &message;
+    io_vector.iov_len = sizeof(message);
+    std::vector<char> control(CMSG_SPACE(sizeof(int) * fds.size()));
+    std::memset(control.data(), 0, control.size());
+
+    struct msghdr message_header;
+    std::memset(&message_header, 0, sizeof(message_header));
+    message_header.msg_iov = &io_vector;
+    message_header.msg_iovlen = 1;
+    message_header.msg_control = control.data();
+    message_header.msg_controllen = control.size();
+
+    struct cmsghdr *control_message = CMSG_FIRSTHDR(&message_header);
+    control_message->cmsg_level = SOL_SOCKET;
+    control_message->cmsg_type = SCM_RIGHTS;
+    control_message->cmsg_len = CMSG_LEN(sizeof(int) * fds.size());
+    std::memcpy(CMSG_DATA(control_message), fds.data(), sizeof(int) * fds.size());
+
+    while (sendmsg(socket_fd, &message_header, 0) < 0)
+    {
+      if (errno == EINTR)
+      {
+        continue;
+      }
+      throw std::runtime_error("worker spawner fd send failed");
+    }
+  }
+
+  std::vector<int> receive_file_descriptors_or_throw(int socket_fd, std::size_t expected_count)
+  {
+    if (expected_count == 0)
+    {
+      return {};
+    }
+
+    char message = '\0';
+    struct iovec io_vector;
+    std::memset(&io_vector, 0, sizeof(io_vector));
+    io_vector.iov_base = &message;
+    io_vector.iov_len = sizeof(message);
+    std::vector<char> control(CMSG_SPACE(sizeof(int) * expected_count));
+    std::memset(control.data(), 0, control.size());
+
+    struct msghdr message_header;
+    std::memset(&message_header, 0, sizeof(message_header));
+    message_header.msg_iov = &io_vector;
+    message_header.msg_iovlen = 1;
+    message_header.msg_control = control.data();
+    message_header.msg_controllen = control.size();
+
+    ssize_t result = -1;
+    while ((result = recvmsg(socket_fd, &message_header, 0)) < 0)
+    {
+      if (errno == EINTR)
+      {
+        continue;
+      }
+      throw std::runtime_error("worker spawner fd receive failed");
+    }
+
+    if (result <= 0)
+    {
+      throw std::runtime_error("worker spawner closed before sending request channels");
+    }
+
+    const struct cmsghdr *control_message = CMSG_FIRSTHDR(&message_header);
+    if (control_message == nullptr ||
+        control_message->cmsg_level != SOL_SOCKET ||
+        control_message->cmsg_type != SCM_RIGHTS)
+    {
+      throw std::runtime_error("worker spawner returned an invalid request channel payload");
+    }
+
+    const std::size_t descriptor_count =
+        static_cast<std::size_t>((control_message->cmsg_len - CMSG_LEN(0)) / sizeof(int));
+    if (descriptor_count != expected_count)
+    {
+      throw std::runtime_error("worker spawner returned an unexpected request channel count");
+    }
+
+    std::vector<int> descriptors(descriptor_count, -1);
+    std::memcpy(descriptors.data(), CMSG_DATA(control_message), sizeof(int) * descriptor_count);
+    return descriptors;
+  }
+
   [[noreturn]] void exit_worker_bootstrap_failure(
       int write_fd,
       const Vajra::runtime::BootDiagnostic &diagnostic,
@@ -363,6 +461,21 @@ namespace
     return worker_state->lifecycle_state.load(std::memory_order_acquire) == Vajra::runtime::WorkerLifecycleState::exited;
   }
 
+  bool process_is_alive(pid_t pid)
+  {
+    if (pid <= 0)
+    {
+      return false;
+    }
+
+    if (kill(pid, 0) == 0)
+    {
+      return true;
+    }
+
+    return errno != ESRCH;
+  }
+
   std::int64_t steady_clock_nanoseconds()
   {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -375,6 +488,50 @@ namespace
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
                (std::chrono::steady_clock::now() + offset).time_since_epoch())
         .count();
+  }
+
+  void mark_lifecycle_transition(
+      const std::shared_ptr<Vajra::runtime::SharedWorkerState> &worker_state,
+      Vajra::runtime::WorkerLifecycleState lifecycle_state)
+  {
+    worker_state->lifecycle_state.store(lifecycle_state, std::memory_order_release);
+    worker_state->last_lifecycle_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
+  }
+
+  void mark_recovery_transition(
+      const std::shared_ptr<Vajra::runtime::SharedWorkerState> &worker_state,
+      Vajra::runtime::WorkerRecoveryState recovery_state)
+  {
+    worker_state->recovery_state.store(recovery_state, std::memory_order_release);
+  }
+
+  bool health_requires_quarantine(Vajra::runtime::WorkerHealthState state)
+  {
+    return state == Vajra::runtime::WorkerHealthState::overloaded ||
+           state == Vajra::runtime::WorkerHealthState::degraded ||
+           state == Vajra::runtime::WorkerHealthState::suspect ||
+           state == Vajra::runtime::WorkerHealthState::wedged;
+  }
+
+  Vajra::runtime::HealthPolicy health_policy_for(const Vajra::runtime::RuntimeConfig &config)
+  {
+    return Vajra::runtime::HealthPolicy{
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::milliseconds(250)).count(),
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::seconds(std::max(2, config.worker_timeout_seconds / 2)))
+            .count(),
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::seconds(std::max(5, config.worker_timeout_seconds / 2)))
+            .count(),
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::seconds(std::max(10, config.worker_timeout_seconds)))
+            .count(),
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::seconds(std::max(30, config.worker_timeout_seconds * 2)))
+            .count(),
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::seconds(std::max(1, config.worker_timeout_seconds)))
+            .count()};
   }
 
   std::chrono::steady_clock::duration watcher_sleep_interval(
@@ -503,6 +660,10 @@ std::shared_ptr<Vajra::runtime::SharedWorkerState> Vajra::runtime::NativeRuntime
     worker_states_.push_back(worker_state);
     worker_startup_in_progress_ = false;
   }
+  worker_state->last_progress_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
+  worker_state->last_lifecycle_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
+  worker_state->last_health_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
+  worker_state->idle_execution_count.store(worker_state->request_channel_fds.size(), std::memory_order_release);
   if (debug_logging_.load(std::memory_order_acquire))
   {
     log_worker_lifecycle_event(
@@ -510,8 +671,11 @@ std::shared_ptr<Vajra::runtime::SharedWorkerState> Vajra::runtime::NativeRuntime
         worker_state->worker_index,
         pid,
         WorkerLifecycleState::booting,
+        worker_state->health_state.load(std::memory_order_acquire),
+        worker_state->recovery_state.load(std::memory_order_acquire),
         false,
         WorkerExitClassification::none,
+        worker_state->terminal_replacement_failure.load(std::memory_order_acquire),
         false,
         0);
   }
@@ -521,8 +685,20 @@ std::shared_ptr<Vajra::runtime::SharedWorkerState> Vajra::runtime::NativeRuntime
 
 void Vajra::runtime::NativeRuntime::mark_worker_ready(const std::shared_ptr<SharedWorkerState> &worker_state)
 {
+  worker_state->replacement_needed.store(false, std::memory_order_release);
+  worker_state->recovery_requested.store(false, std::memory_order_release);
+  worker_state->expected_shutdown.store(false, std::memory_order_release);
+  worker_state->timeout_escalation_pending.store(false, std::memory_order_release);
+  worker_state->timeout_kill_deadline_nanoseconds.store(0, std::memory_order_release);
+  worker_state->timeout_handling_started.store(false, std::memory_order_release);
   worker_state->available.store(true, std::memory_order_release);
-  worker_state->lifecycle_state.store(WorkerLifecycleState::ready, std::memory_order_release);
+  worker_state->terminal_replacement_failure.store(false, std::memory_order_release);
+  worker_state->overload_started_nanoseconds.store(0, std::memory_order_release);
+  worker_state->recovery_deadline_nanoseconds.store(0, std::memory_order_release);
+  mark_recovery_transition(worker_state, WorkerRecoveryState::none);
+  mark_lifecycle_transition(worker_state, WorkerLifecycleState::ready);
+  worker_state->health_state.store(WorkerHealthState::healthy, std::memory_order_release);
+  worker_state->last_health_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
   if (debug_logging_.load(std::memory_order_acquire))
   {
     log_worker_lifecycle_event(
@@ -530,8 +706,11 @@ void Vajra::runtime::NativeRuntime::mark_worker_ready(const std::shared_ptr<Shar
         worker_state->worker_index,
         worker_state->pid.load(std::memory_order_acquire),
         WorkerLifecycleState::ready,
+        worker_state->health_state.load(std::memory_order_acquire),
+        worker_state->recovery_state.load(std::memory_order_acquire),
         true,
         WorkerExitClassification::none,
+        worker_state->terminal_replacement_failure.load(std::memory_order_acquire),
         false,
         0);
   }
@@ -540,14 +719,30 @@ void Vajra::runtime::NativeRuntime::mark_worker_ready(const std::shared_ptr<Shar
 
 void Vajra::runtime::NativeRuntime::mark_worker_stopping(const std::shared_ptr<SharedWorkerState> &worker_state)
 {
-  const WorkerLifecycleState previous_state =
-      worker_state->lifecycle_state.exchange(WorkerLifecycleState::stopping, std::memory_order_acq_rel);
+  WorkerLifecycleState previous_state = worker_state->lifecycle_state.load(std::memory_order_acquire);
+  while (previous_state != WorkerLifecycleState::stopping &&
+         previous_state != WorkerLifecycleState::exited)
+  {
+    if (worker_state->lifecycle_state.compare_exchange_weak(
+            previous_state,
+            WorkerLifecycleState::stopping,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire))
+    {
+      break;
+    }
+  }
+
   if (previous_state == WorkerLifecycleState::stopping || previous_state == WorkerLifecycleState::exited)
   {
     return;
   }
 
+  worker_state->last_lifecycle_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
   worker_state->available.store(false, std::memory_order_release);
+  worker_state->health_state.store(WorkerHealthState::degraded, std::memory_order_release);
+  mark_recovery_transition(worker_state, WorkerRecoveryState::draining);
+  worker_state->last_health_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
   if (debug_logging_.load(std::memory_order_acquire))
   {
     log_worker_lifecycle_event(
@@ -555,8 +750,11 @@ void Vajra::runtime::NativeRuntime::mark_worker_stopping(const std::shared_ptr<S
         worker_state->worker_index,
         worker_state->pid.load(std::memory_order_acquire),
         WorkerLifecycleState::stopping,
+        worker_state->health_state.load(std::memory_order_acquire),
+        worker_state->recovery_state.load(std::memory_order_acquire),
         false,
         worker_state->last_exit_classification.load(std::memory_order_acquire),
+        worker_state->terminal_replacement_failure.load(std::memory_order_acquire),
         worker_state->replacement_needed.load(std::memory_order_acquire),
         worker_state->last_exit_detail.load(std::memory_order_acquire));
   }
@@ -575,16 +773,39 @@ void Vajra::runtime::NativeRuntime::mark_worker_exit(
     return;
   }
 
+  worker_state->last_lifecycle_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
   worker_state->available.store(false, std::memory_order_release);
   worker_state->last_exit_classification.store(exit_classification, std::memory_order_release);
   worker_state->last_exit_detail.store(exit_detail, std::memory_order_release);
   worker_state->timeout_escalation_pending.store(false, std::memory_order_release);
   worker_state->timeout_kill_deadline_nanoseconds.store(0, std::memory_order_release);
   worker_state->timeout_handling_started.store(false, std::memory_order_release);
+  worker_state->active_execution_count.store(0, std::memory_order_release);
+  worker_state->idle_execution_count.store(0, std::memory_order_release);
+  worker_state->local_queue_depth.store(0, std::memory_order_release);
+  worker_state->oldest_local_queue_age_nanoseconds.store(0, std::memory_order_release);
+  worker_state->health_state.store(
+      exit_classification == WorkerExitClassification::expected_shutdown
+          ? WorkerHealthState::degraded
+          : WorkerHealthState::wedged,
+      std::memory_order_release);
+  worker_state->last_health_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
+  if (exit_classification == WorkerExitClassification::unexpected_exit ||
+      exit_classification == WorkerExitClassification::unexpected_signal ||
+      exit_classification == WorkerExitClassification::unexpected_status)
+  {
+    worker_state->unexpected_exit_count.fetch_add(1, std::memory_order_acq_rel);
+    worker_state->last_unexpected_exit_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
+  }
   const bool replacement_needed =
       exit_classification != WorkerExitClassification::none &&
       exit_classification != WorkerExitClassification::expected_shutdown;
   worker_state->replacement_needed.store(replacement_needed, std::memory_order_release);
+  worker_state->recovery_requested.store(false, std::memory_order_release);
+  worker_state->spawned_by_worker_spawner.store(false, std::memory_order_release);
+  mark_recovery_transition(
+      worker_state,
+      replacement_needed ? WorkerRecoveryState::rejoin_pending : WorkerRecoveryState::none);
   close_worker_request_channels(worker_state);
   if (debug_logging_.load(std::memory_order_acquire))
   {
@@ -593,8 +814,11 @@ void Vajra::runtime::NativeRuntime::mark_worker_exit(
         worker_state->worker_index,
         worker_state->pid.load(std::memory_order_acquire),
         WorkerLifecycleState::exited,
+        worker_state->health_state.load(std::memory_order_acquire),
+        worker_state->recovery_state.load(std::memory_order_acquire),
         false,
         exit_classification,
+        worker_state->terminal_replacement_failure.load(std::memory_order_acquire),
         replacement_needed,
         exit_detail);
     if (replacement_needed)
@@ -604,13 +828,44 @@ void Vajra::runtime::NativeRuntime::mark_worker_exit(
           worker_state->worker_index,
           worker_state->pid.load(std::memory_order_acquire),
           WorkerLifecycleState::exited,
+          worker_state->health_state.load(std::memory_order_acquire),
+          worker_state->recovery_state.load(std::memory_order_acquire),
           false,
           exit_classification,
+          worker_state->terminal_replacement_failure.load(std::memory_order_acquire),
           true,
           exit_detail);
     }
   }
   worker_state_changed_.notify_all();
+}
+
+void Vajra::runtime::NativeRuntime::prepare_worker_replacement(const std::shared_ptr<SharedWorkerState> &worker_state)
+{
+  worker_state->available.store(false, std::memory_order_release);
+  worker_state->replacement_needed.store(false, std::memory_order_release);
+  worker_state->expected_shutdown.store(false, std::memory_order_release);
+  worker_state->timeout_escalation_pending.store(false, std::memory_order_release);
+  worker_state->timeout_kill_deadline_nanoseconds.store(0, std::memory_order_release);
+  worker_state->timeout_handling_started.store(false, std::memory_order_release);
+  worker_state->request_channels_closed.store(false, std::memory_order_release);
+  worker_state->active_execution_count.store(0, std::memory_order_release);
+  worker_state->idle_execution_count.store(worker_spawn_config_.max_threads, std::memory_order_release);
+  worker_state->local_queue_depth.store(0, std::memory_order_release);
+  worker_state->oldest_local_queue_age_nanoseconds.store(0, std::memory_order_release);
+  worker_state->unexpected_exit_count.store(0, std::memory_order_release);
+  worker_state->last_unexpected_exit_nanoseconds.store(0, std::memory_order_release);
+  worker_state->last_exit_classification.store(WorkerExitClassification::none, std::memory_order_release);
+  worker_state->last_exit_detail.store(0, std::memory_order_release);
+  worker_state->terminal_replacement_failure.store(false, std::memory_order_release);
+  worker_state->spawned_by_worker_spawner.store(false, std::memory_order_release);
+  worker_state->overload_started_nanoseconds.store(0, std::memory_order_release);
+  worker_state->recovery_deadline_nanoseconds.store(0, std::memory_order_release);
+  worker_state->recovery_requested.store(false, std::memory_order_release);
+  worker_state->health_state.store(WorkerHealthState::healthy, std::memory_order_release);
+  worker_state->last_health_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
+  mark_recovery_transition(worker_state, WorkerRecoveryState::replacing);
+  mark_lifecycle_transition(worker_state, WorkerLifecycleState::booting);
 }
 
 void Vajra::runtime::NativeRuntime::close_worker_request_channels(const std::shared_ptr<SharedWorkerState> &worker_state)
@@ -621,10 +876,622 @@ void Vajra::runtime::NativeRuntime::close_worker_request_channels(const std::sha
     return;
   }
 
-  for (int request_channel_fd : worker_state->request_channel_fds)
+  std::vector<int> request_channel_fds;
+  {
+    const std::lock_guard<std::mutex> lock(worker_state->request_channel_mutex);
+    request_channel_fds = worker_state->request_channel_fds;
+  }
+
+  for (int request_channel_fd : request_channel_fds)
   {
     shutdown(request_channel_fd, SHUT_RDWR);
     close_fd_if_open(request_channel_fd);
+  }
+}
+
+bool Vajra::runtime::NativeRuntime::start_worker_spawner(const WorkerSpawnConfig &spawn_config)
+{
+  int control_channels[2] = {-1, -1};
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, control_channels) != 0)
+  {
+    throw std::runtime_error(
+        std::string("worker spawner control channel creation failed: ") + std::strerror(errno));
+  }
+
+#if defined(__APPLE__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+  const pid_t pid = fork();
+#if defined(__APPLE__)
+#pragma clang diagnostic pop
+#endif
+  if (pid < 0)
+  {
+    const int error_number = errno;
+    close_fd_if_open(control_channels[0]);
+    close_fd_if_open(control_channels[1]);
+    throw std::runtime_error(
+        std::string("worker spawner fork failed: ") + std::strerror(error_number));
+  }
+
+  if (pid == 0)
+  {
+    close_fd_if_open(control_channels[0]);
+    run_worker_spawner(control_channels[1], spawn_config);
+  }
+
+  close_fd_if_open(control_channels[1]);
+  {
+    const std::lock_guard<std::mutex> lock(server_mutex_);
+    worker_spawner_pid_ = pid;
+    worker_spawner_fd_ = control_channels[0];
+  }
+  return true;
+}
+
+void Vajra::runtime::NativeRuntime::stop_worker_spawner()
+{
+  int control_fd = -1;
+  pid_t pid = -1;
+  {
+    const std::lock_guard<std::mutex> lock(server_mutex_);
+    control_fd = worker_spawner_fd_;
+    pid = worker_spawner_pid_;
+    worker_spawner_fd_ = -1;
+    worker_spawner_pid_ = -1;
+  }
+
+  if (control_fd >= 0)
+  {
+    const auto command = static_cast<std::uint8_t>(WorkerSpawnerCommand::shutdown);
+    try
+    {
+      write_all_or_throw(control_fd, &command, sizeof(command));
+    }
+    catch (...)
+    {
+    }
+    close_fd_if_open(control_fd);
+  }
+
+  if (pid > 0)
+  {
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+    {
+    }
+  }
+}
+
+[[noreturn]] void Vajra::runtime::NativeRuntime::run_worker_spawner(
+    int control_fd,
+    const WorkerSpawnConfig &spawn_config)
+{
+  for (;;)
+  {
+    for (;;)
+    {
+      int status = 0;
+      const pid_t reaped_pid = waitpid(-1, &status, WNOHANG);
+      if (reaped_pid > 0)
+      {
+        continue;
+      }
+      if (reaped_pid < 0 && errno == EINTR)
+      {
+        continue;
+      }
+      break;
+    }
+
+    struct pollfd control_poll;
+    std::memset(&control_poll, 0, sizeof(control_poll));
+    control_poll.fd = control_fd;
+    control_poll.events = POLLIN;
+    int poll_result = -1;
+    while ((poll_result = poll(&control_poll, 1, 50)) < 0)
+    {
+      if (errno == EINTR)
+      {
+        continue;
+      }
+      close_fd_if_open(control_fd);
+      _exit(1);
+    }
+    if (poll_result == 0)
+    {
+      continue;
+    }
+
+    std::uint8_t command = 0;
+    if (!read_exact_or_eof(control_fd, &command, sizeof(command)))
+    {
+      close_fd_if_open(control_fd);
+      _exit(0);
+    }
+
+    if (command == static_cast<std::uint8_t>(WorkerSpawnerCommand::shutdown))
+    {
+      close_fd_if_open(control_fd);
+      _exit(0);
+    }
+
+    if (command != static_cast<std::uint8_t>(WorkerSpawnerCommand::spawn))
+    {
+      close_fd_if_open(control_fd);
+      _exit(1);
+    }
+
+    std::uint32_t worker_index = 0;
+    if (!read_exact_or_eof(control_fd, &worker_index, sizeof(worker_index)))
+    {
+      close_fd_if_open(control_fd);
+      _exit(1);
+    }
+
+    pid_t pid = -1;
+    std::vector<int> parent_request_channels;
+    BootDiagnostic diagnostic{
+        "worker_replacement_failed",
+        "boot",
+        "worker spawner replacement bootstrap failed"};
+    WorkerBootstrapStatus status = WorkerBootstrapStatus::ready;
+
+    try
+    {
+      if (!spawn_worker_from_single_thread(worker_index, spawn_config, pid, parent_request_channels, diagnostic, control_fd))
+      {
+        status = WorkerBootstrapStatus::failed;
+      }
+    }
+    catch (const std::exception &error)
+    {
+      status = WorkerBootstrapStatus::failed;
+      diagnostic = BootDiagnostic{
+          "worker_replacement_failed",
+          "spawn",
+          error.what()};
+    }
+
+    const WorkerSpawnerResponseHeader header{
+        status,
+        static_cast<std::int32_t>(pid),
+        static_cast<std::uint32_t>(parent_request_channels.size())};
+    write_all_or_throw(control_fd, &header, sizeof(header));
+
+    if (status == WorkerBootstrapStatus::ready)
+    {
+      send_file_descriptors_or_throw(control_fd, parent_request_channels);
+      for (int fd : parent_request_channels)
+      {
+        close_fd_if_open(fd);
+      }
+      continue;
+    }
+
+    write_string_payload(control_fd, diagnostic.code);
+    write_string_payload(control_fd, diagnostic.category);
+    write_string_payload(control_fd, diagnostic.message);
+    for (int fd : parent_request_channels)
+    {
+      close_fd_if_open(fd);
+    }
+  }
+}
+
+bool Vajra::runtime::NativeRuntime::spawn_worker_from_single_thread(
+    std::size_t worker_index,
+    const WorkerSpawnConfig &spawn_config,
+    pid_t &pid,
+    std::vector<int> &parent_request_channels,
+    BootDiagnostic &failure_diagnostic,
+    int inherited_control_fd)
+{
+  int readiness_pipe[2] = {-1, -1};
+  if (pipe(readiness_pipe) != 0)
+  {
+    throw std::runtime_error(
+        std::string("worker bootstrap pipe creation failed: ") + std::strerror(errno));
+  }
+
+  std::vector<std::array<int, 2>> request_channels;
+  request_channels.reserve(spawn_config.max_threads);
+  try
+  {
+    for (std::size_t thread_index = 0; thread_index < spawn_config.max_threads; ++thread_index)
+    {
+      std::array<int, 2> request_channel = {-1, -1};
+      if (socketpair(AF_UNIX, SOCK_STREAM, 0, request_channel.data()) != 0)
+      {
+        throw std::runtime_error(
+            std::string("worker request channel creation failed: ") + std::strerror(errno));
+      }
+      request_channels.push_back(request_channel);
+    }
+  }
+  catch (...)
+  {
+    close_fd_if_open(readiness_pipe[0]);
+    close_fd_if_open(readiness_pipe[1]);
+    for (const auto &pair : request_channels)
+    {
+      close_fd_if_open(pair[0]);
+      close_fd_if_open(pair[1]);
+    }
+    throw;
+  }
+
+#if defined(__APPLE__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+  pid = fork();
+#if defined(__APPLE__)
+#pragma clang diagnostic pop
+#endif
+  if (pid < 0)
+  {
+    const int error_number = errno;
+    close_fd_if_open(readiness_pipe[0]);
+    close_fd_if_open(readiness_pipe[1]);
+    for (const auto &pair : request_channels)
+    {
+      close_fd_if_open(pair[0]);
+      close_fd_if_open(pair[1]);
+    }
+    throw std::runtime_error(
+        std::string("worker fork failed: ") + std::strerror(error_number));
+  }
+
+  if (pid == 0)
+  {
+    rb_thread_atfork();
+    close_fd_if_open(inherited_control_fd);
+    close_fd_if_open(readiness_pipe[0]);
+    std::vector<int> child_request_channels;
+    child_request_channels.reserve(request_channels.size());
+    for (const auto &pair : request_channels)
+    {
+      close_fd_if_open(pair[0]);
+      child_request_channels.push_back(pair[1]);
+    }
+    run_worker_process(
+        std::move(child_request_channels),
+        spawn_config.max_threads,
+        spawn_config.port,
+        spawn_config.max_request_head_bytes,
+        readiness_pipe[1],
+        static_cast<int>(worker_index),
+        spawn_config.worker_processes,
+        spawn_config.debug_logging);
+  }
+
+  parent_request_channels.clear();
+  parent_request_channels.reserve(request_channels.size());
+  for (const auto &pair : request_channels)
+  {
+    close_fd_if_open(pair[1]);
+    parent_request_channels.push_back(pair[0]);
+  }
+  close_fd_if_open(readiness_pipe[1]);
+
+  WorkerBootstrapReport report;
+  try
+  {
+    report = read_worker_bootstrap_report(readiness_pipe[0]);
+  }
+  catch (...)
+  {
+    close_fd_if_open(readiness_pipe[0]);
+    throw;
+  }
+  close_fd_if_open(readiness_pipe[0]);
+
+  if (report.status == WorkerBootstrapStatus::failed)
+  {
+    failure_diagnostic = *report.diagnostic;
+    return false;
+  }
+
+  return true;
+}
+
+bool Vajra::runtime::NativeRuntime::boot_replacement_worker(
+    const std::shared_ptr<SharedWorkerState> &worker_state,
+    const WorkerSpawnConfig &,
+    pid_t &pid,
+    std::vector<int> &parent_request_channels,
+    BootDiagnostic &failure_diagnostic)
+{
+  int control_fd = -1;
+  {
+    const std::lock_guard<std::mutex> lock(server_mutex_);
+    control_fd = worker_spawner_fd_;
+  }
+  if (control_fd < 0)
+  {
+    throw std::runtime_error("worker spawner is not available for replacement");
+  }
+
+  const auto command = static_cast<std::uint8_t>(WorkerSpawnerCommand::spawn);
+  const std::uint32_t worker_index = static_cast<std::uint32_t>(worker_state->worker_index);
+  try
+  {
+    write_all_or_throw(control_fd, &command, sizeof(command));
+    write_all_or_throw(control_fd, &worker_index, sizeof(worker_index));
+  }
+  catch (...)
+  {
+    stop_worker_spawner();
+    throw;
+  }
+
+  WorkerSpawnerResponseHeader header{};
+  try
+  {
+    if (!read_exact_or_eof(control_fd, &header, sizeof(header)))
+    {
+      throw std::runtime_error("worker spawner closed before responding");
+    }
+  }
+  catch (...)
+  {
+    stop_worker_spawner();
+    throw;
+  }
+
+  pid = static_cast<pid_t>(header.pid);
+  if (header.status == WorkerBootstrapStatus::failed)
+  {
+    failure_diagnostic = BootDiagnostic{
+        read_string_payload(control_fd),
+        read_string_payload(control_fd),
+        read_string_payload(control_fd)};
+    return false;
+  }
+
+  if (header.status != WorkerBootstrapStatus::ready)
+  {
+    throw std::runtime_error("worker spawner returned an unknown replacement status");
+  }
+
+  parent_request_channels = receive_file_descriptors_or_throw(control_fd, header.request_channel_count);
+  {
+    const std::lock_guard<std::mutex> lock(worker_state->request_channel_mutex);
+    worker_state->request_channel_fds = parent_request_channels;
+    worker_state->channel_generation.fetch_add(1, std::memory_order_acq_rel);
+  }
+  worker_state->pid.store(pid, std::memory_order_release);
+  prepare_worker_replacement(worker_state);
+  worker_state->spawned_by_worker_spawner.store(true, std::memory_order_release);
+  return true;
+}
+
+void Vajra::runtime::NativeRuntime::replace_worker(const std::shared_ptr<SharedWorkerState> &worker_state)
+{
+  const std::uint64_t attempt_number =
+      worker_state->replacement_attempt_count.fetch_add(1, std::memory_order_acq_rel) + 1;
+  if (attempt_number > recovery_policy_.replacement_failure_limit)
+  {
+    worker_state->replacement_failure_count.fetch_add(1, std::memory_order_acq_rel);
+    worker_state->replacement_needed.store(false, std::memory_order_release);
+    worker_state->available.store(false, std::memory_order_release);
+    worker_state->terminal_replacement_failure.store(true, std::memory_order_release);
+    mark_recovery_transition(worker_state, WorkerRecoveryState::terminal_failure);
+    if (debug_logging_.load(std::memory_order_acquire))
+    {
+      log_worker_lifecycle_event(
+          "worker_replacement_failed",
+          worker_state->worker_index,
+          worker_state->pid.load(std::memory_order_acquire),
+          worker_state->lifecycle_state.load(std::memory_order_acquire),
+          worker_state->health_state.load(std::memory_order_acquire),
+          worker_state->recovery_state.load(std::memory_order_acquire),
+          false,
+          worker_state->last_exit_classification.load(std::memory_order_acquire),
+          true,
+          false,
+          static_cast<int>(attempt_number));
+    }
+    return;
+  }
+
+  if (debug_logging_.load(std::memory_order_acquire))
+  {
+    log_worker_lifecycle_event(
+        "worker_replacement_started",
+        worker_state->worker_index,
+        worker_state->pid.load(std::memory_order_acquire),
+        WorkerLifecycleState::booting,
+        WorkerHealthState::healthy,
+        WorkerRecoveryState::replacing,
+        false,
+        worker_state->last_exit_classification.load(std::memory_order_acquire),
+        false,
+        true,
+        static_cast<int>(attempt_number));
+  }
+
+  pid_t pid = -1;
+  std::vector<int> parent_request_channels;
+  BootDiagnostic failure_diagnostic{"worker_replacement_failed", "boot", "worker replacement bootstrap failed"};
+  bool ready = false;
+  try
+  {
+    ready = boot_replacement_worker(worker_state, worker_spawn_config_, pid, parent_request_channels, failure_diagnostic);
+  }
+  catch (...)
+  {
+    worker_state->replacement_failure_count.fetch_add(1, std::memory_order_acq_rel);
+    worker_state->replacement_needed.store(true, std::memory_order_release);
+    mark_recovery_transition(worker_state, WorkerRecoveryState::rejoin_pending);
+    throw;
+  }
+
+  if (!ready)
+  {
+    worker_state->replacement_failure_count.fetch_add(1, std::memory_order_acq_rel);
+    worker_state->replacement_needed.store(true, std::memory_order_release);
+    mark_recovery_transition(worker_state, WorkerRecoveryState::rejoin_pending);
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+    {
+    }
+    observe_worker_exit(worker_state, status);
+    throw std::runtime_error(
+        "Ruby worker replacement boot failed (" + failure_diagnostic.code + "/" + failure_diagnostic.category + "): " +
+        failure_diagnostic.message);
+  }
+
+  mark_worker_ready(worker_state);
+  worker_state->replacement_success_count.fetch_add(1, std::memory_order_acq_rel);
+
+  if (debug_logging_.load(std::memory_order_acquire))
+  {
+    log_worker_lifecycle_event(
+        "worker_replacement_ready",
+        worker_state->worker_index,
+        pid,
+        WorkerLifecycleState::ready,
+        WorkerHealthState::healthy,
+        worker_state->recovery_state.load(std::memory_order_acquire),
+        true,
+        WorkerExitClassification::none,
+        worker_state->terminal_replacement_failure.load(std::memory_order_acquire),
+        false,
+        static_cast<int>(attempt_number));
+  }
+}
+
+void Vajra::runtime::NativeRuntime::replace_failed_workers(
+    const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states)
+{
+  bool runtime_stopping = false;
+  {
+    const std::lock_guard<std::mutex> lock(server_mutex_);
+    runtime_stopping = runtime_shutdown_started_ || stop_requested_ || shutting_down != 0;
+  }
+  if (runtime_stopping)
+  {
+    return;
+  }
+
+  for (const auto &worker_state : worker_states)
+  {
+    if (!worker_has_exited(worker_state) ||
+        !worker_state->replacement_needed.load(std::memory_order_acquire))
+    {
+      continue;
+    }
+    bool expected = false;
+    if (!worker_state->replacement_scheduled.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+    {
+      continue;
+    }
+    const std::lock_guard<std::mutex> lock(server_mutex_);
+    pending_replacements_.push_back(worker_state);
+  }
+  worker_state_changed_.notify_all();
+}
+
+void Vajra::runtime::NativeRuntime::initiate_worker_recovery(const std::shared_ptr<SharedWorkerState> &worker_state)
+{
+  bool expected = false;
+  if (!worker_state->recovery_requested.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+  {
+    return;
+  }
+
+  worker_state->available.store(false, std::memory_order_release);
+  worker_state->expected_shutdown.store(false, std::memory_order_release);
+  worker_state->timeout_escalation_pending.store(true, std::memory_order_release);
+  worker_state->replacement_needed.store(true, std::memory_order_release);
+  worker_state->timeout_kill_deadline_nanoseconds.store(
+      steady_clock_nanoseconds_after(kWorkerTimeoutGracePeriod),
+      std::memory_order_release);
+  worker_state->recovery_deadline_nanoseconds.store(
+      steady_clock_nanoseconds() + health_policy_.drain_deadline_nanoseconds,
+      std::memory_order_release);
+  mark_recovery_transition(worker_state, WorkerRecoveryState::draining);
+  mark_worker_stopping(worker_state);
+
+  const pid_t pid = worker_state->pid.load(std::memory_order_acquire);
+  if (pid > 0)
+  {
+    (void)signal_process_with_retry(pid, SIGINT, "failed to signal unhealthy worker recovery");
+  }
+  worker_state_changed_.notify_all();
+}
+
+void Vajra::runtime::NativeRuntime::maybe_recover_unhealthy_workers(
+    const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states)
+{
+  bool runtime_stopping = false;
+  HealthPolicy health_policy;
+  {
+    const std::lock_guard<std::mutex> lock(server_mutex_);
+    runtime_stopping = runtime_shutdown_started_ || stop_requested_ || shutting_down != 0;
+    health_policy = health_policy_;
+  }
+  if (runtime_stopping)
+  {
+    return;
+  }
+
+  for (const auto &worker_state : worker_states)
+  {
+    if (worker_state->lifecycle_state.load(std::memory_order_acquire) != WorkerLifecycleState::ready)
+    {
+      continue;
+    }
+
+    const WorkerHealthState health_state = worker_state->health_state.load(std::memory_order_acquire);
+    if (health_state == WorkerHealthState::overloaded)
+    {
+      const std::int64_t overload_started = worker_state->overload_started_nanoseconds.load(std::memory_order_acquire);
+      if (overload_started == 0 ||
+          (steady_clock_nanoseconds() - overload_started) < health_policy.overload_recovery_threshold_nanoseconds)
+      {
+        continue;
+      }
+    }
+    else if (health_state != WorkerHealthState::suspect &&
+             health_state != WorkerHealthState::wedged)
+    {
+      continue;
+    }
+
+    initiate_worker_recovery(worker_state);
+  }
+}
+
+void Vajra::runtime::NativeRuntime::drain_pending_replacements()
+{
+  std::vector<std::shared_ptr<SharedWorkerState>> replacements;
+  {
+    const std::lock_guard<std::mutex> lock(server_mutex_);
+    replacements.swap(pending_replacements_);
+  }
+
+  for (const auto &worker_state : replacements)
+  {
+    worker_state->replacement_scheduled.store(false, std::memory_order_release);
+    if (!worker_has_exited(worker_state) ||
+        !worker_state->replacement_needed.load(std::memory_order_acquire))
+    {
+      continue;
+    }
+
+    try
+    {
+      replace_worker(worker_state);
+    }
+    catch (const std::exception &error)
+    {
+      log_runtime_error(
+          "failed to replace worker index=" + std::to_string(worker_state->worker_index) + ": " + error.what());
+    }
   }
 }
 
@@ -635,16 +1502,24 @@ void Vajra::runtime::NativeRuntime::clear_worker_runtime()
     const std::lock_guard<std::mutex> lock(server_mutex_);
     worker_states = std::move(worker_states_);
     worker_states_.clear();
+    pending_replacements_.clear();
     stop_requested_ = false;
     worker_startup_in_progress_ = false;
+    health_policy_ = HealthPolicy{};
+    worker_spawn_config_ = WorkerSpawnConfig{};
+    recovery_policy_ = RecoveryPolicy{};
     debug_logging_.store(false, std::memory_order_release);
   }
+
+  configure_runtime_tracing(false, "", "");
+  set_runtime_tracing_available(false);
 
   for (const auto &worker_state : worker_states)
   {
     close_worker_request_channels(worker_state);
   }
 
+  stop_worker_spawner();
   stop_worker_exit_watcher();
 }
 
@@ -800,6 +1675,16 @@ void Vajra::runtime::NativeRuntime::wait_for_worker_exit_blocking(
       continue;
     }
 
+    if (worker_state->spawned_by_worker_spawner.load(std::memory_order_acquire))
+    {
+      while (process_is_alive(pid))
+      {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      observe_worker_disappearance(worker_state);
+      continue;
+    }
+
     int status = 0;
     for (;;)
     {
@@ -895,6 +1780,188 @@ void Vajra::runtime::NativeRuntime::observe_worker_exit(
   worker_state->pid.store(-1, std::memory_order_release);
 }
 
+void Vajra::runtime::NativeRuntime::observe_worker_disappearance(
+    const std::shared_ptr<SharedWorkerState> &worker_state)
+{
+  const WorkerLifecycleState current_state = worker_state->lifecycle_state.load(std::memory_order_acquire);
+  const bool shutdown_expected = worker_state->expected_shutdown.load(std::memory_order_acquire);
+  bool runtime_shutdown_requested = false;
+  {
+    const std::lock_guard<std::mutex> lock(server_mutex_);
+    runtime_shutdown_requested = runtime_shutdown_started_ || stop_requested_ || shutting_down != 0;
+  }
+
+  WorkerExitClassification exit_classification = WorkerExitClassification::unexpected_exit;
+  if (current_state == WorkerLifecycleState::booting)
+  {
+    exit_classification = WorkerExitClassification::exit_before_ready;
+  }
+  else if (shutdown_expected ||
+           (runtime_shutdown_requested && current_state == WorkerLifecycleState::stopping))
+  {
+    exit_classification = WorkerExitClassification::expected_shutdown;
+  }
+
+  log_unexpected_worker_exit(exit_classification, 0);
+  mark_worker_exit(worker_state, exit_classification, 0);
+  worker_state->pid.store(-1, std::memory_order_release);
+}
+
+void Vajra::runtime::NativeRuntime::refresh_worker_health(
+    const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states)
+{
+  HealthPolicy health_policy;
+  {
+    const std::lock_guard<std::mutex> lock(server_mutex_);
+    health_policy = health_policy_;
+  }
+
+  const std::int64_t now_nanoseconds = steady_clock_nanoseconds();
+
+  for (const auto &worker_state : worker_states)
+  {
+    const WorkerLifecycleState lifecycle_state = worker_state->lifecycle_state.load(std::memory_order_acquire);
+    const WorkerRecoveryState recovery_state = worker_state->recovery_state.load(std::memory_order_acquire);
+    WorkerHealthState next_state = WorkerHealthState::healthy;
+    std::int64_t sampled_last_progress = 0;
+    if (lifecycle_state == WorkerLifecycleState::stopping)
+    {
+      next_state = WorkerHealthState::degraded;
+    }
+    else if (lifecycle_state == WorkerLifecycleState::exited)
+    {
+      next_state = WorkerHealthState::wedged;
+    }
+    else if (worker_state->timeout_escalation_pending.load(std::memory_order_acquire))
+    {
+      next_state = WorkerHealthState::wedged;
+    }
+    else
+    {
+      const std::size_t active_executions = worker_state->active_execution_count.load(std::memory_order_acquire);
+      const std::size_t idle_executions = worker_state->idle_execution_count.load(std::memory_order_acquire);
+      const std::size_t total_executions = active_executions + idle_executions;
+      const std::size_t local_queue_depth = worker_state->local_queue_depth.load(std::memory_order_acquire);
+      const std::int64_t oldest_local_queue_age =
+          worker_state->oldest_local_queue_age_nanoseconds.load(std::memory_order_acquire);
+      sampled_last_progress = worker_state->last_progress_nanoseconds.load(std::memory_order_acquire);
+      const std::int64_t progress_age = sampled_last_progress == 0 ? 0 : (now_nanoseconds - sampled_last_progress);
+      const std::uint64_t unexpected_exits = worker_state->unexpected_exit_count.load(std::memory_order_acquire);
+      const std::int64_t last_unexpected_exit =
+          worker_state->last_unexpected_exit_nanoseconds.load(std::memory_order_acquire);
+      const bool recovering =
+          recovery_state == WorkerRecoveryState::draining ||
+          recovery_state == WorkerRecoveryState::terminating ||
+          recovery_state == WorkerRecoveryState::replacing ||
+          recovery_state == WorkerRecoveryState::rejoin_pending;
+
+      if (progress_age >= health_policy.wedged_threshold_nanoseconds && active_executions > 0)
+      {
+        next_state = WorkerHealthState::wedged;
+      }
+      else if (progress_age >= health_policy.suspect_threshold_nanoseconds && active_executions > 0)
+      {
+        next_state = WorkerHealthState::suspect;
+      }
+      else if (unexpected_exits > 0 &&
+               last_unexpected_exit != 0 &&
+               (now_nanoseconds - last_unexpected_exit) < health_policy.degraded_decay_nanoseconds)
+      {
+        next_state = WorkerHealthState::degraded;
+      }
+      else if (worker_state->terminal_replacement_failure.load(std::memory_order_acquire))
+      {
+        next_state = WorkerHealthState::wedged;
+      }
+      else if (recovering)
+      {
+        next_state = WorkerHealthState::degraded;
+      }
+      else if (total_executions > 0 &&
+               active_executions >= total_executions &&
+               local_queue_depth > 0 &&
+               oldest_local_queue_age >= health_policy.overload_oldest_queue_age_nanoseconds)
+      {
+        next_state = WorkerHealthState::overloaded;
+        std::int64_t overload_started = worker_state->overload_started_nanoseconds.load(std::memory_order_acquire);
+        if (overload_started == 0)
+        {
+          worker_state->overload_started_nanoseconds.store(now_nanoseconds, std::memory_order_release);
+        }
+      }
+      else if (total_executions > 0 && active_executions >= total_executions)
+      {
+        next_state = WorkerHealthState::busy;
+      }
+      else
+      {
+        next_state = WorkerHealthState::healthy;
+        worker_state->overload_started_nanoseconds.store(0, std::memory_order_release);
+      }
+
+      if (unexpected_exits > 0 &&
+          last_unexpected_exit != 0 &&
+          (now_nanoseconds - last_unexpected_exit) >= health_policy.degraded_decay_nanoseconds)
+      {
+        worker_state->unexpected_exit_count.store(0, std::memory_order_release);
+        worker_state->last_unexpected_exit_nanoseconds.store(0, std::memory_order_release);
+      }
+    }
+
+    const WorkerHealthState previous_state = worker_state->health_state.load(std::memory_order_acquire);
+    if (previous_state != next_state)
+    {
+      if ((next_state == WorkerHealthState::suspect || next_state == WorkerHealthState::wedged) &&
+          lifecycle_state == WorkerLifecycleState::ready &&
+          !worker_state->timeout_escalation_pending.load(std::memory_order_acquire))
+      {
+        const std::int64_t latest_progress = worker_state->last_progress_nanoseconds.load(std::memory_order_acquire);
+        const std::size_t latest_active_executions = worker_state->active_execution_count.load(std::memory_order_acquire);
+        const std::int64_t latest_progress_age = latest_progress == 0 ? 0 : (now_nanoseconds - latest_progress);
+        if (latest_progress != 0 &&
+            latest_progress != sampled_last_progress &&
+            latest_progress_age < health_policy.suspect_threshold_nanoseconds)
+        {
+            next_state = latest_active_executions > 0 ? WorkerHealthState::busy : WorkerHealthState::healthy;
+        }
+      }
+
+      if (next_state != WorkerHealthState::overloaded)
+      {
+        worker_state->overload_started_nanoseconds.store(0, std::memory_order_release);
+      }
+
+      worker_state->health_state.store(next_state, std::memory_order_release);
+      worker_state->last_health_transition_nanoseconds.store(now_nanoseconds, std::memory_order_release);
+      worker_state->health_transition_count.fetch_add(1, std::memory_order_acq_rel);
+      if (health_requires_quarantine(next_state))
+      {
+        worker_state->available.store(false, std::memory_order_release);
+      }
+      else if (lifecycle_state == WorkerLifecycleState::ready)
+      {
+        worker_state->available.store(true, std::memory_order_release);
+      }
+
+      if (debug_logging_.load(std::memory_order_acquire))
+      {
+        log_worker_lifecycle_event(
+            "worker_health_changed",
+            worker_state->worker_index,
+            worker_state->pid.load(std::memory_order_acquire),
+            lifecycle_state,
+            next_state,
+            worker_state->recovery_state.load(std::memory_order_acquire),
+            worker_state->available.load(std::memory_order_acquire),
+            worker_state->last_exit_classification.load(std::memory_order_acquire),
+            worker_state->terminal_replacement_failure.load(std::memory_order_acquire),
+            worker_state->replacement_needed.load(std::memory_order_acquire),
+            0);
+      }
+    }
+  }
+}
+
 void Vajra::runtime::NativeRuntime::handle_worker_timeout(const std::shared_ptr<SharedWorkerState> &worker_state)
 {
   const WorkerLifecycleState current_state = worker_state->lifecycle_state.load(std::memory_order_acquire);
@@ -916,6 +1983,7 @@ void Vajra::runtime::NativeRuntime::handle_worker_timeout(const std::shared_ptr<
   worker_state->available.store(false, std::memory_order_release);
   worker_state->expected_shutdown.store(false, std::memory_order_release);
   worker_state->timeout_escalation_pending.store(true, std::memory_order_release);
+  worker_state->timeout_escalation_count.fetch_add(1, std::memory_order_acq_rel);
   worker_state->timeout_kill_deadline_nanoseconds.store(
       steady_clock_nanoseconds_after(kWorkerTimeoutGracePeriod),
       std::memory_order_release);
@@ -949,6 +2017,7 @@ void Vajra::runtime::NativeRuntime::maybe_escalate_timed_out_workers(
     const pid_t pid = worker_state->pid.load(std::memory_order_acquire);
     if (pid > 0)
     {
+      mark_recovery_transition(worker_state, WorkerRecoveryState::terminating);
       (void)signal_process_with_retry(pid, SIGKILL, "failed to force kill timed out worker");
     }
     worker_state->timeout_escalation_pending.store(false, std::memory_order_release);
@@ -1003,6 +2072,8 @@ void Vajra::runtime::NativeRuntime::watch_worker_exits()
       }
 
       maybe_escalate_timed_out_workers(worker_states);
+      refresh_worker_health(worker_states);
+      maybe_recover_unhealthy_workers(worker_states);
 
       bool observed_exit = false;
       bool any_live_workers = false;
@@ -1035,12 +2106,22 @@ void Vajra::runtime::NativeRuntime::watch_worker_exits()
         }
 
         const pid_t pid = worker_state->pid.load(std::memory_order_acquire);
-        if (pid <= 0)
-        {
-          continue;
-        }
+      if (pid <= 0)
+      {
+        continue;
+      }
 
-        int status = 0;
+      if (worker_state->spawned_by_worker_spawner.load(std::memory_order_acquire))
+      {
+        if (!process_is_alive(pid))
+        {
+          observe_worker_disappearance(worker_state);
+          observed_exit = true;
+        }
+        continue;
+      }
+
+      int status = 0;
         for (;;)
         {
           const pid_t wait_result = waitpid(pid, &status, WNOHANG);
@@ -1065,6 +2146,8 @@ void Vajra::runtime::NativeRuntime::watch_worker_exits()
           throw std::runtime_error("failed to wait for worker exit");
         }
       }
+
+      replace_failed_workers(worker_states);
 
       if (!observed_exit)
       {
@@ -1165,7 +2248,8 @@ void Vajra::runtime::NativeRuntime::run_master_runtime_server(
               [this](const std::shared_ptr<SharedWorkerState> &worker_state) {
                 handle_worker_timeout(worker_state);
               },
-              debug_logging)),
+              debug_logging),
+          Vajra::rack::ControlPlaneConfig{config.stats_path, config.metrics_endpoint}),
       kNativeRuntimeControlRole,
       kMasterWorkerMode,
       config.workers,
@@ -1179,19 +2263,9 @@ void Vajra::runtime::NativeRuntime::run_master_runtime_server(
       [this]() { begin_runtime_shutdown(); });
   Vajra::Server *server_ptr = server.get();
   install_server_instance(std::move(server));
-  ServerRunContext context{server_ptr, ""};
-
   try
   {
-    rb_thread_call_without_gvl(
-        run_server_without_gvl,
-        &context,
-        RUBY_UBF_IO,
-        nullptr);
-    if (!context.error_message.empty())
-    {
-      throw std::runtime_error(context.error_message);
-    }
+    server_ptr->start();
   }
   catch (...)
   {
@@ -1241,12 +2315,24 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
     const bool debug_logging = debug_logging_enabled(config.log_level);
     {
       const std::lock_guard<std::mutex> lock(server_mutex_);
+      health_policy_ = health_policy_for(config);
+      worker_spawn_config_ = WorkerSpawnConfig{
+          config.max_threads,
+          config.port,
+          config.max_request_head_bytes,
+          config.workers,
+          debug_logging};
+      recovery_policy_ = RecoveryPolicy{kReplacementFailureLimit};
       debug_logging_.store(debug_logging, std::memory_order_release);
     }
+    configure_runtime_logging(config.structured_logs, config.access_log, config.error_log);
+    configure_runtime_tracing(config.trace_enabled, config.trace_endpoint, config.trace_service_name);
     log_runtime_banner_start(config.host, config.port, config.workers, config.min_threads, config.max_threads);
+    flush_runtime_logs();
     const BootContractResult master_boot_result = BootContract::run(
         BootContractConfig{config.port, config.max_request_head_bytes, kMasterPreloadRuntimeRole});
     BootContract::ensure_ready(master_boot_result);
+    start_worker_spawner(worker_spawn_config_);
 
     std::vector<std::shared_ptr<SharedWorkerState>> booted_worker_states;
 
@@ -1306,6 +2392,7 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
       if (pid == 0)
       {
         rb_thread_atfork();
+        close_fd_if_open(worker_spawner_fd_);
         close_fd_if_open(readiness_pipe[0]);
         std::vector<int> child_request_channels;
         child_request_channels.reserve(request_channels.size());
@@ -1370,11 +2457,109 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
     }
 
     ensure_worker_exit_watcher_started();
-    run_master_runtime_server(config, booted_worker_states, debug_logging);
+    std::atomic_bool server_thread_completed{false};
+    std::mutex server_thread_mutex;
+    std::string server_thread_error;
+    const RuntimeConfig server_config = config;
+    const std::vector<std::shared_ptr<SharedWorkerState>> server_worker_states = booted_worker_states;
+    std::thread server_thread([this, server_config, server_worker_states, debug_logging, &server_thread_completed, &server_thread_mutex, &server_thread_error]() mutable {
+      try
+      {
+        run_master_runtime_server(server_config, server_worker_states, debug_logging);
+      }
+      catch (const std::exception &error)
+      {
+        const std::lock_guard<std::mutex> lock(server_thread_mutex);
+        server_thread_error = error.what();
+      }
+      catch (...)
+      {
+        const std::lock_guard<std::mutex> lock(server_thread_mutex);
+        server_thread_error = "server failed with an unknown native error";
+      }
+      server_thread_completed.store(true, std::memory_order_release);
+      worker_state_changed_.notify_all();
+    });
+
+    RuntimeSleepContext loop_sleep_context{std::chrono::milliseconds(50)};
+    for (;;)
+    {
+      drain_pending_replacements();
+      const bool all_workers_exited = std::all_of(
+          booted_worker_states.begin(),
+          booted_worker_states.end(),
+          [](const auto &worker_state) { return worker_has_exited(worker_state); });
+      bool shutdown_in_progress = false;
+      {
+        const std::lock_guard<std::mutex> lock(server_mutex_);
+        shutdown_in_progress = runtime_shutdown_started_ || stop_requested_;
+      }
+      if (shutdown_requested() || shutdown_in_progress)
+      {
+        begin_runtime_shutdown();
+        (void)stop_worker_processes();
+        Vajra::Server *server = nullptr;
+        std::shared_ptr<Vajra::Server> server_handle;
+        {
+          std::lock_guard<std::mutex> lock(server_mutex_);
+          server_handle = server_instance_;
+          server = server_handle.get();
+        }
+        if (server != nullptr)
+        {
+          server->stop();
+        }
+      }
+      if (server_thread_completed.load(std::memory_order_acquire))
+      {
+        break;
+      }
+      if ((shutdown_in_progress || shutting_down != 0) && all_workers_exited)
+      {
+        break;
+      }
+
+      rb_thread_call_without_gvl(
+          sleep_runtime_loop_without_gvl,
+          &loop_sleep_context,
+          RUBY_UBF_IO,
+          nullptr);
+    }
+
+    if (server_thread.joinable())
+    {
+      if (!server_thread_completed.load(std::memory_order_acquire))
+      {
+        Vajra::Server *server = nullptr;
+        std::shared_ptr<Vajra::Server> server_handle;
+        {
+          std::lock_guard<std::mutex> lock(server_mutex_);
+          server_handle = server_instance_;
+          server = server_handle.get();
+        }
+        if (server != nullptr)
+        {
+          server->stop();
+        }
+      }
+      server_thread.join();
+    }
+    {
+      const std::lock_guard<std::mutex> lock(server_thread_mutex);
+      if (!server_thread_error.empty())
+      {
+        throw std::runtime_error(server_thread_error);
+      }
+    }
+
     begin_runtime_shutdown();
     stop_worker_processes();
     wait_for_worker_exit(booted_worker_states);
     clear_worker_runtime();
+    if (debug_logging)
+    {
+      log_runtime_stop_completed();
+    }
     log_runtime_shutdown_complete();
   }
   catch (...)
@@ -1393,11 +2578,12 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
 
 void Vajra::runtime::NativeRuntime::stop()
 {
-  if (runtime_running())
+  const bool had_runtime = runtime_running();
+  if (had_runtime)
   {
     begin_runtime_shutdown();
+    (void)stop_worker_processes();
   }
-  (void)stop_worker_processes();
 
   Vajra::Server *server = nullptr;
   std::shared_ptr<Vajra::Server> server_handle;
@@ -1438,7 +2624,15 @@ void VajraNative::start(
     int first_data_timeout_seconds,
     int persistent_timeout_seconds,
     int worker_timeout_seconds,
-    std::string log_level)
+    std::string log_level,
+    std::string access_log,
+    std::string error_log,
+    bool structured_logs,
+    std::string stats_path,
+    std::string metrics_endpoint,
+    bool trace_enabled,
+    std::string trace_endpoint,
+    std::string trace_service_name)
 {
   Vajra::runtime::NativeRuntime::instance().start(Vajra::runtime::RuntimeConfig{
       std::move(host),
@@ -1455,7 +2649,15 @@ void VajraNative::start(
       first_data_timeout_seconds,
       persistent_timeout_seconds,
       worker_timeout_seconds,
-      std::move(log_level)});
+      std::move(log_level),
+      std::move(access_log),
+      std::move(error_log),
+      structured_logs,
+      std::move(stats_path),
+      std::move(metrics_endpoint),
+      trace_enabled,
+      std::move(trace_endpoint),
+      std::move(trace_service_name)});
 }
 
 void VajraNative::stop()

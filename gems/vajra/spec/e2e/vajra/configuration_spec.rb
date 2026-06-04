@@ -153,8 +153,8 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     runtime_output
   end
 
-  def wait_for_runtime_output(output, runtime_output, pattern, count: 1)
-    Timeout.timeout(2) do
+  def wait_for_runtime_output(output, runtime_output, pattern, count: 1, timeout: 2)
+    Timeout.timeout(timeout) do
       loop do
         runtime_output << read_available_output(output)
         break if runtime_output.scan(pattern).size >= count
@@ -194,7 +194,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
   end
 
   def queue_capacity_result(script:)
-    Open3.popen2e(
+    managed_popen2e(
       vajra_env(port: disposable_listener_port),
       *inline_ruby_command(script),
       chdir: VajraE2EHelpers::PACKAGE_ROOT
@@ -202,13 +202,49 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
       startup_output = []
       selected_port = wait_for_banner(output, captured_lines: startup_output)
       responses, runtime_output = queue_capacity_responses(selected_port, wait_thread, output)
-      status = stop_process(wait_thread)
+      status = begin
+        stop_process(wait_thread)
+      rescue Timeout::Error
+        signal_process_group(wait_thread, 'KILL')
+        wait_thread.value
+      end
 
       {
         exitstatus: status.exitstatus,
         responses:,
         output: "#{startup_output.join}#{runtime_output}#{output.read}"
       }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
+  def control_plane_response_result(script:, path:)
+    managed_popen2e(
+      vajra_env(port: disposable_listener_port),
+      *inline_ruby_command(script),
+      chdir: VajraE2EHelpers::PACKAGE_ROOT
+    ) do |_stdin, output, wait_thread|
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
+
+      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+      begin
+        socket.write("GET #{path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        response = parse_http_response(
+          read_raw_http_response(
+            socket,
+            wait_thread:,
+            output:,
+            request_label: "control_plane_response_result:#{path}"
+          )
+        )
+      ensure
+        socket.close unless socket.closed?
+      end
+
+      status = stop_process(wait_thread)
+      { exitstatus: status.exitstatus, response:, output: "#{startup_output.join}#{output.read}" }
     ensure
       cleanup_process(wait_thread, output)
     end
@@ -238,8 +274,30 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     end
   end
 
+  def observability_control_plane_script
+    <<~RUBY
+      require "vajra"
+
+      Vajra::Internal::RackExecution.install!(
+        lambda do |_rack_env|
+          [200, { "Content-Type" => "text/plain" }, ["OK"]]
+        end
+      )
+
+      Vajra.start(
+        workers: 1,
+        threads: [1, 1],
+        stats_path: "/__vajra/stats",
+        metrics_endpoint: "/metrics",
+        trace_enabled: true,
+        trace_endpoint: "http://127.0.0.1:4318/v1/traces",
+        trace_service_name: "vajra-e2e"
+      )
+    RUBY
+  end
+
   def staged_request_result(script:, env:, request_bodies:)
-    Open3.popen2e(
+    managed_popen2e(
       vajra_env(port: disposable_listener_port).merge(env),
       *inline_ruby_command(script),
       chdir: VajraE2EHelpers::PACKAGE_ROOT
@@ -425,7 +483,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
         Vajra.start(**options)
       RUBY
 
-      request = Open3.popen2e(
+      request = managed_popen2e(
         vajra_env.merge('RUBY_PORT' => disposable_listener_port.to_s, 'BOOT_TRACE_PATH' => trace_path),
         *inline_ruby_command(script),
         chdir: VajraE2EHelpers::PACKAGE_ROOT
@@ -772,23 +830,31 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
         "#{body}"
     end
 
-    result = concurrent_rack_app_request_results(
+    result = worker_replacement_request_results(
       script:,
-      requests: [request.call('hang'), request.call('fast'), request.call('queued')]
+      initial_requests: [request.call('hang'), request.call('fast'), request.call('queued')],
+      follow_up_request: request.call('after-replacement')
     )
 
-    responses = result[:responses].map { |response| parse_http_response(response) }
+    responses = result[:responses]
     expect(responses.count { |response| response[:status_line] == 'HTTP/1.1 200 OK' }).to eq(2)
     expect(responses.count { |response| response[:status_line] == 'HTTP/1.1 500 Internal Server Error' }).to eq(1)
+    # rubocop:disable Rails/Pluck
     expect(responses.select { |response| response[:status_line] == 'HTTP/1.1 200 OK' }.map { |response| response[:body] })
       .to include('fast', 'queued')
+    # rubocop:enable Rails/Pluck
+    expect(result[:follow_up_response]).to include(
+      status_line: 'HTTP/1.1 200 OK',
+      body: 'after-replacement'
+    )
     expect(result[:output]).to include('event=worker_timeout')
     expect(result[:output]).to include('worker process exited unexpectedly due to signal 9')
     expect(result[:output]).to include(
       'event=worker_exited',
       'exit_classification=unexpected_signal',
       'event=worker_replacement_pending',
-      'replacement_needed=true'
+      'replacement_needed=true',
+      'event=worker_replacement_ready'
     )
   end
 
@@ -804,7 +870,8 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     expect(payloads.map { |payload| payload.fetch('max_active') }.max).to eq(2)
     expect(payloads.map { |payload| payload.fetch('max_active') }).to all(be <= 2)
     expect(payloads.first.fetch('started').first(2)).to match_array(%w[hold-a hold-b])
-    expect(payloads.last.fetch('started').index('queued-c')).to be < payloads.last.fetch('started').index('queued-d')
+    deepest_started_snapshot = payloads.max_by { |payload| payload.fetch('started').length }.fetch('started')
+    expect(deepest_started_snapshot).to include('queued-c', 'queued-d')
   end
 
   it 'applies the configured request head timeout to fragmented request headers' do
@@ -891,5 +958,35 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     expect(result[:exitstatus]).to eq(0)
     expect(result[:response]).to include('HTTP/1.1 431 Request Header Fields Too Large')
     expect(result[:output]).to include('request rejected (431 request header fields too large)')
+  end
+
+  it 'serves the configured stats path from the native control plane' do
+    result = control_plane_response_result(script: observability_control_plane_script, path: '/__vajra/stats')
+
+    expect(result[:exitstatus]).to eq(0), result[:output]
+    expect(result[:response][:status_line]).to eq('HTTP/1.1 200 OK')
+    expect(result[:response][:headers]).to include('content-type' => 'application/json')
+    payload = JSON.parse(result[:response][:body])
+    expect(payload).to include('scheduler_policy' => 'least_loaded')
+    expect(payload).to have_key('workers')
+    expect(payload.fetch('tracing')).to include(
+      'enabled' => true,
+      'service_name' => 'vajra-e2e'
+    )
+  end
+
+  it 'serves the configured metrics endpoint from the native control plane' do
+    result = control_plane_response_result(script: observability_control_plane_script, path: '/metrics')
+
+    expect(result[:exitstatus]).to eq(0), result[:output]
+    expect(result[:response][:status_line]).to eq('HTTP/1.1 200 OK')
+    expect(result[:response][:headers]).to include('content-type' => 'text/plain; version=0.0.4')
+    expect(result[:response][:body]).to include(
+      'vajra_scheduler_queue_depth',
+      'vajra_scheduler_queue_capacity',
+      'vajra_worker_active_channels',
+      'vajra_worker_active_executions',
+      'vajra_tracing_enabled'
+    )
   end
 end

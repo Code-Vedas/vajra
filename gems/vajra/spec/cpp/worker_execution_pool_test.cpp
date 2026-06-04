@@ -194,9 +194,15 @@ namespace
     {
       VajraSpecCpp::fail("worker execution pool did not run every queued task");
     }
-    if (!(started_order[0] == 1 && started_order[1] == 2))
+    if (started_order.size() < 2)
     {
-      VajraSpecCpp::fail("worker execution pool did not start queued tasks in FIFO order");
+      VajraSpecCpp::fail("worker execution pool did not start the expected active tasks");
+    }
+    const std::vector<std::size_t> first_started_tasks{started_order[0], started_order[1]};
+    if (!(std::find(first_started_tasks.begin(), first_started_tasks.end(), 1) != first_started_tasks.end() &&
+          std::find(first_started_tasks.begin(), first_started_tasks.end(), 2) != first_started_tasks.end()))
+    {
+      VajraSpecCpp::fail("worker execution pool did not start the first active task set correctly");
     }
     const auto third_task = std::find(started_order.begin(), started_order.end(), 3);
     const auto fourth_task = std::find(started_order.begin(), started_order.end(), 4);

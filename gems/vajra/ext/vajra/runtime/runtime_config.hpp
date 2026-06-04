@@ -32,6 +32,14 @@ namespace Vajra
       int persistent_timeout_seconds;
       int worker_timeout_seconds;
       std::string log_level;
+      std::string access_log;
+      std::string error_log;
+      bool structured_logs;
+      std::string stats_path;
+      std::string metrics_endpoint;
+      bool trace_enabled;
+      std::string trace_endpoint;
+      std::string trace_service_name;
     };
 
     class RuntimeConfigLoader final

@@ -8,6 +8,7 @@
 require_relative 'vajra/version'
 require_relative 'vajra/internal/boot'
 require_relative 'vajra/internal/rack_execution'
+require_relative 'vajra/internal/tracing'
 
 # Ruby entrypoint for booting the native Vajra HTTP listener.
 module Vajra
@@ -90,6 +91,9 @@ module Vajra
       structured_logs
       stats_path
       metrics_endpoint
+      trace_enabled
+      trace_endpoint
+      trace_service_name
       pidfile
       state_path
       control_socket
@@ -112,6 +116,14 @@ module Vajra
       persistent_timeout
       worker_timeout
       log_level
+      access_log
+      error_log
+      structured_logs
+      stats_path
+      metrics_endpoint
+      trace_enabled
+      trace_endpoint
+      trace_service_name
     ].freeze
     UNIMPLEMENTED_START_OPTION_KEYS = (DOCUMENTED_START_OPTION_KEYS - NATIVE_START_OPTION_KEYS).freeze
 
@@ -133,6 +145,7 @@ module Vajra
 
     def start(**options)
       validate_start_options!(options)
+      Vajra::Internal::Tracing.install_from_start_options!(options)
       __native_start__(**options.slice(*NATIVE_START_OPTION_KEYS))
     end
 
@@ -156,9 +169,11 @@ module Vajra
 
     def validate_start_options!(options)
       option_keys = options.keys
+      # rubocop:disable Rails/NegateInclude
       invalid_option = option_keys.find do |key|
         !DOCUMENTED_START_OPTION_KEYS.include?(key) || UNIMPLEMENTED_START_OPTION_KEYS.include?(key)
       end
+      # rubocop:enable Rails/NegateInclude
       return unless invalid_option
 
       raise Error, "start option not implemented yet: #{invalid_option}" if UNIMPLEMENTED_START_OPTION_KEYS.include?(invalid_option)

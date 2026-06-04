@@ -1,0 +1,66 @@
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+module Vajra
+  module Internal
+    module Tracing
+      type start_option_value =
+        Integer |
+        String |
+        bool |
+        Array[String] |
+        Array[Integer] |
+        nil
+
+      type start_options = Hash[Symbol, start_option_value]
+
+      type rack_env_value =
+        String |
+        bool |
+        IO |
+        StringIO |
+        Array[Integer]
+
+      type lifecycle_event_key =
+        :event |
+        :worker_index |
+        :pid |
+        :lifecycle_state |
+        :health_state |
+        :recovery_state |
+        :available |
+        :exit_classification |
+        :replacement_needed |
+        :terminal_replacement_failure |
+        :exit_detail |
+        :timestamp
+
+      type lifecycle_event = Hash[
+        lifecycle_event_key,
+        String | Integer | bool
+      ]
+
+      interface _Tracer
+        def in_span: [T] (String, attributes: Hash[String, String | Integer | bool]) { () -> T } -> T
+      end
+
+      class TraceState
+        attr_accessor enabled: bool
+        attr_accessor available: bool
+        attr_accessor tracer: _Tracer?
+        attr_accessor warning_emitted: bool
+      end
+
+      TRACE_MUTEX: Thread::Mutex
+      TRACE_STATE: TraceState
+
+      def self.install_from_start_options!: (start_options) -> bool
+      def self.with_request_span: [T] (Hash[String, rack_env_value]) { () -> T } -> T
+      def self.emit_lifecycle_span: (lifecycle_event) -> nil
+      def self.__native_set_tracing_status__: (bool, bool, String, String) -> nil
+      def self.__native_set_lifecycle_callback__: ((Method | Proc)? callback) -> ((Method | Proc)?)
+    end
+  end
+end

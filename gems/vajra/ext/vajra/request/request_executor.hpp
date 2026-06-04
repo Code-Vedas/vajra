@@ -48,6 +48,7 @@ namespace Vajra
     {
     public:
       virtual ~RequestExecutor() = default;
+      virtual std::optional<Vajra::response::Response> control_response(const RequestContext &request_context) const;
       virtual std::unique_ptr<RequestExecutionSession> start(const RequestContext &request_context) const;
       virtual std::optional<Vajra::response::Response> execute(const RequestContext &request_context) const;
     };

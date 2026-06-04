@@ -15,6 +15,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace Vajra
@@ -53,14 +54,26 @@ namespace Vajra
       virtual std::optional<Vajra::response::Response> execute(
           const std::vector<request::RackEnvEntry> &env_entries,
           const std::string &request_body) const = 0;
+      virtual std::string stats_payload_json() const;
+      virtual std::string metrics_payload_text() const;
+    };
+
+    struct ControlPlaneConfig
+    {
+      std::string stats_path;
+      std::string metrics_endpoint;
     };
 
     class RackRequestExecutor final : public request::RequestExecutor
     {
     public:
       RackRequestExecutor();
-      explicit RackRequestExecutor(std::shared_ptr<const RackExecutionTransport> transport);
+      explicit RackRequestExecutor(
+          std::shared_ptr<const RackExecutionTransport> transport,
+          ControlPlaneConfig control_plane_config = {});
 
+      std::optional<Vajra::response::Response> control_response(
+          const request::RequestContext &request_context) const override;
       std::unique_ptr<request::RequestExecutionSession> start(
           const request::RequestContext &request_context) const override;
       std::optional<Vajra::response::Response> execute(const request::RequestContext &request_context) const override;
@@ -70,6 +83,7 @@ namespace Vajra
       // Later worker IPC routing should replace this transport without redefining
       // the outer Rack execution contract consumed by RequestProcessor.
       std::shared_ptr<const RackExecutionTransport> transport_;
+      ControlPlaneConfig control_plane_config_;
     };
   }
 }

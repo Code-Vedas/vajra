@@ -30,6 +30,14 @@ module VajraE2EHelpers
     VAJRA_PERSISTENT_TIMEOUT
     VAJRA_WORKER_TIMEOUT
     VAJRA_LOG_LEVEL
+    VAJRA_ACCESS_LOG
+    VAJRA_ERROR_LOG
+    VAJRA_STRUCTURED_LOGS
+    VAJRA_STATS_PATH
+    VAJRA_METRICS_ENDPOINT
+    VAJRA_TRACE_ENABLED
+    VAJRA_TRACE_ENDPOINT
+    VAJRA_TRACE_SERVICE_NAME
     WEB_CONCURRENCY
     MAX_THREADS
   ].freeze
@@ -59,15 +67,21 @@ module VajraE2EHelpers
   end
 
   def vajra_env(host: nil, port: nil, max_request_head_bytes: nil)
+    # rubocop:disable Rails/IndexWith
     RUNTIME_ENV_OVERRIDE_KEYS.to_h { |key| [key, nil] }.tap do |env|
       env['VAJRA_HOST'] = host unless host.nil?
       env['VAJRA_PORT'] = port.to_s unless port.nil?
       env['VAJRA_MAX_REQUEST_HEAD_BYTES'] = max_request_head_bytes.to_s unless max_request_head_bytes.nil?
     end
+    # rubocop:enable Rails/IndexWith
   end
 
   def listener_banner(port)
     "listening on port #{port}"
+  end
+
+  def managed_popen2e(*command, **options, &)
+    Open3.popen2e(*command, **options.merge(pgroup: true), &)
   end
 
   def wait_for_banner(output, captured_lines: nil)

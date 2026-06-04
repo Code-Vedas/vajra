@@ -8,6 +8,7 @@
 #include "rack/rack_request_executor.hpp"
 #include "runtime/boot_contract.hpp"
 #include "runtime/runtime_config.hpp"
+#include "runtime/runtime_logging.hpp"
 #include "ruby.h"
 
 #include <exception>
@@ -43,7 +44,15 @@ namespace
           config.first_data_timeout_seconds,
           config.persistent_timeout_seconds,
           config.worker_timeout_seconds,
-          config.log_level);
+          config.log_level,
+          config.access_log,
+          config.error_log,
+          config.structured_logs,
+          config.stats_path,
+          config.metrics_endpoint,
+          config.trace_enabled,
+          config.trace_endpoint,
+          config.trace_service_name);
     }
     catch (const std::exception &error)
     {
@@ -81,6 +90,29 @@ namespace
     Vajra::runtime::BootContract::set_callback(callback);
     return callback;
   }
+
+  VALUE rb_tracing_native_set_lifecycle_callback(VALUE self, VALUE callback)
+  {
+    (void)self;
+    Vajra::runtime::set_runtime_lifecycle_callback(reinterpret_cast<void *>(callback));
+    return callback;
+  }
+
+  VALUE rb_tracing_native_set_status(
+      VALUE self,
+      VALUE enabled,
+      VALUE available,
+      VALUE endpoint,
+      VALUE service_name)
+  {
+    (void)self;
+    Vajra::runtime::configure_runtime_tracing(
+        enabled == Qtrue,
+        NIL_P(endpoint) ? std::string() : StringValueCStr(endpoint),
+        NIL_P(service_name) ? std::string("vajra") : StringValueCStr(service_name));
+    Vajra::runtime::set_runtime_tracing_available(available == Qtrue);
+    return Qnil;
+  }
 }
 
 extern "C" void Init_vajra()
@@ -93,6 +125,7 @@ extern "C" void Init_vajra()
   VALUE mInternal = rb_define_module_under(mVajra, "Internal");
   VALUE mBoot = rb_define_module_under(mInternal, "Boot");
   VALUE mRackExecution = rb_define_module_under(mInternal, "RackExecution");
+  VALUE mTracing = rb_define_module_under(mInternal, "Tracing");
 
   rb_define_singleton_method(mVajra, "start", RUBY_METHOD_FUNC(rb_vajra_start), -1);
   rb_define_singleton_method(mVajra, "stop", RUBY_METHOD_FUNC(rb_vajra_stop), 0);
@@ -106,4 +139,14 @@ extern "C" void Init_vajra()
       "__native_set_callback__",
       RUBY_METHOD_FUNC(rb_rack_execution_native_set_callback),
       1);
+  rb_define_singleton_method(
+      mTracing,
+      "__native_set_lifecycle_callback__",
+      RUBY_METHOD_FUNC(rb_tracing_native_set_lifecycle_callback),
+      1);
+  rb_define_singleton_method(
+      mTracing,
+      "__native_set_tracing_status__",
+      RUBY_METHOD_FUNC(rb_tracing_native_set_status),
+      4);
 }

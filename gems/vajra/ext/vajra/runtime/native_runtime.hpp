@@ -6,6 +6,7 @@
 #ifndef VAJRA_RUNTIME_NATIVE_RUNTIME_HPP
 #define VAJRA_RUNTIME_NATIVE_RUNTIME_HPP
 
+#include "runtime/boot_contract.hpp"
 #include "runtime/runtime_config.hpp"
 #include "runtime/worker_pool.hpp"
 #include "server.hpp"
@@ -24,6 +25,30 @@ namespace Vajra
 {
   namespace runtime
   {
+    struct HealthPolicy
+    {
+      std::int64_t overload_oldest_queue_age_nanoseconds = 0;
+      std::int64_t overload_recovery_threshold_nanoseconds = 0;
+      std::int64_t suspect_threshold_nanoseconds = 0;
+      std::int64_t wedged_threshold_nanoseconds = 0;
+      std::int64_t degraded_decay_nanoseconds = 0;
+      std::int64_t drain_deadline_nanoseconds = 0;
+    };
+
+    struct WorkerSpawnConfig
+    {
+      std::size_t max_threads = 0;
+      int port = 0;
+      std::size_t max_request_head_bytes = 0;
+      int worker_processes = 0;
+      bool debug_logging = false;
+    };
+
+    struct RecoveryPolicy
+    {
+      std::uint64_t replacement_failure_limit = 3;
+    };
+
     class NativeRuntime final
     {
     public:
@@ -53,7 +78,29 @@ namespace Vajra
           const std::shared_ptr<SharedWorkerState> &worker_state,
           WorkerExitClassification exit_classification,
           int exit_detail);
+      void prepare_worker_replacement(const std::shared_ptr<SharedWorkerState> &worker_state);
       void close_worker_request_channels(const std::shared_ptr<SharedWorkerState> &worker_state);
+      void replace_failed_workers(const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states);
+      void maybe_recover_unhealthy_workers(const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states);
+      void initiate_worker_recovery(const std::shared_ptr<SharedWorkerState> &worker_state);
+      void drain_pending_replacements();
+      void replace_worker(const std::shared_ptr<SharedWorkerState> &worker_state);
+      bool start_worker_spawner(const WorkerSpawnConfig &spawn_config);
+      void stop_worker_spawner();
+      [[noreturn]] void run_worker_spawner(int control_fd, const WorkerSpawnConfig &spawn_config);
+      bool spawn_worker_from_single_thread(
+          std::size_t worker_index,
+          const WorkerSpawnConfig &spawn_config,
+          pid_t &pid,
+          std::vector<int> &parent_request_channels,
+          BootDiagnostic &failure_diagnostic,
+          int inherited_control_fd);
+      bool boot_replacement_worker(
+          const std::shared_ptr<SharedWorkerState> &worker_state,
+          const WorkerSpawnConfig &spawn_config,
+          pid_t &pid,
+          std::vector<int> &parent_request_channels,
+          BootDiagnostic &failure_diagnostic);
       void clear_worker_runtime();
       void install_server_instance(std::shared_ptr<Vajra::Server> server);
       std::shared_ptr<Vajra::Server> take_server_instance();
@@ -63,6 +110,8 @@ namespace Vajra
       void observe_worker_exit(
           const std::shared_ptr<SharedWorkerState> &worker_state,
           int status);
+      void observe_worker_disappearance(const std::shared_ptr<SharedWorkerState> &worker_state);
+      void refresh_worker_health(const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states);
       void handle_worker_timeout(const std::shared_ptr<SharedWorkerState> &worker_state);
       void maybe_escalate_timed_out_workers(const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states);
       void ensure_worker_exit_watcher_started();
@@ -89,7 +138,13 @@ namespace Vajra
       std::vector<std::shared_ptr<SharedWorkerState>> worker_states_;
       bool stop_requested_ = false;
       bool worker_startup_in_progress_ = false;
+      HealthPolicy health_policy_{};
+      WorkerSpawnConfig worker_spawn_config_{};
+      RecoveryPolicy recovery_policy_{};
       std::atomic_bool debug_logging_{false};
+      std::vector<std::shared_ptr<SharedWorkerState>> pending_replacements_;
+      pid_t worker_spawner_pid_ = -1;
+      int worker_spawner_fd_ = -1;
       bool worker_exit_watcher_stop_requested_ = false;
       bool worker_exit_watcher_running_ = false;
       std::thread worker_exit_watcher_;

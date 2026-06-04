@@ -33,6 +33,14 @@ namespace
   ID id_persistent_timeout;
   ID id_worker_timeout;
   ID id_log_level;
+  ID id_access_log;
+  ID id_error_log;
+  ID id_structured_logs;
+  ID id_stats_path;
+  ID id_metrics_endpoint;
+  ID id_trace_enabled;
+  ID id_trace_endpoint;
+  ID id_trace_service_name;
 
   struct OptionValidationContext
   {
@@ -64,7 +72,15 @@ namespace
         key_id == id_first_data_timeout ||
         key_id == id_persistent_timeout ||
         key_id == id_worker_timeout ||
-        key_id == id_log_level)
+        key_id == id_log_level ||
+        key_id == id_access_log ||
+        key_id == id_error_log ||
+        key_id == id_structured_logs ||
+        key_id == id_stats_path ||
+        key_id == id_metrics_endpoint ||
+        key_id == id_trace_enabled ||
+        key_id == id_trace_endpoint ||
+        key_id == id_trace_service_name)
     {
       return ST_CONTINUE;
     }
@@ -241,6 +257,57 @@ namespace
     }
 
     return string_value;
+  }
+
+  bool configured_boolean_from_ruby(VALUE options, ID key, bool default_value)
+  {
+    if (NIL_P(options))
+    {
+      return default_value;
+    }
+
+    VALUE lookup_args[2] = {options, ID2SYM(key)};
+    const VALUE option_value = Vajra::runtime::protected_ruby_call_value(
+        Vajra::runtime::protected_rb_hash_lookup,
+        reinterpret_cast<VALUE>(lookup_args),
+        "failed to read Ruby start options");
+    if (NIL_P(option_value))
+    {
+      return default_value;
+    }
+
+    if (option_value == Qtrue)
+    {
+      return true;
+    }
+    if (option_value == Qfalse)
+    {
+      return false;
+    }
+
+    throw std::runtime_error(
+        "invalid boolean option: expected true or false for " + std::string(rb_id2name(key)));
+  }
+
+  bool configured_boolean_from_env(const char *name, bool default_value)
+  {
+    std::string value = configured_string_from_env(name, default_value ? "true" : "false");
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
+      return static_cast<char>(std::tolower(character));
+    });
+
+    if (value == "true" || value == "1" || value == "yes" || value == "on")
+    {
+      return true;
+    }
+    if (value == "false" || value == "0" || value == "no" || value == "off")
+    {
+      return false;
+    }
+
+    throw std::runtime_error(
+        "invalid " + std::string(name) + ": " + value +
+        ". Expected one of: true, false, 1, 0, yes, no, on, off.");
   }
 
   std::pair<std::size_t, std::size_t> default_thread_range()
@@ -421,6 +488,14 @@ void Vajra::runtime::RuntimeConfigLoader::initialize_ids()
   id_worker_timeout = rb_intern("worker_timeout");
   id_max_request_head_bytes = rb_intern("max_request_head_bytes");
   id_log_level = rb_intern("log_level");
+  id_access_log = rb_intern("access_log");
+  id_error_log = rb_intern("error_log");
+  id_structured_logs = rb_intern("structured_logs");
+  id_stats_path = rb_intern("stats_path");
+  id_metrics_endpoint = rb_intern("metrics_endpoint");
+  id_trace_enabled = rb_intern("trace_enabled");
+  id_trace_endpoint = rb_intern("trace_endpoint");
+  id_trace_service_name = rb_intern("trace_service_name");
 }
 
 Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_runtime(VALUE options)
@@ -493,6 +568,38 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
   const std::string ruby_log_level = normalized_log_level(
       configured_string_from_ruby(options, id_log_level, "log_level option", "info"),
       "log_level option");
+  const std::string ruby_access_log = configured_string_from_ruby(
+      options,
+      id_access_log,
+      "access_log option",
+      "");
+  const std::string ruby_error_log = configured_string_from_ruby(
+      options,
+      id_error_log,
+      "error_log option",
+      "");
+  const bool ruby_structured_logs = configured_boolean_from_ruby(options, id_structured_logs, false);
+  const std::string ruby_stats_path = configured_string_from_ruby(
+      options,
+      id_stats_path,
+      "stats_path option",
+      "");
+  const std::string ruby_metrics_endpoint = configured_string_from_ruby(
+      options,
+      id_metrics_endpoint,
+      "metrics_endpoint option",
+      "");
+  const bool ruby_trace_enabled = configured_boolean_from_ruby(options, id_trace_enabled, false);
+  const std::string ruby_trace_endpoint = configured_string_from_ruby(
+      options,
+      id_trace_endpoint,
+      "trace_endpoint option",
+      "");
+  const std::string ruby_trace_service_name = configured_string_from_ruby(
+      options,
+      id_trace_service_name,
+      "trace_service_name option",
+      "vajra");
 
   const std::string host = configured_string_from_env("VAJRA_HOST", ruby_host);
   const int port = static_cast<int>(configured_integer_from_env(
@@ -549,6 +656,15 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
   const std::string log_level = normalized_log_level(
       configured_string_from_env("VAJRA_LOG_LEVEL", ruby_log_level),
       "VAJRA_LOG_LEVEL");
+  const std::string access_log = configured_string_from_env("VAJRA_ACCESS_LOG", ruby_access_log);
+  const std::string error_log = configured_string_from_env("VAJRA_ERROR_LOG", ruby_error_log);
+  const bool structured_logs = configured_boolean_from_env("VAJRA_STRUCTURED_LOGS", ruby_structured_logs);
+  const std::string stats_path = configured_string_from_env("VAJRA_STATS_PATH", ruby_stats_path);
+  const std::string metrics_endpoint = configured_string_from_env("VAJRA_METRICS_ENDPOINT", ruby_metrics_endpoint);
+  const bool trace_enabled = configured_boolean_from_env("VAJRA_TRACE_ENABLED", ruby_trace_enabled);
+  const std::string trace_endpoint = configured_string_from_env("VAJRA_TRACE_ENDPOINT", ruby_trace_endpoint);
+  const std::string trace_service_name =
+      configured_string_from_env("VAJRA_TRACE_SERVICE_NAME", ruby_trace_service_name);
 
   return RuntimeConfig{
       host,
@@ -565,5 +681,13 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       first_data_timeout_seconds,
       persistent_timeout_seconds,
       worker_timeout_seconds,
-      log_level};
+      log_level,
+      access_log,
+      error_log,
+      structured_logs,
+      stats_path,
+      metrics_endpoint,
+      trace_enabled,
+      trace_endpoint,
+      trace_service_name};
 }

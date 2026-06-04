@@ -85,6 +85,16 @@ namespace Vajra
       void initiate_worker_recovery(const std::shared_ptr<SharedWorkerState> &worker_state);
       void drain_pending_replacements();
       void replace_worker(const std::shared_ptr<SharedWorkerState> &worker_state);
+      bool start_worker_spawner(const WorkerSpawnConfig &spawn_config);
+      void stop_worker_spawner();
+      [[noreturn]] void run_worker_spawner(int control_fd, const WorkerSpawnConfig &spawn_config);
+      bool spawn_worker_from_single_thread(
+          std::size_t worker_index,
+          const WorkerSpawnConfig &spawn_config,
+          pid_t &pid,
+          std::vector<int> &parent_request_channels,
+          BootDiagnostic &failure_diagnostic,
+          int inherited_control_fd);
       bool boot_replacement_worker(
           const std::shared_ptr<SharedWorkerState> &worker_state,
           const WorkerSpawnConfig &spawn_config,
@@ -100,6 +110,7 @@ namespace Vajra
       void observe_worker_exit(
           const std::shared_ptr<SharedWorkerState> &worker_state,
           int status);
+      void observe_worker_disappearance(const std::shared_ptr<SharedWorkerState> &worker_state);
       void refresh_worker_health(const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states);
       void handle_worker_timeout(const std::shared_ptr<SharedWorkerState> &worker_state);
       void maybe_escalate_timed_out_workers(const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states);
@@ -132,6 +143,8 @@ namespace Vajra
       RecoveryPolicy recovery_policy_{};
       std::atomic_bool debug_logging_{false};
       std::vector<std::shared_ptr<SharedWorkerState>> pending_replacements_;
+      pid_t worker_spawner_pid_ = -1;
+      int worker_spawner_fd_ = -1;
       bool worker_exit_watcher_stop_requested_ = false;
       bool worker_exit_watcher_running_ = false;
       std::thread worker_exit_watcher_;

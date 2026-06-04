@@ -101,6 +101,7 @@ namespace Vajra
       std::atomic<std::uint64_t> replacement_failure_count{0};
       std::atomic<WorkerRecoveryState> recovery_state{WorkerRecoveryState::none};
       std::atomic_bool terminal_replacement_failure{false};
+      std::atomic_bool spawned_by_worker_spawner{false};
       std::atomic<std::int64_t> overload_started_nanoseconds{0};
       std::atomic<std::int64_t> recovery_deadline_nanoseconds{0};
       std::atomic_bool recovery_requested{false};

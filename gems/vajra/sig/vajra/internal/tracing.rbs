@@ -6,7 +6,22 @@
 module Vajra
   module Internal
     module Tracing
-      type start_options = Hash[Symbol, bool | String]
+      type start_option_value =
+        Integer |
+        String |
+        bool |
+        Array[String] |
+        Array[Integer] |
+        nil
+
+      type start_options = Hash[Symbol, start_option_value]
+
+      type rack_env_value =
+        String |
+        bool |
+        IO |
+        StringIO |
+        Array[Integer]
 
       type lifecycle_event_key =
         :event |
@@ -42,7 +57,7 @@ module Vajra
       TRACE_STATE: TraceState
 
       def self.install_from_start_options!: (start_options) -> bool
-      def self.with_request_span: [T] (Hash[String, String]) { () -> T } -> T
+      def self.with_request_span: [T] (Hash[String, rack_env_value]) { () -> T } -> T
       def self.emit_lifecycle_span: (lifecycle_event) -> nil
       def self.__native_set_tracing_status__: (bool, bool, String, String) -> nil
       def self.__native_set_lifecycle_callback__: ((Method | Proc)? callback) -> ((Method | Proc)?)

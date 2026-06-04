@@ -22,6 +22,7 @@
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <poll.h>
 #include <signal.h>
 #include <sstream>
 #include <stdexcept>
@@ -50,10 +51,23 @@ namespace
     failed = 2,
   };
 
+  enum class WorkerSpawnerCommand : std::uint8_t
+  {
+    spawn = 1,
+    shutdown = 2,
+  };
+
   struct WorkerBootstrapReport
   {
     WorkerBootstrapStatus status;
     std::optional<Vajra::runtime::BootDiagnostic> diagnostic;
+  };
+
+  struct WorkerSpawnerResponseHeader
+  {
+    WorkerBootstrapStatus status;
+    std::int32_t pid;
+    std::uint32_t request_channel_count;
   };
 
   struct WorkerWaitContext
@@ -330,6 +344,101 @@ namespace
     throw std::runtime_error("worker reported an unknown bootstrap state");
   }
 
+  void send_file_descriptors_or_throw(int socket_fd, const std::vector<int> &fds)
+  {
+    if (fds.empty())
+    {
+      return;
+    }
+
+    char message = 'F';
+    struct iovec io_vector;
+    std::memset(&io_vector, 0, sizeof(io_vector));
+    io_vector.iov_base = &message;
+    io_vector.iov_len = sizeof(message);
+    std::vector<char> control(CMSG_SPACE(sizeof(int) * fds.size()));
+    std::memset(control.data(), 0, control.size());
+
+    struct msghdr message_header;
+    std::memset(&message_header, 0, sizeof(message_header));
+    message_header.msg_iov = &io_vector;
+    message_header.msg_iovlen = 1;
+    message_header.msg_control = control.data();
+    message_header.msg_controllen = control.size();
+
+    struct cmsghdr *control_message = CMSG_FIRSTHDR(&message_header);
+    control_message->cmsg_level = SOL_SOCKET;
+    control_message->cmsg_type = SCM_RIGHTS;
+    control_message->cmsg_len = CMSG_LEN(sizeof(int) * fds.size());
+    std::memcpy(CMSG_DATA(control_message), fds.data(), sizeof(int) * fds.size());
+
+    while (sendmsg(socket_fd, &message_header, 0) < 0)
+    {
+      if (errno == EINTR)
+      {
+        continue;
+      }
+      throw std::runtime_error("worker spawner fd send failed");
+    }
+  }
+
+  std::vector<int> receive_file_descriptors_or_throw(int socket_fd, std::size_t expected_count)
+  {
+    if (expected_count == 0)
+    {
+      return {};
+    }
+
+    char message = '\0';
+    struct iovec io_vector;
+    std::memset(&io_vector, 0, sizeof(io_vector));
+    io_vector.iov_base = &message;
+    io_vector.iov_len = sizeof(message);
+    std::vector<char> control(CMSG_SPACE(sizeof(int) * expected_count));
+    std::memset(control.data(), 0, control.size());
+
+    struct msghdr message_header;
+    std::memset(&message_header, 0, sizeof(message_header));
+    message_header.msg_iov = &io_vector;
+    message_header.msg_iovlen = 1;
+    message_header.msg_control = control.data();
+    message_header.msg_controllen = control.size();
+
+    ssize_t result = -1;
+    while ((result = recvmsg(socket_fd, &message_header, 0)) < 0)
+    {
+      if (errno == EINTR)
+      {
+        continue;
+      }
+      throw std::runtime_error("worker spawner fd receive failed");
+    }
+
+    if (result <= 0)
+    {
+      throw std::runtime_error("worker spawner closed before sending request channels");
+    }
+
+    const struct cmsghdr *control_message = CMSG_FIRSTHDR(&message_header);
+    if (control_message == nullptr ||
+        control_message->cmsg_level != SOL_SOCKET ||
+        control_message->cmsg_type != SCM_RIGHTS)
+    {
+      throw std::runtime_error("worker spawner returned an invalid request channel payload");
+    }
+
+    const std::size_t descriptor_count =
+        static_cast<std::size_t>((control_message->cmsg_len - CMSG_LEN(0)) / sizeof(int));
+    if (descriptor_count != expected_count)
+    {
+      throw std::runtime_error("worker spawner returned an unexpected request channel count");
+    }
+
+    std::vector<int> descriptors(descriptor_count, -1);
+    std::memcpy(descriptors.data(), CMSG_DATA(control_message), sizeof(int) * descriptor_count);
+    return descriptors;
+  }
+
   [[noreturn]] void exit_worker_bootstrap_failure(
       int write_fd,
       const Vajra::runtime::BootDiagnostic &diagnostic,
@@ -350,6 +459,21 @@ namespace
   bool worker_has_exited(const std::shared_ptr<Vajra::runtime::SharedWorkerState> &worker_state)
   {
     return worker_state->lifecycle_state.load(std::memory_order_acquire) == Vajra::runtime::WorkerLifecycleState::exited;
+  }
+
+  bool process_is_alive(pid_t pid)
+  {
+    if (pid <= 0)
+    {
+      return false;
+    }
+
+    if (kill(pid, 0) == 0)
+    {
+      return true;
+    }
+
+    return errno != ESRCH;
   }
 
   std::int64_t steady_clock_nanoseconds()
@@ -678,6 +802,7 @@ void Vajra::runtime::NativeRuntime::mark_worker_exit(
       exit_classification != WorkerExitClassification::expected_shutdown;
   worker_state->replacement_needed.store(replacement_needed, std::memory_order_release);
   worker_state->recovery_requested.store(false, std::memory_order_release);
+  worker_state->spawned_by_worker_spawner.store(false, std::memory_order_release);
   mark_recovery_transition(
       worker_state,
       replacement_needed ? WorkerRecoveryState::rejoin_pending : WorkerRecoveryState::none);
@@ -733,6 +858,7 @@ void Vajra::runtime::NativeRuntime::prepare_worker_replacement(const std::shared
   worker_state->last_exit_classification.store(WorkerExitClassification::none, std::memory_order_release);
   worker_state->last_exit_detail.store(0, std::memory_order_release);
   worker_state->terminal_replacement_failure.store(false, std::memory_order_release);
+  worker_state->spawned_by_worker_spawner.store(false, std::memory_order_release);
   worker_state->overload_started_nanoseconds.store(0, std::memory_order_release);
   worker_state->recovery_deadline_nanoseconds.store(0, std::memory_order_release);
   worker_state->recovery_requested.store(false, std::memory_order_release);
@@ -763,12 +889,204 @@ void Vajra::runtime::NativeRuntime::close_worker_request_channels(const std::sha
   }
 }
 
-bool Vajra::runtime::NativeRuntime::boot_replacement_worker(
-    const std::shared_ptr<SharedWorkerState> &worker_state,
+bool Vajra::runtime::NativeRuntime::start_worker_spawner(const WorkerSpawnConfig &spawn_config)
+{
+  int control_channels[2] = {-1, -1};
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, control_channels) != 0)
+  {
+    throw std::runtime_error(
+        std::string("worker spawner control channel creation failed: ") + std::strerror(errno));
+  }
+
+#if defined(__APPLE__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+  const pid_t pid = fork();
+#if defined(__APPLE__)
+#pragma clang diagnostic pop
+#endif
+  if (pid < 0)
+  {
+    const int error_number = errno;
+    close_fd_if_open(control_channels[0]);
+    close_fd_if_open(control_channels[1]);
+    throw std::runtime_error(
+        std::string("worker spawner fork failed: ") + std::strerror(error_number));
+  }
+
+  if (pid == 0)
+  {
+    close_fd_if_open(control_channels[0]);
+    run_worker_spawner(control_channels[1], spawn_config);
+  }
+
+  close_fd_if_open(control_channels[1]);
+  {
+    const std::lock_guard<std::mutex> lock(server_mutex_);
+    worker_spawner_pid_ = pid;
+    worker_spawner_fd_ = control_channels[0];
+  }
+  return true;
+}
+
+void Vajra::runtime::NativeRuntime::stop_worker_spawner()
+{
+  int control_fd = -1;
+  pid_t pid = -1;
+  {
+    const std::lock_guard<std::mutex> lock(server_mutex_);
+    control_fd = worker_spawner_fd_;
+    pid = worker_spawner_pid_;
+    worker_spawner_fd_ = -1;
+    worker_spawner_pid_ = -1;
+  }
+
+  if (control_fd >= 0)
+  {
+    const auto command = static_cast<std::uint8_t>(WorkerSpawnerCommand::shutdown);
+    try
+    {
+      write_all_or_throw(control_fd, &command, sizeof(command));
+    }
+    catch (...)
+    {
+    }
+    close_fd_if_open(control_fd);
+  }
+
+  if (pid > 0)
+  {
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+    {
+    }
+  }
+}
+
+[[noreturn]] void Vajra::runtime::NativeRuntime::run_worker_spawner(
+    int control_fd,
+    const WorkerSpawnConfig &spawn_config)
+{
+  for (;;)
+  {
+    for (;;)
+    {
+      int status = 0;
+      const pid_t reaped_pid = waitpid(-1, &status, WNOHANG);
+      if (reaped_pid > 0)
+      {
+        continue;
+      }
+      if (reaped_pid < 0 && errno == EINTR)
+      {
+        continue;
+      }
+      break;
+    }
+
+    struct pollfd control_poll;
+    std::memset(&control_poll, 0, sizeof(control_poll));
+    control_poll.fd = control_fd;
+    control_poll.events = POLLIN;
+    int poll_result = -1;
+    while ((poll_result = poll(&control_poll, 1, 50)) < 0)
+    {
+      if (errno == EINTR)
+      {
+        continue;
+      }
+      close_fd_if_open(control_fd);
+      _exit(1);
+    }
+    if (poll_result == 0)
+    {
+      continue;
+    }
+
+    std::uint8_t command = 0;
+    if (!read_exact_or_eof(control_fd, &command, sizeof(command)))
+    {
+      close_fd_if_open(control_fd);
+      _exit(0);
+    }
+
+    if (command == static_cast<std::uint8_t>(WorkerSpawnerCommand::shutdown))
+    {
+      close_fd_if_open(control_fd);
+      _exit(0);
+    }
+
+    if (command != static_cast<std::uint8_t>(WorkerSpawnerCommand::spawn))
+    {
+      close_fd_if_open(control_fd);
+      _exit(1);
+    }
+
+    std::uint32_t worker_index = 0;
+    if (!read_exact_or_eof(control_fd, &worker_index, sizeof(worker_index)))
+    {
+      close_fd_if_open(control_fd);
+      _exit(1);
+    }
+
+    pid_t pid = -1;
+    std::vector<int> parent_request_channels;
+    BootDiagnostic diagnostic{
+        "worker_replacement_failed",
+        "boot",
+        "worker spawner replacement bootstrap failed"};
+    WorkerBootstrapStatus status = WorkerBootstrapStatus::ready;
+
+    try
+    {
+      if (!spawn_worker_from_single_thread(worker_index, spawn_config, pid, parent_request_channels, diagnostic, control_fd))
+      {
+        status = WorkerBootstrapStatus::failed;
+      }
+    }
+    catch (const std::exception &error)
+    {
+      status = WorkerBootstrapStatus::failed;
+      diagnostic = BootDiagnostic{
+          "worker_replacement_failed",
+          "spawn",
+          error.what()};
+    }
+
+    const WorkerSpawnerResponseHeader header{
+        status,
+        static_cast<std::int32_t>(pid),
+        static_cast<std::uint32_t>(parent_request_channels.size())};
+    write_all_or_throw(control_fd, &header, sizeof(header));
+
+    if (status == WorkerBootstrapStatus::ready)
+    {
+      send_file_descriptors_or_throw(control_fd, parent_request_channels);
+      for (int fd : parent_request_channels)
+      {
+        close_fd_if_open(fd);
+      }
+      continue;
+    }
+
+    write_string_payload(control_fd, diagnostic.code);
+    write_string_payload(control_fd, diagnostic.category);
+    write_string_payload(control_fd, diagnostic.message);
+    for (int fd : parent_request_channels)
+    {
+      close_fd_if_open(fd);
+    }
+  }
+}
+
+bool Vajra::runtime::NativeRuntime::spawn_worker_from_single_thread(
+    std::size_t worker_index,
     const WorkerSpawnConfig &spawn_config,
     pid_t &pid,
     std::vector<int> &parent_request_channels,
-    BootDiagnostic &failure_diagnostic)
+    BootDiagnostic &failure_diagnostic,
+    int inherited_control_fd)
 {
   int readiness_pipe[2] = {-1, -1};
   if (pipe(readiness_pipe) != 0)
@@ -829,6 +1147,7 @@ bool Vajra::runtime::NativeRuntime::boot_replacement_worker(
   if (pid == 0)
   {
     rb_thread_atfork();
+    close_fd_if_open(inherited_control_fd);
     close_fd_if_open(readiness_pipe[0]);
     std::vector<int> child_request_channels;
     child_request_channels.reserve(request_channels.size());
@@ -843,7 +1162,7 @@ bool Vajra::runtime::NativeRuntime::boot_replacement_worker(
         spawn_config.port,
         spawn_config.max_request_head_bytes,
         readiness_pipe[1],
-        static_cast<int>(worker_state->worker_index),
+        static_cast<int>(worker_index),
         spawn_config.worker_processes,
         spawn_config.debug_logging);
   }
@@ -856,14 +1175,6 @@ bool Vajra::runtime::NativeRuntime::boot_replacement_worker(
     parent_request_channels.push_back(pair[0]);
   }
   close_fd_if_open(readiness_pipe[1]);
-
-  {
-    const std::lock_guard<std::mutex> lock(worker_state->request_channel_mutex);
-    worker_state->request_channel_fds = parent_request_channels;
-    worker_state->channel_generation.fetch_add(1, std::memory_order_acq_rel);
-  }
-  worker_state->pid.store(pid, std::memory_order_release);
-  prepare_worker_replacement(worker_state);
 
   WorkerBootstrapReport report;
   try
@@ -883,6 +1194,77 @@ bool Vajra::runtime::NativeRuntime::boot_replacement_worker(
     return false;
   }
 
+  return true;
+}
+
+bool Vajra::runtime::NativeRuntime::boot_replacement_worker(
+    const std::shared_ptr<SharedWorkerState> &worker_state,
+    const WorkerSpawnConfig &,
+    pid_t &pid,
+    std::vector<int> &parent_request_channels,
+    BootDiagnostic &failure_diagnostic)
+{
+  int control_fd = -1;
+  {
+    const std::lock_guard<std::mutex> lock(server_mutex_);
+    control_fd = worker_spawner_fd_;
+  }
+  if (control_fd < 0)
+  {
+    throw std::runtime_error("worker spawner is not available for replacement");
+  }
+
+  const auto command = static_cast<std::uint8_t>(WorkerSpawnerCommand::spawn);
+  const std::uint32_t worker_index = static_cast<std::uint32_t>(worker_state->worker_index);
+  try
+  {
+    write_all_or_throw(control_fd, &command, sizeof(command));
+    write_all_or_throw(control_fd, &worker_index, sizeof(worker_index));
+  }
+  catch (...)
+  {
+    stop_worker_spawner();
+    throw;
+  }
+
+  WorkerSpawnerResponseHeader header{};
+  try
+  {
+    if (!read_exact_or_eof(control_fd, &header, sizeof(header)))
+    {
+      throw std::runtime_error("worker spawner closed before responding");
+    }
+  }
+  catch (...)
+  {
+    stop_worker_spawner();
+    throw;
+  }
+
+  pid = static_cast<pid_t>(header.pid);
+  if (header.status == WorkerBootstrapStatus::failed)
+  {
+    failure_diagnostic = BootDiagnostic{
+        read_string_payload(control_fd),
+        read_string_payload(control_fd),
+        read_string_payload(control_fd)};
+    return false;
+  }
+
+  if (header.status != WorkerBootstrapStatus::ready)
+  {
+    throw std::runtime_error("worker spawner returned an unknown replacement status");
+  }
+
+  parent_request_channels = receive_file_descriptors_or_throw(control_fd, header.request_channel_count);
+  {
+    const std::lock_guard<std::mutex> lock(worker_state->request_channel_mutex);
+    worker_state->request_channel_fds = parent_request_channels;
+    worker_state->channel_generation.fetch_add(1, std::memory_order_acq_rel);
+  }
+  worker_state->pid.store(pid, std::memory_order_release);
+  prepare_worker_replacement(worker_state);
+  worker_state->spawned_by_worker_spawner.store(true, std::memory_order_release);
   return true;
 }
 
@@ -1137,6 +1519,7 @@ void Vajra::runtime::NativeRuntime::clear_worker_runtime()
     close_worker_request_channels(worker_state);
   }
 
+  stop_worker_spawner();
   stop_worker_exit_watcher();
 }
 
@@ -1292,6 +1675,16 @@ void Vajra::runtime::NativeRuntime::wait_for_worker_exit_blocking(
       continue;
     }
 
+    if (worker_state->spawned_by_worker_spawner.load(std::memory_order_acquire))
+    {
+      while (process_is_alive(pid))
+      {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      observe_worker_disappearance(worker_state);
+      continue;
+    }
+
     int status = 0;
     for (;;)
     {
@@ -1384,6 +1777,33 @@ void Vajra::runtime::NativeRuntime::observe_worker_exit(
   log_unexpected_worker_exit(exit_classification, exit_detail);
 
   mark_worker_exit(worker_state, exit_classification, exit_detail);
+  worker_state->pid.store(-1, std::memory_order_release);
+}
+
+void Vajra::runtime::NativeRuntime::observe_worker_disappearance(
+    const std::shared_ptr<SharedWorkerState> &worker_state)
+{
+  const WorkerLifecycleState current_state = worker_state->lifecycle_state.load(std::memory_order_acquire);
+  const bool shutdown_expected = worker_state->expected_shutdown.load(std::memory_order_acquire);
+  bool runtime_shutdown_requested = false;
+  {
+    const std::lock_guard<std::mutex> lock(server_mutex_);
+    runtime_shutdown_requested = runtime_shutdown_started_ || stop_requested_ || shutting_down != 0;
+  }
+
+  WorkerExitClassification exit_classification = WorkerExitClassification::unexpected_exit;
+  if (current_state == WorkerLifecycleState::booting)
+  {
+    exit_classification = WorkerExitClassification::exit_before_ready;
+  }
+  else if (shutdown_expected ||
+           (runtime_shutdown_requested && current_state == WorkerLifecycleState::stopping))
+  {
+    exit_classification = WorkerExitClassification::expected_shutdown;
+  }
+
+  log_unexpected_worker_exit(exit_classification, 0);
+  mark_worker_exit(worker_state, exit_classification, 0);
   worker_state->pid.store(-1, std::memory_order_release);
 }
 
@@ -1686,12 +2106,22 @@ void Vajra::runtime::NativeRuntime::watch_worker_exits()
         }
 
         const pid_t pid = worker_state->pid.load(std::memory_order_acquire);
-        if (pid <= 0)
-        {
-          continue;
-        }
+      if (pid <= 0)
+      {
+        continue;
+      }
 
-        int status = 0;
+      if (worker_state->spawned_by_worker_spawner.load(std::memory_order_acquire))
+      {
+        if (!process_is_alive(pid))
+        {
+          observe_worker_disappearance(worker_state);
+          observed_exit = true;
+        }
+        continue;
+      }
+
+      int status = 0;
         for (;;)
         {
           const pid_t wait_result = waitpid(pid, &status, WNOHANG);
@@ -1902,6 +2332,7 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
     const BootContractResult master_boot_result = BootContract::run(
         BootContractConfig{config.port, config.max_request_head_bytes, kMasterPreloadRuntimeRole});
     BootContract::ensure_ready(master_boot_result);
+    start_worker_spawner(worker_spawn_config_);
 
     std::vector<std::shared_ptr<SharedWorkerState>> booted_worker_states;
 
@@ -1961,6 +2392,7 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
       if (pid == 0)
       {
         rb_thread_atfork();
+        close_fd_if_open(worker_spawner_fd_);
         close_fd_if_open(readiness_pipe[0]);
         std::vector<int> child_request_channels;
         child_request_channels.reserve(request_channels.size());

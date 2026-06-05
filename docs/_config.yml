@@ -10,11 +10,14 @@ description: >-
   operations.
 url: https://vajra.codevedas.com
 baseurl: ""
+logo: /assets/images/logo.svg
 repository: Code-Vedas/vajra
 theme: just-the-docs
 markdown: kramdown
 plugins:
   - jekyll-feed
+mermaid:
+  version: 10.1.0
 callouts:
   note:
     title: Note

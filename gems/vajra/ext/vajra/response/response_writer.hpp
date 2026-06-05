@@ -19,6 +19,7 @@ namespace Vajra
     class ResponseWriter
     {
     public:
+      static void prepare_client_socket(int client_fd);
       bool send(int client_fd, const Response &response) const;
       Response success_response(ConnectionBehavior connection_behavior = ConnectionBehavior::close) const;
       Response internal_server_error_response() const;
@@ -28,7 +29,6 @@ namespace Vajra
       void log_request_head_error(const Vajra::request::HeadError &error) const;
 
     private:
-      void suppress_sigpipe(int client_fd) const;
       bool send_response_message(int client_fd, const std::string &response_message) const;
       const char *request_head_failure_label(Vajra::request::HeadFailureKind kind) const;
       void log_serialization_error(const SerializationError &error) const;

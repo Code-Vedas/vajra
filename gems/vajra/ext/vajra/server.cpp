@@ -5,6 +5,7 @@
 
 #include "server.hpp"
 #include "vajra.hpp"
+#include "runtime/runtime_state.hpp"
 
 #include <arpa/inet.h>
 #include <cerrno>
@@ -776,6 +777,7 @@ void Vajra::Server::start()
       {
         lifecycle_.mark_serving();
       }
+      Vajra::runtime::note_worker_accept();
 
       reap_completed_handler_threads();
       const std::size_t previous_active_connections = active_connection_count_.fetch_add(1, std::memory_order_acq_rel);
@@ -808,6 +810,7 @@ void Vajra::Server::start()
         HandlerThread &handler_thread = handler_threads_.back();
         handler_thread.thread = std::thread([this, client_fd, client_addr, completed, client_token]() {
           ActiveConnectionGuard active_connection_guard(active_connection_count_);
+          Vajra::runtime::note_worker_connection_opened();
           try
           {
             request_processor_.handle(client_fd, socket_context_for(client_fd, client_addr, port_));
@@ -821,6 +824,7 @@ void Vajra::Server::start()
             log_handler_thread_failure(client_addr, client_fd, "unknown exception");
           }
           unregister_active_client_fd(client_fd, client_token);
+          Vajra::runtime::note_worker_connection_closed();
           completed->store(true, std::memory_order_release);
         });
       }

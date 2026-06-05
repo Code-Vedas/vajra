@@ -37,7 +37,7 @@ namespace
   }
 }
 
-Vajra::listener::SocketBinding Vajra::listener::Socket::open(const std::string &host, int port) const
+Vajra::listener::SocketBinding Vajra::listener::Socket::open(const std::string &host, int port, bool reuse_port) const
 {
   addrinfo hints{};
   hints.ai_family = AF_INET;
@@ -77,6 +77,23 @@ Vajra::listener::SocketBinding Vajra::listener::Socket::open(const std::string &
       freeaddrinfo(result);
       throw startup_error("socket option setup", host, port, error_number);
     }
+
+#ifdef SO_REUSEPORT
+    if (reuse_port && setsockopt(socket_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
+    {
+      const int error_number = errno;
+      close(socket_fd);
+      freeaddrinfo(result);
+      throw startup_error("reuseport setup", host, port, error_number);
+    }
+#else
+    if (reuse_port)
+    {
+      close(socket_fd);
+      freeaddrinfo(result);
+      throw std::runtime_error("listener reuse_port requested but SO_REUSEPORT is not available");
+    }
+#endif
 
     if (bind(socket_fd, candidate->ai_addr, candidate->ai_addrlen) == 0)
     {

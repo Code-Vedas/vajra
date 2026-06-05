@@ -21,7 +21,7 @@ namespace Vajra
     class Socket
     {
     public:
-      SocketBinding open(const std::string &host, int port) const;
+      SocketBinding open(const std::string &host, int port, bool reuse_port = false) const;
     };
   }
 }

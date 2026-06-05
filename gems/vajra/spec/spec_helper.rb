@@ -15,6 +15,7 @@ unless ENV['NO_COVERAGE'] == '1'
   end
 end
 
+$LOAD_PATH.unshift(File.expand_path('../lib', __dir__))
 require_relative '../lib/vajra/version'
 require 'vajra'
 

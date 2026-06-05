@@ -8,7 +8,7 @@
 require 'fileutils'
 require 'tmpdir'
 
-module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
+module VajraE2EHttpHelpers
   def parse_http_response(response)
     headers, body = response.split("\r\n\r\n", 2)
     raise ArgumentError, "incomplete HTTP response: #{response.inspect}" if body.nil?
@@ -318,7 +318,6 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
     end
   end
 
-  # rubocop:disable Metrics/AbcSize, ThreadSafety/NewThread
   def concurrent_rack_app_request_results(script:, requests:, port: disposable_listener_port, env: {})
     managed_popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       startup_output = []
@@ -381,7 +380,6 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
       cleanup_process(wait_thread, output)
     end
   end
-  # rubocop:enable Metrics/AbcSize, ThreadSafety/NewThread
 
   def wait_for_runtime_output(output, runtime_output, pattern, count: 1, timeout: 2)
     Timeout.timeout(timeout) do
@@ -429,7 +427,6 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
     end
   end
 
-  # rubocop:disable Metrics/AbcSize, ThreadSafety/NewThread
   def synchronized_request_responses(selected_port:, requests:, wait_thread:, output:, request_label_prefix:)
     responses = Array.new(requests.length)
     ready_mutex = Mutex.new
@@ -478,7 +475,6 @@ module VajraE2EHttpHelpers # rubocop:disable Metrics/ModuleLength
       ready_condition.broadcast
     end
   end
-  # rubocop:enable Metrics/AbcSize, ThreadSafety/NewThread
 
   def single_rack_app_response(selected_port:, request:, wait_thread:, output:, request_label:)
     socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)

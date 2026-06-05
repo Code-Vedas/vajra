@@ -23,8 +23,7 @@ namespace Vajra
       std::size_t min_threads;
       std::size_t max_threads;
       std::size_t max_connections;
-      std::size_t queue_capacity;
-      std::string scheduler_policy;
+      std::size_t socket_queue_capacity;
       std::size_t max_request_head_bytes;
       std::size_t request_timeout_seconds;
       int request_head_timeout_seconds;

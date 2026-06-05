@@ -8,7 +8,7 @@
 require 'json'
 require_relative 'support'
 
-RSpec.describe 'Vajra Rack environment integration', :e2e, :integration do # rubocop:disable RSpec/DescribeClass
+RSpec.describe 'Vajra Rack environment integration', :e2e, :integration do
   it 'translates native request and connection state into Rack env fields' do
     result = rack_env_request_result(
       request:

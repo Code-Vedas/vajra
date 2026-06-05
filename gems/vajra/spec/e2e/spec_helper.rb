@@ -21,8 +21,7 @@ module VajraE2EHelpers
     VAJRA_PORT
     VAJRA_WORKERS
     VAJRA_THREADS
-    VAJRA_QUEUE_CAPACITY
-    VAJRA_SCHEDULER_POLICY
+    VAJRA_SOCKET_QUEUE_CAPACITY
     VAJRA_MAX_REQUEST_HEAD_BYTES
     VAJRA_REQUEST_TIMEOUT
     VAJRA_REQUEST_HEAD_TIMEOUT
@@ -67,13 +66,11 @@ module VajraE2EHelpers
   end
 
   def vajra_env(host: nil, port: nil, max_request_head_bytes: nil)
-    # rubocop:disable Rails/IndexWith
     RUNTIME_ENV_OVERRIDE_KEYS.to_h { |key| [key, nil] }.tap do |env|
       env['VAJRA_HOST'] = host unless host.nil?
       env['VAJRA_PORT'] = port.to_s unless port.nil?
       env['VAJRA_MAX_REQUEST_HEAD_BYTES'] = max_request_head_bytes.to_s unless max_request_head_bytes.nil?
     end
-    # rubocop:enable Rails/IndexWith
   end
 
   def listener_banner(port)
@@ -86,6 +83,7 @@ module VajraE2EHelpers
 
   def wait_for_banner(output, captured_lines: nil)
     Timeout.timeout(15) do
+      pending_port = nil
       loop do
         line = output.gets
         raise 'vajra exited before startup banner' if line.nil?
@@ -93,8 +91,13 @@ module VajraE2EHelpers
         captured_lines << line if captured_lines
 
         match = line.match(/\[Vajra\]\[lifecycle\] .* listening on port (\d+)/) ||
-                line.match(/\[Vajra\]\[lifecycle\] .* event=boot_complete .* port=(\d+)/)
+                line.match(/\[Vajra\]\[lifecycle\] .* event=boot_complete .* port=(\d+)/) ||
+                line.match(/\[Vajra\]\[lifecycle\] .* event=worker_bootstrap_ready .* port=(\d+)/)
         return Integer(match[1]) if match
+
+        raw_match = line.match(%r{\[\d+\] \* (?:Bind:|Listening on) http://[^:]+:(\d+)})
+        pending_port = Integer(raw_match[1]) if raw_match
+        return pending_port if pending_port && line.include?('Worker ') && line.include?(' booted in ')
       end
     end
   end

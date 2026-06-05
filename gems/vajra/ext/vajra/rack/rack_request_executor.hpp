@@ -24,13 +24,14 @@ namespace Vajra
   {
     void initialize_rack_execution_bridge();
     void set_rack_execution_callback(VALUE callback);
+    void set_rack_execution_app(VALUE app);
     void run_worker_request_execution_loop(
         const std::vector<int> &channel_fds,
         std::size_t max_threads);
     std::shared_ptr<const class RackExecutionTransport> request_channel_transport(int channel_fd);
     std::shared_ptr<const class RackExecutionTransport> request_channel_transport(
         const std::vector<std::shared_ptr<Vajra::runtime::SharedWorkerState>> &worker_states,
-        std::size_t min_threads,
+        std::size_t max_threads,
         std::size_t queue_capacity,
         std::size_t request_timeout_seconds,
         std::size_t worker_timeout_seconds,

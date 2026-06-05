@@ -25,8 +25,7 @@ namespace
   ID id_threads;
   ID id_max_request_head_bytes;
   ID id_max_connections;
-  ID id_queue_capacity;
-  ID id_scheduler_policy;
+  ID id_socket_queue_capacity;
   ID id_request_timeout;
   ID id_request_head_timeout;
   ID id_first_data_timeout;
@@ -64,8 +63,7 @@ namespace
         key_id == id_workers ||
         key_id == id_threads ||
         key_id == id_max_connections ||
-        key_id == id_queue_capacity ||
-        key_id == id_scheduler_policy ||
+        key_id == id_socket_queue_capacity ||
         key_id == id_max_request_head_bytes ||
         key_id == id_request_timeout ||
         key_id == id_request_head_timeout ||
@@ -454,22 +452,6 @@ namespace
         ". Expected one of: debug, info, warn, error, fatal.");
   }
 
-  std::string normalized_scheduler_policy(const std::string &value, const char *name)
-  {
-    std::string normalized = value;
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char character) {
-      return static_cast<char>(std::tolower(character));
-    });
-
-    if (normalized == "least_loaded")
-    {
-      return normalized;
-    }
-
-    throw std::runtime_error(
-        "invalid " + std::string(name) + ": " + value +
-        ". Expected: least_loaded.");
-  }
 }
 
 void Vajra::runtime::RuntimeConfigLoader::initialize_ids()
@@ -479,8 +461,7 @@ void Vajra::runtime::RuntimeConfigLoader::initialize_ids()
   id_workers = rb_intern("workers");
   id_threads = rb_intern("threads");
   id_max_connections = rb_intern("max_connections");
-  id_queue_capacity = rb_intern("queue_capacity");
-  id_scheduler_policy = rb_intern("scheduler_policy");
+  id_socket_queue_capacity = rb_intern("socket_queue_capacity");
   id_request_timeout = rb_intern("request_timeout");
   id_request_head_timeout = rb_intern("request_head_timeout");
   id_first_data_timeout = rb_intern("first_data_timeout");
@@ -513,16 +494,13 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       256,
       1,
       std::numeric_limits<int>::max());
-  const long ruby_queue_capacity = configured_integer_from_ruby(
+  const long ruby_socket_queue_capacity = configured_integer_from_ruby(
       options,
-      id_queue_capacity,
-      "queue_capacity option",
-      std::numeric_limits<long>::max(),
+      id_socket_queue_capacity,
+      "socket_queue_capacity option",
+      256,
       1,
       std::numeric_limits<long>::max());
-  const std::string ruby_scheduler_policy = normalized_scheduler_policy(
-      configured_string_from_ruby(options, id_scheduler_policy, "scheduler_policy option", "least_loaded"),
-      "scheduler_policy option");
   const long ruby_max_request_head_bytes = configured_integer_from_ruby(
       options,
       id_max_request_head_bytes,
@@ -615,14 +593,11 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       1'024));
   const std::pair<std::size_t, std::size_t> threads = configured_threads_from_env(ruby_threads);
   const std::size_t max_connections = static_cast<std::size_t>(ruby_max_connections);
-  const std::size_t queue_capacity = static_cast<std::size_t>(configured_integer_from_env(
-      "VAJRA_QUEUE_CAPACITY",
-      ruby_queue_capacity,
+  const std::size_t socket_queue_capacity = static_cast<std::size_t>(configured_integer_from_env(
+      "VAJRA_SOCKET_QUEUE_CAPACITY",
+      ruby_socket_queue_capacity,
       1,
       std::numeric_limits<long>::max()));
-  const std::string scheduler_policy = normalized_scheduler_policy(
-      configured_string_from_env("VAJRA_SCHEDULER_POLICY", ruby_scheduler_policy),
-      "VAJRA_SCHEDULER_POLICY");
   const std::size_t max_request_head_bytes = static_cast<std::size_t>(configured_integer_from_env(
       "VAJRA_MAX_REQUEST_HEAD_BYTES",
       ruby_max_request_head_bytes,
@@ -673,8 +648,7 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       threads.first,
       threads.second,
       max_connections,
-      queue_capacity,
-      scheduler_policy,
+      socket_queue_capacity,
       max_request_head_bytes,
       request_timeout_seconds,
       request_head_timeout_seconds,

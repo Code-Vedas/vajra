@@ -70,9 +70,8 @@ module Vajra
       max_keepalive_requests
       linger_timeout
       max_connections
-      queue_capacity
+      socket_queue_capacity
       max_requests_per_worker
-      scheduler_policy
       tls
       tls_certificate
       tls_private_key
@@ -107,8 +106,7 @@ module Vajra
       workers
       threads
       max_connections
-      queue_capacity
-      scheduler_policy
+      socket_queue_capacity
       max_request_head_bytes
       request_timeout
       request_head_timeout
@@ -169,11 +167,9 @@ module Vajra
 
     def validate_start_options!(options)
       option_keys = options.keys
-      # rubocop:disable Rails/NegateInclude
       invalid_option = option_keys.find do |key|
         !DOCUMENTED_START_OPTION_KEYS.include?(key) || UNIMPLEMENTED_START_OPTION_KEYS.include?(key)
       end
-      # rubocop:enable Rails/NegateInclude
       return unless invalid_option
 
       raise Error, "start option not implemented yet: #{invalid_option}" if UNIMPLEMENTED_START_OPTION_KEYS.include?(invalid_option)

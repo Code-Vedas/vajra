@@ -17,7 +17,6 @@ duplicate_basenames = source_basenames.tally.select { |_, count| count > 1 }.key
 raise "duplicate native source basenames are not supported: #{duplicate_basenames.join(', ')}" unless duplicate_basenames.empty?
 
 # mkmf exposes these globals as the extension-source configuration surface.
-# rubocop:disable Style/GlobalVars
 $CXXFLAGS = "#{$CXXFLAGS} -std=c++17".strip
 $VPATH.concat(
   source_directories
@@ -26,6 +25,5 @@ $VPATH.concat(
 )
 
 $srcs = source_basenames
-# rubocop:enable Style/GlobalVars
 
 create_makefile('vajra/vajra')

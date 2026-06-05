@@ -319,6 +319,10 @@ RSpec.describe Vajra::CLI do
       expect(launcher.send(:normalize_setting_values, :structured_logs, [false])).to be(false)
     end
 
+    it 'normalizes nil access_log to the disabled default' do
+      expect(launcher.send(:normalize_setting_values, :access_log, [nil])).to be_nil
+    end
+
     it 'reports supported and unsupported directives through respond_to_missing?' do
       expect(launcher.send(:respond_to_missing?, :port)).to be(true)
       expect(launcher.send(:respond_to_missing?, :unsupported_directive)).to be(false)

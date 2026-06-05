@@ -32,6 +32,8 @@ namespace Vajra
     bool runtime_tracing_available();
     std::string runtime_tracing_endpoint();
     std::string runtime_tracing_service_name();
+    void start_runtime_logging_worker();
+    void stop_runtime_logging_worker();
     void set_runtime_lifecycle_callback(void *callback);
     void flush_runtime_logs();
     void log_runtime_banner_start(

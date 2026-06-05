@@ -5,6 +5,9 @@
 
 #include "response_writer.hpp"
 
+#include "runtime/runtime_state.hpp"
+
+#include <chrono>
 #include <cerrno>
 #include <cstring>
 #include <iostream>
@@ -19,12 +22,31 @@ namespace
 #endif
 }
 
+void Vajra::response::ResponseWriter::prepare_client_socket(int client_fd)
+{
+#ifdef SO_NOSIGPIPE
+  int opt = 1;
+  if (setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt)) < 0)
+  {
+    std::cerr << "setsockopt(SO_NOSIGPIPE) failed: " << std::strerror(errno) << std::endl;
+  }
+#else
+  (void)client_fd;
+#endif
+}
+
 bool Vajra::response::ResponseWriter::send(int client_fd, const Response &response) const
 {
+  const auto started_at = std::chrono::steady_clock::now();
   try
   {
     const std::string response_message = serializer_.serialize(response);
-    return send_response_message(client_fd, response_message);
+    const bool sent = send_response_message(client_fd, response_message);
+    Vajra::runtime::note_worker_response_write_time(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started_at)
+            .count());
+    return sent;
   }
   catch (const SerializationError &error)
   {
@@ -109,8 +131,6 @@ void Vajra::response::ResponseWriter::log_serialization_error(const Serializatio
 
 bool Vajra::response::ResponseWriter::send_response_message(int client_fd, const std::string &response_message) const
 {
-  suppress_sigpipe(client_fd);
-
   std::size_t bytes_sent = 0;
   while (bytes_sent < response_message.size())
   {
@@ -140,19 +160,6 @@ bool Vajra::response::ResponseWriter::send_response_message(int client_fd, const
   }
 
   return true;
-}
-
-void Vajra::response::ResponseWriter::suppress_sigpipe(int client_fd) const
-{
-#ifdef SO_NOSIGPIPE
-  int opt = 1;
-  if (setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt)) < 0)
-  {
-    std::cerr << "setsockopt(SO_NOSIGPIPE) failed: " << std::strerror(errno) << std::endl;
-  }
-#else
-  (void)client_fd;
-#endif
 }
 
 const char *Vajra::response::ResponseWriter::request_head_failure_label(

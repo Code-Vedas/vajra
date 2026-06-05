@@ -5,22 +5,31 @@
 
 #include "runtime/native_runtime.hpp"
 
+#include "listener/listener_socket.hpp"
 #include "rack/rack_request_executor.hpp"
+#include "request/request_processor.hpp"
+#include "response/response_writer.hpp"
 #include "ruby/thread.h"
 #include "runtime/boot_contract.hpp"
 #include "runtime/runtime_logging.hpp"
 #include "vajra.hpp"
 
+#include <arpa/inet.h>
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cerrno>
 #include <cstdint>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <fcntl.h>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <poll.h>
 #include <signal.h>
@@ -31,6 +40,10 @@
 #include <sys/wait.h>
 #include <utility>
 #include <unistd.h>
+
+#if defined(__APPLE__)
+#include <sys/event.h>
+#endif
 
 namespace
 {
@@ -67,7 +80,7 @@ namespace
   {
     WorkerBootstrapStatus status;
     std::int32_t pid;
-    std::uint32_t request_channel_count;
+    std::uint32_t control_channel_count;
   };
 
   struct WorkerWaitContext
@@ -147,6 +160,15 @@ namespace
     }
   }
 
+  int worker_control_socket_type()
+  {
+#if defined(__APPLE__)
+    return SOCK_STREAM;
+#else
+    return SOCK_SEQPACKET;
+#endif
+  }
+
   std::size_t checked_multiply(std::size_t left, std::size_t right, const char *error_message)
   {
     if (left != 0 && right > (std::numeric_limits<std::size_t>::max() / left))
@@ -167,24 +189,20 @@ namespace
     return left + right;
   }
 
-  void validate_worker_channel_capacity(int workers, std::size_t max_threads)
+  void validate_worker_channel_capacity(int workers)
   {
     constexpr std::size_t kRuntimeFdReserve = 32;
-    const std::size_t total_request_channels = checked_multiply(
+    const std::size_t total_control_channels = checked_multiply(
         static_cast<std::size_t>(workers),
-        max_threads,
-        "invalid workers/threads combination: workers * max_threads is too large");
-    const std::size_t boot_request_channel_fds = checked_multiply(
-        max_threads,
         static_cast<std::size_t>(2),
-        "invalid workers/threads combination: worker boot request channel fd count is too large");
+        "invalid workers combination: worker control channel fd count is too large");
     const std::size_t boot_readiness_pipe_fds = static_cast<std::size_t>(2);
     const std::size_t boot_overhead_fds = checked_add(
-        boot_request_channel_fds,
+        static_cast<std::size_t>(2),
         boot_readiness_pipe_fds,
         "invalid workers/threads combination: worker boot fd count is too large");
     const std::size_t peak_parent_fds = checked_add(
-        total_request_channels,
+        total_control_channels,
         boot_overhead_fds,
         "invalid workers/threads combination: required fd count is too large");
     const std::size_t required_fds = checked_add(
@@ -202,13 +220,59 @@ namespace
     if (required_fds > available_fds)
     {
       throw std::runtime_error(
-          "invalid workers/threads combination: workers * max_threads would keep " +
-          std::to_string(total_request_channels) + " parent request-channel fds open in steady state and peak at " +
+          "invalid workers combination: workers would keep " +
+          std::to_string(total_control_channels) + " parent control-channel fds open in steady state and peak at " +
           std::to_string(peak_parent_fds) + " parent fds during worker boot (" +
-          std::to_string(boot_request_channel_fds) + " boot request-channel fds plus " +
+          "2 boot control-channel fds plus " +
           std::to_string(boot_readiness_pipe_fds) + " readiness-pipe fds), which exceeds the process fd limit of " +
-          std::to_string(available_fds) + ". Lower workers or threads, or raise the fd limit.");
+          std::to_string(available_fds) + ". Lower workers, or raise the fd limit.");
     }
+  }
+
+  bool shutdown_requested_or_runtime_draining()
+  {
+    return Vajra::runtime::NativeRuntime::shutdown_requested() ||
+           (Vajra::runtime::current_runtime_state() != nullptr &&
+            Vajra::runtime::current_runtime_state()->shutdown_requested.load(std::memory_order_acquire));
+  }
+
+  std::string socket_address(sockaddr_in address)
+  {
+    char buffer[INET_ADDRSTRLEN] = {0};
+    if (inet_ntop(AF_INET, &address.sin_addr, buffer, sizeof(buffer)) == nullptr)
+    {
+      return "0.0.0.0";
+    }
+
+    return buffer;
+  }
+
+  Vajra::request::SocketContext socket_context_for_client_fd(int client_fd, int fallback_port)
+  {
+    sockaddr_in remote_addr{};
+    socklen_t remote_addr_length = sizeof(remote_addr);
+    if (getpeername(client_fd, reinterpret_cast<sockaddr *>(&remote_addr), &remote_addr_length) != 0)
+    {
+      remote_addr.sin_family = AF_INET;
+      remote_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+      remote_addr.sin_port = htons(0);
+    }
+
+    sockaddr_in local_addr{};
+    socklen_t local_addr_length = sizeof(local_addr);
+    if (getsockname(client_fd, reinterpret_cast<sockaddr *>(&local_addr), &local_addr_length) != 0)
+    {
+      local_addr.sin_family = AF_INET;
+      local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+      local_addr.sin_port = htons(static_cast<std::uint16_t>(fallback_port));
+    }
+
+    return Vajra::request::SocketContext{
+        socket_address(remote_addr),
+        ntohs(remote_addr.sin_port),
+        socket_address(local_addr),
+        ntohs(local_addr.sin_port),
+        "http"};
   }
 
   void *sleep_runtime_loop_without_gvl(void *data)
@@ -378,7 +442,41 @@ namespace
       {
         continue;
       }
-      throw std::runtime_error("worker spawner fd send failed");
+      throw std::runtime_error("control socket fd send failed");
+    }
+  }
+
+  void send_single_file_descriptor_or_throw(int socket_fd, int fd)
+  {
+    char message = 'F';
+    struct iovec io_vector;
+    std::memset(&io_vector, 0, sizeof(io_vector));
+    io_vector.iov_base = &message;
+    io_vector.iov_len = sizeof(message);
+
+    alignas(struct cmsghdr) char control[CMSG_SPACE(sizeof(int))];
+    std::memset(control, 0, sizeof(control));
+
+    struct msghdr message_header;
+    std::memset(&message_header, 0, sizeof(message_header));
+    message_header.msg_iov = &io_vector;
+    message_header.msg_iovlen = 1;
+    message_header.msg_control = control;
+    message_header.msg_controllen = sizeof(control);
+
+    struct cmsghdr *control_message = CMSG_FIRSTHDR(&message_header);
+    control_message->cmsg_level = SOL_SOCKET;
+    control_message->cmsg_type = SCM_RIGHTS;
+    control_message->cmsg_len = CMSG_LEN(sizeof(int));
+    std::memcpy(CMSG_DATA(control_message), &fd, sizeof(fd));
+
+    while (sendmsg(socket_fd, &message_header, 0) < 0)
+    {
+      if (errno == EINTR)
+      {
+        continue;
+      }
+      throw std::runtime_error("control socket fd send failed");
     }
   }
 
@@ -411,12 +509,12 @@ namespace
       {
         continue;
       }
-      throw std::runtime_error("worker spawner fd receive failed");
+      throw std::runtime_error("control socket fd receive failed");
     }
 
     if (result <= 0)
     {
-      throw std::runtime_error("worker spawner closed before sending request channels");
+      throw std::runtime_error("control socket closed before sending file descriptors");
     }
 
     const struct cmsghdr *control_message = CMSG_FIRSTHDR(&message_header);
@@ -424,19 +522,446 @@ namespace
         control_message->cmsg_level != SOL_SOCKET ||
         control_message->cmsg_type != SCM_RIGHTS)
     {
-      throw std::runtime_error("worker spawner returned an invalid request channel payload");
+      throw std::runtime_error("control socket returned an invalid file-descriptor payload");
     }
 
     const std::size_t descriptor_count =
         static_cast<std::size_t>((control_message->cmsg_len - CMSG_LEN(0)) / sizeof(int));
     if (descriptor_count != expected_count)
     {
-      throw std::runtime_error("worker spawner returned an unexpected request channel count");
+      throw std::runtime_error("control socket returned an unexpected file-descriptor count");
     }
 
     std::vector<int> descriptors(descriptor_count, -1);
     std::memcpy(descriptors.data(), CMSG_DATA(control_message), sizeof(int) * descriptor_count);
     return descriptors;
+  }
+
+  std::optional<int> receive_single_file_descriptor(int socket_fd)
+  {
+    char message = '\0';
+    struct iovec io_vector;
+    std::memset(&io_vector, 0, sizeof(io_vector));
+    io_vector.iov_base = &message;
+    io_vector.iov_len = sizeof(message);
+    std::array<char, CMSG_SPACE(sizeof(int))> control{};
+
+    struct msghdr message_header;
+    std::memset(&message_header, 0, sizeof(message_header));
+    message_header.msg_iov = &io_vector;
+    message_header.msg_iovlen = 1;
+    message_header.msg_control = control.data();
+    message_header.msg_controllen = control.size();
+
+    for (;;)
+    {
+      const ssize_t result = recvmsg(socket_fd, &message_header, 0);
+      if (result == 0)
+      {
+        return std::nullopt;
+      }
+      if (result < 0)
+      {
+        if (errno == EINTR)
+        {
+          if (shutdown_requested_or_runtime_draining())
+          {
+            return std::nullopt;
+          }
+          continue;
+        }
+        throw std::runtime_error(std::string("control socket receive failed: ") + std::strerror(errno));
+      }
+
+      struct cmsghdr *control_message = CMSG_FIRSTHDR(&message_header);
+      if (control_message == nullptr ||
+          control_message->cmsg_level != SOL_SOCKET ||
+          control_message->cmsg_type != SCM_RIGHTS ||
+          (control_message->cmsg_len - CMSG_LEN(0)) < static_cast<socklen_t>(sizeof(int)))
+      {
+        throw std::runtime_error("control socket received an invalid file descriptor payload");
+      }
+
+      int fd = -1;
+      std::memcpy(&fd, CMSG_DATA(control_message), sizeof(fd));
+      return fd;
+    }
+  }
+
+  struct WorkerHotPathLoopContext
+  {
+    Vajra::request::RequestProcessor *request_processor = nullptr;
+    int listener_fd = -1;
+    int control_fd = -1;
+    int fallback_port = 0;
+    int worker_index = -1;
+    struct WorkerConnectionQueueState *connection_queue_state = nullptr;
+  };
+
+  struct CachedWorkerDispatchTarget
+  {
+    std::shared_ptr<Vajra::runtime::SharedWorkerState> worker_state;
+    std::uint64_t control_channel_generation = 0;
+    int control_fd = -1;
+  };
+
+  struct WorkerConnectionQueueState
+  {
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::deque<int> pending_client_fds;
+    std::size_t max_pending_connections = 0;
+    std::size_t max_active_connections = 0;
+    bool capacity_gated = false;
+    bool shutdown_requested = false;
+  };
+
+  std::size_t worker_connection_credits(
+      const Vajra::runtime::WorkerRuntimeState &worker_state,
+      std::size_t max_active_connections,
+      std::size_t pending_connections)
+  {
+    const std::size_t idle_executions = worker_state.idle_execution_count.load(std::memory_order_acquire);
+    const std::size_t active_connections = worker_state.active_connections.load(std::memory_order_acquire);
+    const std::size_t local_queue_depth = worker_state.local_queue_depth.load(std::memory_order_acquire);
+    const std::size_t buffered_connections = active_connections + local_queue_depth + pending_connections;
+    if (buffered_connections >= max_active_connections)
+    {
+      return 0;
+    }
+
+    const std::size_t remaining_capacity = max_active_connections - buffered_connections;
+    return std::min(idle_executions + 1, remaining_capacity);
+  }
+
+  bool control_channel_shutdown_requested(int control_fd)
+  {
+    if (control_fd < 0)
+    {
+      return false;
+    }
+
+    pollfd control_poll{control_fd, POLLIN | POLLHUP | POLLERR, 0};
+    const int poll_result = poll(&control_poll, 1, 0);
+    if (poll_result <= 0)
+    {
+      return false;
+    }
+    if ((control_poll.revents & (POLLHUP | POLLERR)) != 0)
+    {
+      return true;
+    }
+    if ((control_poll.revents & POLLIN) == 0)
+    {
+      return false;
+    }
+
+    char buffer[16];
+    const ssize_t bytes_read = recv(control_fd, buffer, sizeof(buffer), MSG_DONTWAIT);
+    if (bytes_read == 0)
+    {
+      return true;
+    }
+    if (bytes_read < 0)
+    {
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+      {
+        return false;
+      }
+      return errno != EINTR || shutdown_requested_or_runtime_draining();
+    }
+
+    return true;
+  }
+
+  int accept_client_connection(int listener_fd, int control_fd)
+  {
+    for (;;)
+    {
+      pollfd descriptors[2] = {
+          {listener_fd, POLLIN, 0},
+          {control_fd, POLLIN | POLLHUP | POLLERR, 0}};
+      const nfds_t descriptor_count = control_fd >= 0 ? 2 : 1;
+      const int poll_result = poll(descriptors, descriptor_count, 100);
+      if (poll_result == 0)
+      {
+        if (shutdown_requested_or_runtime_draining())
+        {
+          return -1;
+        }
+        continue;
+      }
+      if (poll_result < 0)
+      {
+        if (errno == EINTR)
+        {
+          if (shutdown_requested_or_runtime_draining())
+          {
+            return -1;
+          }
+          continue;
+        }
+        throw std::runtime_error(std::string("worker accept poll failed: ") + std::strerror(errno));
+      }
+      if (control_fd >= 0 && (descriptors[1].revents & (POLLIN | POLLHUP | POLLERR)) != 0)
+      {
+        return -1;
+      }
+      if ((descriptors[0].revents & POLLIN) == 0)
+      {
+        if (shutdown_requested_or_runtime_draining())
+        {
+          return -1;
+        }
+        continue;
+      }
+
+      const int client_fd = accept(listener_fd, nullptr, nullptr);
+      if (client_fd >= 0)
+      {
+        return client_fd;
+      }
+      if (errno == EINTR)
+      {
+        if (shutdown_requested_or_runtime_draining())
+        {
+          return -1;
+        }
+        continue;
+      }
+      if (shutdown_requested_or_runtime_draining())
+      {
+        return -1;
+      }
+      throw std::runtime_error(std::string("worker accept failed: ") + std::strerror(errno));
+    }
+  }
+
+  void set_nonblocking_or_throw(int fd)
+  {
+    const int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0)
+    {
+      throw std::runtime_error(std::string("fcntl(F_GETFL) failed: ") + std::strerror(errno));
+    }
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
+    {
+      throw std::runtime_error(std::string("fcntl(F_SETFL) failed: ") + std::strerror(errno));
+    }
+  }
+
+  std::int64_t connection_deadline_nanoseconds(
+      bool first_request,
+      int first_data_timeout_seconds,
+      int persistent_timeout_seconds)
+  {
+    const std::int64_t timeout_seconds = first_request ? first_data_timeout_seconds : persistent_timeout_seconds;
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch() + std::chrono::seconds(timeout_seconds))
+        .count();
+  }
+
+  bool socket_has_pending_readable_bytes(int client_fd)
+  {
+    if (client_fd < 0)
+    {
+      return false;
+    }
+
+    pollfd descriptor{client_fd, POLLIN | POLLHUP | POLLERR, 0};
+    const int poll_result = poll(&descriptor, 1, 0);
+    if (poll_result <= 0)
+    {
+      return false;
+    }
+
+    return (descriptor.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
+  }
+
+  bool enqueue_worker_connection(
+      WorkerConnectionQueueState &queue_state,
+      int client_fd,
+      std::chrono::milliseconds wait_interval)
+  {
+    while (!shutdown_requested_or_runtime_draining())
+    {
+      std::unique_lock<std::mutex> lock(queue_state.mutex);
+      if (queue_state.shutdown_requested)
+      {
+        return false;
+      }
+      const std::size_t pending_connections = queue_state.pending_client_fds.size();
+      std::size_t credits = queue_state.max_pending_connections;
+      if (queue_state.capacity_gated)
+      {
+        if (auto *worker_state = Vajra::runtime::current_worker_runtime_state(); worker_state != nullptr)
+        {
+          credits = worker_connection_credits(*worker_state, queue_state.max_active_connections, pending_connections);
+        }
+        else
+        {
+          credits = 0;
+        }
+      }
+      const bool below_pending_limit = pending_connections < queue_state.max_pending_connections;
+      const bool below_active_limit = !queue_state.capacity_gated || credits > 0;
+      if (below_pending_limit && below_active_limit)
+      {
+        queue_state.pending_client_fds.push_back(client_fd);
+        Vajra::runtime::note_worker_local_queue_depth(queue_state.pending_client_fds.size());
+        lock.unlock();
+        queue_state.condition.notify_one();
+        return true;
+      }
+      queue_state.condition.wait_for(lock, wait_interval);
+    }
+
+    return false;
+  }
+
+  void *run_worker_connection_receiver_without_gvl(void *data)
+  {
+    auto *context = static_cast<WorkerHotPathLoopContext *>(data);
+    if (context == nullptr || context->connection_queue_state == nullptr)
+    {
+      return nullptr;
+    }
+
+    Vajra::runtime::attach_current_thread_to_worker_runtime_state(static_cast<std::size_t>(context->worker_index));
+
+    auto &queue_state = *context->connection_queue_state;
+    for (;;)
+    {
+      std::optional<int> received_client_fd;
+      try
+      {
+        received_client_fd = receive_single_file_descriptor(context->control_fd);
+      }
+      catch (const std::exception &error)
+      {
+        Vajra::runtime::log_runtime_error(std::string("worker connection receiver failed: ") + error.what());
+        continue;
+      }
+
+      if (!received_client_fd.has_value())
+      {
+        {
+          const std::lock_guard<std::mutex> lock(queue_state.mutex);
+          queue_state.shutdown_requested = true;
+        }
+        queue_state.condition.notify_all();
+        break;
+      }
+
+      bool enqueued = false;
+      enqueued = enqueue_worker_connection(queue_state, *received_client_fd, std::chrono::milliseconds(1));
+      if (!enqueued)
+      {
+        close_fd_if_open(*received_client_fd);
+        continue;
+      }
+    }
+
+    return nullptr;
+  }
+
+  VALUE run_worker_connection_receiver(void *data)
+  {
+    rb_thread_lock_native_thread();
+    rb_thread_call_without_gvl(
+        run_worker_connection_receiver_without_gvl,
+        data,
+        RUBY_UBF_IO,
+        nullptr);
+    return Qnil;
+  }
+
+  std::optional<int> dequeue_worker_connection(WorkerConnectionQueueState &queue_state)
+  {
+    std::unique_lock<std::mutex> lock(queue_state.mutex);
+    queue_state.condition.wait(lock, [&queue_state] {
+      return queue_state.shutdown_requested || !queue_state.pending_client_fds.empty();
+    });
+    if (queue_state.pending_client_fds.empty())
+    {
+      return std::nullopt;
+    }
+
+    const int client_fd = queue_state.pending_client_fds.front();
+    queue_state.pending_client_fds.pop_front();
+    Vajra::runtime::note_worker_local_queue_depth(queue_state.pending_client_fds.size());
+    lock.unlock();
+    queue_state.condition.notify_one();
+    return client_fd;
+  }
+
+  void handle_worker_connection(WorkerHotPathLoopContext &context, int client_fd)
+  {
+    Vajra::response::ResponseWriter::prepare_client_socket(client_fd);
+    Vajra::runtime::note_worker_connection_opened();
+    try
+    {
+      context.request_processor->handle(client_fd, socket_context_for_client_fd(client_fd, context.fallback_port));
+    }
+    catch (...)
+    {
+    }
+    Vajra::runtime::note_worker_connection_closed();
+  }
+
+  void *run_worker_connection_loop_without_gvl(void *data)
+  {
+    auto *context = static_cast<WorkerHotPathLoopContext *>(data);
+    if (context == nullptr || context->request_processor == nullptr)
+    {
+      return nullptr;
+    }
+
+    Vajra::runtime::attach_current_thread_to_worker_runtime_state(static_cast<std::size_t>(context->worker_index));
+
+    while (!shutdown_requested_or_runtime_draining())
+    {
+      int client_fd = -1;
+      try
+      {
+        if (context->connection_queue_state == nullptr)
+        {
+          break;
+        }
+
+        std::optional<int> dequeued_client_fd = dequeue_worker_connection(*context->connection_queue_state);
+        if (!dequeued_client_fd.has_value())
+        {
+          break;
+        }
+        client_fd = *dequeued_client_fd;
+        Vajra::runtime::note_worker_dispatch_received();
+      }
+      catch (const std::exception &error)
+      {
+        if (client_fd >= 0)
+        {
+          close_fd_if_open(client_fd);
+        }
+        Vajra::runtime::log_runtime_error(std::string("worker connection receive failed: ") + error.what());
+        continue;
+      }
+
+      handle_worker_connection(*context, client_fd);
+    }
+
+    return nullptr;
+  }
+
+  VALUE run_worker_connection_loop(void *data)
+  {
+    rb_thread_lock_native_thread();
+    rb_thread_call_without_gvl(
+        run_worker_connection_loop_without_gvl,
+        data,
+        RUBY_UBF_IO,
+        nullptr);
+    return Qnil;
   }
 
   [[noreturn]] void exit_worker_bootstrap_failure(
@@ -453,6 +978,7 @@ namespace
     }
 
     close(write_fd);
+    Vajra::runtime::stop_runtime_logging_worker();
     _exit(exit_code);
   }
 
@@ -651,10 +1177,10 @@ bool Vajra::runtime::NativeRuntime::try_begin_startup()
 std::shared_ptr<Vajra::runtime::SharedWorkerState> Vajra::runtime::NativeRuntime::register_worker_runtime(
     std::size_t worker_index,
     pid_t pid,
-    std::vector<int> request_channel_fds)
+    std::vector<int> control_channel_fds)
 {
   const auto worker_state =
-      std::make_shared<SharedWorkerState>(worker_index, pid, std::move(request_channel_fds));
+      std::make_shared<SharedWorkerState>(worker_index, pid, std::move(control_channel_fds));
   {
     const std::lock_guard<std::mutex> lock(server_mutex_);
     worker_states_.push_back(worker_state);
@@ -663,7 +1189,11 @@ std::shared_ptr<Vajra::runtime::SharedWorkerState> Vajra::runtime::NativeRuntime
   worker_state->last_progress_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
   worker_state->last_lifecycle_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
   worker_state->last_health_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
-  worker_state->idle_execution_count.store(worker_state->request_channel_fds.size(), std::memory_order_release);
+  worker_state->control_channel_count.store(worker_state->control_channel_fds.size(), std::memory_order_release);
+  worker_state->request_channel_count.store(worker_state->request_channel_fds.size(), std::memory_order_release);
+  worker_state->idle_execution_count.store(worker_spawn_config_.max_threads, std::memory_order_release);
+  Vajra::runtime::mark_worker_lifecycle(worker_index, WorkerLifecycleState::booting);
+  Vajra::runtime::mark_worker_available(worker_index, false);
   if (debug_logging_.load(std::memory_order_acquire))
   {
     log_worker_lifecycle_event(
@@ -699,6 +1229,10 @@ void Vajra::runtime::NativeRuntime::mark_worker_ready(const std::shared_ptr<Shar
   mark_lifecycle_transition(worker_state, WorkerLifecycleState::ready);
   worker_state->health_state.store(WorkerHealthState::healthy, std::memory_order_release);
   worker_state->last_health_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
+  Vajra::runtime::mark_worker_lifecycle(worker_state->worker_index, WorkerLifecycleState::ready);
+  Vajra::runtime::mark_worker_recovery(worker_state->worker_index, WorkerRecoveryState::none);
+  Vajra::runtime::mark_worker_health(worker_state->worker_index, WorkerHealthState::healthy);
+  Vajra::runtime::mark_worker_available(worker_state->worker_index, true);
   if (debug_logging_.load(std::memory_order_acquire))
   {
     log_worker_lifecycle_event(
@@ -743,6 +1277,10 @@ void Vajra::runtime::NativeRuntime::mark_worker_stopping(const std::shared_ptr<S
   worker_state->health_state.store(WorkerHealthState::degraded, std::memory_order_release);
   mark_recovery_transition(worker_state, WorkerRecoveryState::draining);
   worker_state->last_health_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
+  Vajra::runtime::mark_worker_lifecycle(worker_state->worker_index, WorkerLifecycleState::stopping);
+  Vajra::runtime::mark_worker_recovery(worker_state->worker_index, WorkerRecoveryState::draining);
+  Vajra::runtime::mark_worker_health(worker_state->worker_index, WorkerHealthState::degraded);
+  Vajra::runtime::mark_worker_available(worker_state->worker_index, false);
   if (debug_logging_.load(std::memory_order_acquire))
   {
     log_worker_lifecycle_event(
@@ -806,7 +1344,21 @@ void Vajra::runtime::NativeRuntime::mark_worker_exit(
   mark_recovery_transition(
       worker_state,
       replacement_needed ? WorkerRecoveryState::rejoin_pending : WorkerRecoveryState::none);
-  close_worker_request_channels(worker_state);
+  close_worker_control_channels(worker_state);
+  Vajra::runtime::mark_worker_lifecycle(worker_state->worker_index, WorkerLifecycleState::exited);
+  Vajra::runtime::mark_worker_recovery(
+      worker_state->worker_index,
+      replacement_needed ? WorkerRecoveryState::rejoin_pending : WorkerRecoveryState::none);
+  Vajra::runtime::mark_worker_health(
+      worker_state->worker_index,
+      exit_classification == WorkerExitClassification::expected_shutdown
+          ? WorkerHealthState::degraded
+          : WorkerHealthState::wedged);
+  Vajra::runtime::mark_worker_available(worker_state->worker_index, false);
+  Vajra::runtime::mark_worker_unexpected_exit(
+      worker_state->worker_index,
+      worker_state->unexpected_exit_count.load(std::memory_order_acquire),
+      worker_state->last_unexpected_exit_nanoseconds.load(std::memory_order_acquire));
   if (debug_logging_.load(std::memory_order_acquire))
   {
     log_worker_lifecycle_event(
@@ -848,6 +1400,7 @@ void Vajra::runtime::NativeRuntime::prepare_worker_replacement(const std::shared
   worker_state->timeout_escalation_pending.store(false, std::memory_order_release);
   worker_state->timeout_kill_deadline_nanoseconds.store(0, std::memory_order_release);
   worker_state->timeout_handling_started.store(false, std::memory_order_release);
+  worker_state->control_channels_closed.store(false, std::memory_order_release);
   worker_state->request_channels_closed.store(false, std::memory_order_release);
   worker_state->active_execution_count.store(0, std::memory_order_release);
   worker_state->idle_execution_count.store(worker_spawn_config_.max_threads, std::memory_order_release);
@@ -866,26 +1419,35 @@ void Vajra::runtime::NativeRuntime::prepare_worker_replacement(const std::shared
   worker_state->last_health_transition_nanoseconds.store(steady_clock_nanoseconds(), std::memory_order_release);
   mark_recovery_transition(worker_state, WorkerRecoveryState::replacing);
   mark_lifecycle_transition(worker_state, WorkerLifecycleState::booting);
+  Vajra::runtime::mark_worker_lifecycle(worker_state->worker_index, WorkerLifecycleState::booting);
+  Vajra::runtime::mark_worker_recovery(worker_state->worker_index, WorkerRecoveryState::replacing);
+  Vajra::runtime::mark_worker_health(worker_state->worker_index, WorkerHealthState::healthy);
+  Vajra::runtime::mark_worker_available(worker_state->worker_index, false);
 }
 
 void Vajra::runtime::NativeRuntime::close_worker_request_channels(const std::shared_ptr<SharedWorkerState> &worker_state)
 {
+  close_worker_control_channels(worker_state);
+}
+
+void Vajra::runtime::NativeRuntime::close_worker_control_channels(const std::shared_ptr<SharedWorkerState> &worker_state)
+{
   bool expected = false;
-  if (!worker_state->request_channels_closed.compare_exchange_strong(expected, true))
+  if (!worker_state->control_channels_closed.compare_exchange_strong(expected, true))
   {
     return;
   }
 
-  std::vector<int> request_channel_fds;
+  std::vector<int> control_channel_fds;
   {
-    const std::lock_guard<std::mutex> lock(worker_state->request_channel_mutex);
-    request_channel_fds = worker_state->request_channel_fds;
+    const std::lock_guard<std::mutex> lock(worker_state->control_channel_mutex);
+    control_channel_fds = worker_state->control_channel_fds;
   }
 
-  for (int request_channel_fd : request_channel_fds)
+  for (int control_channel_fd : control_channel_fds)
   {
-    shutdown(request_channel_fd, SHUT_RDWR);
-    close_fd_if_open(request_channel_fd);
+    shutdown(control_channel_fd, SHUT_RDWR);
+    close_fd_if_open(control_channel_fd);
   }
 }
 
@@ -918,6 +1480,8 @@ bool Vajra::runtime::NativeRuntime::start_worker_spawner(const WorkerSpawnConfig
   if (pid == 0)
   {
     close_fd_if_open(control_channels[0]);
+    close_fd_if_open(Vajra::runtime::runtime_listener_fd());
+    Vajra::runtime::set_runtime_listener_fd(-1);
     run_worker_spawner(control_channels[1], spawn_config);
   }
 
@@ -1031,7 +1595,7 @@ void Vajra::runtime::NativeRuntime::stop_worker_spawner()
     }
 
     pid_t pid = -1;
-    std::vector<int> parent_request_channels;
+    std::vector<int> parent_control_channels;
     BootDiagnostic diagnostic{
         "worker_replacement_failed",
         "boot",
@@ -1040,7 +1604,7 @@ void Vajra::runtime::NativeRuntime::stop_worker_spawner()
 
     try
     {
-      if (!spawn_worker_from_single_thread(worker_index, spawn_config, pid, parent_request_channels, diagnostic, control_fd))
+      if (!spawn_worker_from_single_thread(worker_index, spawn_config, pid, parent_control_channels, diagnostic, control_fd))
       {
         status = WorkerBootstrapStatus::failed;
       }
@@ -1057,13 +1621,13 @@ void Vajra::runtime::NativeRuntime::stop_worker_spawner()
     const WorkerSpawnerResponseHeader header{
         status,
         static_cast<std::int32_t>(pid),
-        static_cast<std::uint32_t>(parent_request_channels.size())};
+        static_cast<std::uint32_t>(parent_control_channels.size())};
     write_all_or_throw(control_fd, &header, sizeof(header));
 
     if (status == WorkerBootstrapStatus::ready)
     {
-      send_file_descriptors_or_throw(control_fd, parent_request_channels);
-      for (int fd : parent_request_channels)
+      send_file_descriptors_or_throw(control_fd, parent_control_channels);
+      for (int fd : parent_control_channels)
       {
         close_fd_if_open(fd);
       }
@@ -1073,7 +1637,7 @@ void Vajra::runtime::NativeRuntime::stop_worker_spawner()
     write_string_payload(control_fd, diagnostic.code);
     write_string_payload(control_fd, diagnostic.category);
     write_string_payload(control_fd, diagnostic.message);
-    for (int fd : parent_request_channels)
+    for (int fd : parent_control_channels)
     {
       close_fd_if_open(fd);
     }
@@ -1084,7 +1648,7 @@ bool Vajra::runtime::NativeRuntime::spawn_worker_from_single_thread(
     std::size_t worker_index,
     const WorkerSpawnConfig &spawn_config,
     pid_t &pid,
-    std::vector<int> &parent_request_channels,
+    std::vector<int> &parent_control_channels,
     BootDiagnostic &failure_diagnostic,
     int inherited_control_fd)
 {
@@ -1095,26 +1659,23 @@ bool Vajra::runtime::NativeRuntime::spawn_worker_from_single_thread(
         std::string("worker bootstrap pipe creation failed: ") + std::strerror(errno));
   }
 
-  std::vector<std::array<int, 2>> request_channels;
-  request_channels.reserve(spawn_config.max_threads);
+  std::vector<std::array<int, 2>> control_channels;
+  control_channels.reserve(1);
   try
   {
-    for (std::size_t thread_index = 0; thread_index < spawn_config.max_threads; ++thread_index)
+    std::array<int, 2> control_channel = {-1, -1};
+    if (socketpair(AF_UNIX, worker_control_socket_type(), 0, control_channel.data()) != 0)
     {
-      std::array<int, 2> request_channel = {-1, -1};
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, request_channel.data()) != 0)
-      {
-        throw std::runtime_error(
-            std::string("worker request channel creation failed: ") + std::strerror(errno));
-      }
-      request_channels.push_back(request_channel);
+      throw std::runtime_error(
+          std::string("worker control channel creation failed: ") + std::strerror(errno));
     }
+    control_channels.push_back(control_channel);
   }
   catch (...)
   {
     close_fd_if_open(readiness_pipe[0]);
     close_fd_if_open(readiness_pipe[1]);
-    for (const auto &pair : request_channels)
+    for (const auto &pair : control_channels)
     {
       close_fd_if_open(pair[0]);
       close_fd_if_open(pair[1]);
@@ -1135,7 +1696,7 @@ bool Vajra::runtime::NativeRuntime::spawn_worker_from_single_thread(
     const int error_number = errno;
     close_fd_if_open(readiness_pipe[0]);
     close_fd_if_open(readiness_pipe[1]);
-    for (const auto &pair : request_channels)
+    for (const auto &pair : control_channels)
     {
       close_fd_if_open(pair[0]);
       close_fd_if_open(pair[1]);
@@ -1149,30 +1710,39 @@ bool Vajra::runtime::NativeRuntime::spawn_worker_from_single_thread(
     rb_thread_atfork();
     close_fd_if_open(inherited_control_fd);
     close_fd_if_open(readiness_pipe[0]);
-    std::vector<int> child_request_channels;
-    child_request_channels.reserve(request_channels.size());
-    for (const auto &pair : request_channels)
+    std::vector<int> child_control_channels;
+    child_control_channels.reserve(control_channels.size());
+    for (const auto &pair : control_channels)
     {
       close_fd_if_open(pair[0]);
-      child_request_channels.push_back(pair[1]);
+      child_control_channels.push_back(pair[1]);
     }
     run_worker_process(
-        std::move(child_request_channels),
+        std::move(child_control_channels),
         spawn_config.max_threads,
         spawn_config.port,
         spawn_config.max_request_head_bytes,
         readiness_pipe[1],
         static_cast<int>(worker_index),
         spawn_config.worker_processes,
+        -1,
+        spawn_config.socket_queue_capacity,
+        spawn_config.host,
+        spawn_config.max_connections,
+        spawn_config.request_head_timeout_seconds,
+        spawn_config.first_data_timeout_seconds,
+        spawn_config.persistent_timeout_seconds,
+        spawn_config.stats_path,
+        spawn_config.metrics_endpoint,
         spawn_config.debug_logging);
   }
 
-  parent_request_channels.clear();
-  parent_request_channels.reserve(request_channels.size());
-  for (const auto &pair : request_channels)
+  parent_control_channels.clear();
+  parent_control_channels.reserve(control_channels.size());
+  for (const auto &pair : control_channels)
   {
     close_fd_if_open(pair[1]);
-    parent_request_channels.push_back(pair[0]);
+    parent_control_channels.push_back(pair[0]);
   }
   close_fd_if_open(readiness_pipe[1]);
 
@@ -1201,7 +1771,7 @@ bool Vajra::runtime::NativeRuntime::boot_replacement_worker(
     const std::shared_ptr<SharedWorkerState> &worker_state,
     const WorkerSpawnConfig &,
     pid_t &pid,
-    std::vector<int> &parent_request_channels,
+    std::vector<int> &parent_control_channels,
     BootDiagnostic &failure_diagnostic)
 {
   int control_fd = -1;
@@ -1256,12 +1826,18 @@ bool Vajra::runtime::NativeRuntime::boot_replacement_worker(
     throw std::runtime_error("worker spawner returned an unknown replacement status");
   }
 
-  parent_request_channels = receive_file_descriptors_or_throw(control_fd, header.request_channel_count);
+  parent_control_channels = receive_file_descriptors_or_throw(control_fd, header.control_channel_count);
+  {
+    const std::lock_guard<std::mutex> lock(worker_state->control_channel_mutex);
+    worker_state->control_channel_fds = parent_control_channels;
+  }
   {
     const std::lock_guard<std::mutex> lock(worker_state->request_channel_mutex);
-    worker_state->request_channel_fds = parent_request_channels;
+    worker_state->request_channel_fds = parent_control_channels;
     worker_state->channel_generation.fetch_add(1, std::memory_order_acq_rel);
   }
+  worker_state->control_channel_count.store(parent_control_channels.size(), std::memory_order_release);
+  worker_state->request_channel_count.store(parent_control_channels.size(), std::memory_order_release);
   worker_state->pid.store(pid, std::memory_order_release);
   prepare_worker_replacement(worker_state);
   worker_state->spawned_by_worker_spawner.store(true, std::memory_order_release);
@@ -1279,6 +1855,12 @@ void Vajra::runtime::NativeRuntime::replace_worker(const std::shared_ptr<SharedW
     worker_state->available.store(false, std::memory_order_release);
     worker_state->terminal_replacement_failure.store(true, std::memory_order_release);
     mark_recovery_transition(worker_state, WorkerRecoveryState::terminal_failure);
+    Vajra::runtime::mark_worker_replacement_counters(
+        worker_state->worker_index,
+        worker_state->replacement_attempt_count.load(std::memory_order_acquire),
+        worker_state->replacement_success_count.load(std::memory_order_acquire),
+        worker_state->replacement_failure_count.load(std::memory_order_acquire));
+    Vajra::runtime::mark_worker_terminal_replacement_failure(worker_state->worker_index, true);
     if (debug_logging_.load(std::memory_order_acquire))
     {
       log_worker_lifecycle_event(
@@ -1314,12 +1896,12 @@ void Vajra::runtime::NativeRuntime::replace_worker(const std::shared_ptr<SharedW
   }
 
   pid_t pid = -1;
-  std::vector<int> parent_request_channels;
+  std::vector<int> parent_control_channels;
   BootDiagnostic failure_diagnostic{"worker_replacement_failed", "boot", "worker replacement bootstrap failed"};
   bool ready = false;
   try
   {
-    ready = boot_replacement_worker(worker_state, worker_spawn_config_, pid, parent_request_channels, failure_diagnostic);
+    ready = boot_replacement_worker(worker_state, worker_spawn_config_, pid, parent_control_channels, failure_diagnostic);
   }
   catch (...)
   {
@@ -1346,6 +1928,11 @@ void Vajra::runtime::NativeRuntime::replace_worker(const std::shared_ptr<SharedW
 
   mark_worker_ready(worker_state);
   worker_state->replacement_success_count.fetch_add(1, std::memory_order_acq_rel);
+  Vajra::runtime::mark_worker_replacement_counters(
+      worker_state->worker_index,
+      worker_state->replacement_attempt_count.load(std::memory_order_acquire),
+      worker_state->replacement_success_count.load(std::memory_order_acquire),
+      worker_state->replacement_failure_count.load(std::memory_order_acquire));
 
   if (debug_logging_.load(std::memory_order_acquire))
   {
@@ -1516,11 +2103,16 @@ void Vajra::runtime::NativeRuntime::clear_worker_runtime()
 
   for (const auto &worker_state : worker_states)
   {
-    close_worker_request_channels(worker_state);
+    close_worker_control_channels(worker_state);
   }
 
   stop_worker_spawner();
   stop_worker_exit_watcher();
+  if (runtime_state_ != nullptr)
+  {
+    release_runtime_state(runtime_state_);
+    runtime_state_ = nullptr;
+  }
 }
 
 void Vajra::runtime::NativeRuntime::install_server_instance(std::shared_ptr<Vajra::Server> server)
@@ -1942,6 +2534,10 @@ void Vajra::runtime::NativeRuntime::refresh_worker_health(
       {
         worker_state->available.store(true, std::memory_order_release);
       }
+      Vajra::runtime::mark_worker_health(worker_state->worker_index, next_state);
+      Vajra::runtime::mark_worker_available(
+          worker_state->worker_index,
+          worker_state->available.load(std::memory_order_acquire));
 
       if (debug_logging_.load(std::memory_order_acquire))
       {
@@ -1994,6 +2590,9 @@ void Vajra::runtime::NativeRuntime::handle_worker_timeout(const std::shared_ptr<
   {
     (void)signal_process_with_retry(pid, SIGINT, "failed to signal timed out worker");
   }
+  Vajra::runtime::mark_worker_timeout_escalations(
+      worker_state->worker_index,
+      worker_state->timeout_escalation_count.load(std::memory_order_acquire));
   worker_state_changed_.notify_all();
 }
 
@@ -2183,17 +2782,31 @@ void Vajra::runtime::NativeRuntime::watch_worker_exits()
 }
 
 void Vajra::runtime::NativeRuntime::run_worker_process(
-    std::vector<int> request_channel_fds,
+    std::vector<int> control_channel_fds,
     std::size_t max_threads,
     int port,
     std::size_t max_request_head_bytes,
     int readiness_write_fd,
     int worker_index,
     int worker_processes,
+    int inherited_listener_fd,
+    std::size_t socket_queue_capacity,
+    std::string host,
+    std::size_t max_connections,
+    int request_head_timeout_seconds,
+    int first_data_timeout_seconds,
+    int persistent_timeout_seconds,
+    std::string stats_path,
+    std::string metrics_endpoint,
     bool debug_logging)
 {
   try
   {
+    if (runtime_state_ != nullptr)
+    {
+      Vajra::runtime::install_worker_runtime_state(runtime_state_, static_cast<std::size_t>(worker_index), getpid());
+    }
+
     const auto boot_started_at = std::chrono::steady_clock::now();
     const BootContractResult boot_result = BootContract::run(
         BootContractConfig{port, max_request_head_bytes, kWorkerBootstrapRuntimeRole});
@@ -2203,6 +2816,60 @@ void Vajra::runtime::NativeRuntime::run_worker_process(
           readiness_write_fd,
           BootContract::diagnostic_for_failure(boot_result),
           1);
+    }
+    Vajra::runtime::start_runtime_logging_worker();
+
+    auto rack_executor = std::make_shared<Vajra::rack::RackRequestExecutor>(
+        std::shared_ptr<const Vajra::rack::RackExecutionTransport>{},
+        Vajra::rack::ControlPlaneConfig{std::move(stats_path), std::move(metrics_endpoint)});
+
+    Vajra::request::RequestProcessor request_processor(
+        max_request_head_bytes,
+        request_head_timeout_seconds,
+        first_data_timeout_seconds,
+        persistent_timeout_seconds,
+        std::move(rack_executor));
+
+    if (control_channel_fds.empty())
+    {
+      throw std::runtime_error("worker requires a control channel");
+    }
+
+    const std::size_t max_worker_connections = checked_add(
+        max_threads,
+        socket_queue_capacity,
+        "worker connection capacity is too large");
+    (void)max_connections;
+
+    std::vector<std::unique_ptr<WorkerHotPathLoopContext>> loop_contexts;
+    loop_contexts.reserve(max_threads);
+    std::unique_ptr<WorkerConnectionQueueState> connection_queue_state;
+    std::unique_ptr<WorkerHotPathLoopContext> intake_context;
+
+    {
+      connection_queue_state = std::make_unique<WorkerConnectionQueueState>();
+      connection_queue_state->max_pending_connections = max_worker_connections;
+      connection_queue_state->max_active_connections = max_threads;
+      connection_queue_state->capacity_gated = false;
+      intake_context = std::make_unique<WorkerHotPathLoopContext>();
+      intake_context->listener_fd = inherited_listener_fd;
+      intake_context->control_fd = control_channel_fds.empty() ? -1 : control_channel_fds.front();
+      intake_context->worker_index = worker_index;
+      intake_context->connection_queue_state = connection_queue_state.get();
+      rb_thread_create(run_worker_connection_receiver, intake_context.get());
+
+      for (std::size_t thread_index = 0; thread_index < max_threads; ++thread_index)
+      {
+        auto loop_context = std::make_unique<WorkerHotPathLoopContext>();
+        loop_context->request_processor = &request_processor;
+        loop_context->listener_fd = inherited_listener_fd;
+        loop_context->control_fd = control_channel_fds.empty() ? -1 : control_channel_fds.front();
+        loop_context->fallback_port = port;
+        loop_context->worker_index = worker_index;
+        loop_context->connection_queue_state = connection_queue_state.get();
+        rb_thread_create(run_worker_connection_loop, loop_context.get());
+        loop_contexts.push_back(std::move(loop_context));
+      }
     }
 
     report_worker_boot_ready(readiness_write_fd);
@@ -2214,7 +2881,45 @@ void Vajra::runtime::NativeRuntime::run_worker_process(
     const std::chrono::duration<double> boot_elapsed = boot_finished_at - boot_started_at;
     log_worker_booted(worker_index, getpid(), boot_elapsed.count());
     close(readiness_write_fd);
-    Vajra::rack::run_worker_request_execution_loop(request_channel_fds, max_threads);
+
+    while (!shutdown_requested_or_runtime_draining())
+    {
+      if (control_channel_shutdown_requested(control_channel_fds.empty() ? -1 : control_channel_fds.front()))
+      {
+        break;
+      }
+      if (connection_queue_state != nullptr)
+      {
+        std::lock_guard<std::mutex> lock(connection_queue_state->mutex);
+        if (connection_queue_state->shutdown_requested)
+        {
+          break;
+        }
+      }
+
+      RuntimeSleepContext loop_sleep_context{std::chrono::milliseconds(50)};
+      rb_thread_call_without_gvl(
+          sleep_runtime_loop_without_gvl,
+          &loop_sleep_context,
+          RUBY_UBF_IO,
+          nullptr);
+    }
+
+    close_fd_if_open(inherited_listener_fd);
+    if (connection_queue_state)
+    {
+      {
+        const std::lock_guard<std::mutex> lock(connection_queue_state->mutex);
+        connection_queue_state->shutdown_requested = true;
+      }
+      connection_queue_state->condition.notify_all();
+    }
+    for (int control_channel_fd : control_channel_fds)
+    {
+      shutdown(control_channel_fd, SHUT_RDWR);
+      close_fd_if_open(control_channel_fd);
+    }
+    Vajra::runtime::stop_runtime_logging_worker();
     _exit(0);
   }
   catch (const std::exception &error)
@@ -2229,58 +2934,152 @@ void Vajra::runtime::NativeRuntime::run_worker_process(
   }
 }
 
-void Vajra::runtime::NativeRuntime::run_master_runtime_server(
+void Vajra::runtime::NativeRuntime::run_master_dispatch_loop(
+    int listener_fd,
     const RuntimeConfig &config,
-    const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states,
-    bool debug_logging)
+    const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states)
 {
-  auto server = std::make_shared<Vajra::Server>(
-      config.port,
-      config.host,
-      config.max_request_head_bytes,
-      std::make_shared<Vajra::rack::RackRequestExecutor>(
-          Vajra::rack::request_channel_transport(
-              worker_states,
-              config.min_threads,
-              config.queue_capacity,
-              config.request_timeout_seconds,
-              config.worker_timeout_seconds,
-              [this](const std::shared_ptr<SharedWorkerState> &worker_state) {
-                handle_worker_timeout(worker_state);
-              },
-              debug_logging),
-          Vajra::rack::ControlPlaneConfig{config.stats_path, config.metrics_endpoint}),
-      kNativeRuntimeControlRole,
-      kMasterWorkerMode,
-      config.workers,
-      kWorkerBootstrapRuntimeRole,
-      debug_logging,
-      -1,
-      config.request_head_timeout_seconds,
-      config.first_data_timeout_seconds,
-      config.persistent_timeout_seconds,
-      config.max_connections,
-      [this]() { begin_runtime_shutdown(); });
-  Vajra::Server *server_ptr = server.get();
-  install_server_instance(std::move(server));
-  try
+  const std::size_t per_worker_connection_limit = checked_add(
+      config.max_threads,
+      config.socket_queue_capacity,
+      "worker connection capacity is too large");
+  std::vector<CachedWorkerDispatchTarget> dispatch_targets;
+  dispatch_targets.reserve(worker_states.size());
+  for (const auto &worker_state : worker_states)
   {
-    server_ptr->start();
+    dispatch_targets.push_back(CachedWorkerDispatchTarget{worker_state, 0, -1});
   }
-  catch (...)
+  std::size_t next_worker_cursor = 0;
+  for (;;)
   {
-    auto owned_server = take_server_instance();
-    if (owned_server)
+    if (shutdown_requested_or_runtime_draining())
     {
-      owned_server->stop();
+      break;
     }
-    throw;
-  }
 
-  auto owned_server = take_server_instance();
-  if (owned_server)
-  {
-    owned_server->stop();
+    pollfd listener_descriptor{listener_fd, POLLIN, 0};
+    int poll_result = 0;
+    poll_result = poll(&listener_descriptor, 1, 100);
+    if (poll_result == 0)
+    {
+      continue;
+    }
+    if (poll_result < 0)
+    {
+      if (errno == EINTR)
+      {
+        continue;
+      }
+      throw std::runtime_error(std::string("master dispatch poll failed: ") + std::strerror(errno));
+    }
+    if ((listener_descriptor.revents & POLLIN) == 0)
+    {
+      continue;
+    }
+
+    const std::size_t worker_count = dispatch_targets.size();
+    std::optional<std::size_t> first_candidate_index;
+    for (std::size_t offset = 0; offset < worker_count; ++offset)
+    {
+      const std::size_t target_index = (next_worker_cursor + offset) % worker_count;
+      const auto &worker_state = dispatch_targets[target_index].worker_state;
+      if (!worker_state->available.load(std::memory_order_acquire))
+      {
+        continue;
+      }
+      if (worker_state->lifecycle_state.load(std::memory_order_acquire) != WorkerLifecycleState::ready)
+      {
+        continue;
+      }
+
+      const auto runtime_worker_state = &runtime_state_->workers[worker_state->worker_index];
+      const std::size_t credits = worker_connection_credits(*runtime_worker_state, per_worker_connection_limit, 0);
+      if (credits == 0)
+      {
+        continue;
+      }
+      first_candidate_index = target_index;
+      break;
+    }
+
+    if (!first_candidate_index.has_value())
+    {
+      RuntimeSleepContext loop_sleep_context{std::chrono::milliseconds(1)};
+      rb_thread_call_without_gvl(
+          sleep_runtime_loop_without_gvl,
+          &loop_sleep_context,
+          RUBY_UBF_IO,
+          nullptr);
+      continue;
+    }
+
+    sockaddr_in client_addr{};
+    socklen_t client_len = sizeof(client_addr);
+    int client_fd = -1;
+    client_fd = accept(listener_fd, reinterpret_cast<sockaddr *>(&client_addr), &client_len);
+    if (client_fd < 0)
+    {
+      if (errno == EINTR)
+      {
+        continue;
+      }
+      if (shutdown_requested_or_runtime_draining())
+      {
+        break;
+      }
+      throw std::runtime_error(std::string("master dispatch accept failed: ") + std::strerror(errno));
+    }
+
+    bool dispatched = false;
+    for (std::size_t offset = 0; offset < worker_count; ++offset)
+    {
+      const std::size_t target_index = (*first_candidate_index + offset) % worker_count;
+      CachedWorkerDispatchTarget &target = dispatch_targets[target_index];
+      const auto &worker_state = target.worker_state;
+      if (!worker_state->available.load(std::memory_order_acquire) ||
+          worker_state->lifecycle_state.load(std::memory_order_acquire) != WorkerLifecycleState::ready)
+      {
+        continue;
+      }
+
+      const auto runtime_worker_state = &runtime_state_->workers[worker_state->worker_index];
+      if (worker_connection_credits(*runtime_worker_state, per_worker_connection_limit, 0) == 0)
+      {
+        continue;
+      }
+
+      const std::uint64_t channel_generation = worker_state->channel_generation.load(std::memory_order_acquire);
+      if (target.control_fd < 0 || target.control_channel_generation != channel_generation)
+      {
+        const std::lock_guard<std::mutex> lock(worker_state->control_channel_mutex);
+        target.control_fd = worker_state->control_channel_fds.empty() ? -1 : worker_state->control_channel_fds.front();
+        target.control_channel_generation = channel_generation;
+      }
+      if (target.control_fd < 0)
+      {
+        Vajra::runtime::note_master_fd_transfer_failure(worker_state->worker_index);
+        continue;
+      }
+
+      try
+      {
+        send_single_file_descriptor_or_throw(target.control_fd, client_fd);
+        Vajra::runtime::note_master_dispatch(worker_state->worker_index, 0);
+        next_worker_cursor = (target_index + 1) % worker_count;
+        dispatched = true;
+        break;
+      }
+      catch (...)
+      {
+        Vajra::runtime::note_master_fd_transfer_failure(worker_state->worker_index);
+      }
+    }
+
+    close_fd_if_open(client_fd);
+    if (!dispatched)
+    {
+      continue;
+    }
   }
 }
 
@@ -2307,31 +3106,50 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
     {
       throw std::runtime_error("worker-only Vajra.start must be invoked from the Ruby main thread");
     }
-    if (config.scheduler_policy != "least_loaded")
-    {
-      throw std::runtime_error("unsupported scheduler_policy: " + config.scheduler_policy);
-    }
-    validate_worker_channel_capacity(config.workers, config.max_threads);
+    validate_worker_channel_capacity(config.workers);
     const bool debug_logging = debug_logging_enabled(config.log_level);
     {
       const std::lock_guard<std::mutex> lock(server_mutex_);
       health_policy_ = health_policy_for(config);
       worker_spawn_config_ = WorkerSpawnConfig{
+          config.host,
           config.max_threads,
           config.port,
+          config.max_connections,
           config.max_request_head_bytes,
+          config.request_head_timeout_seconds,
+          config.first_data_timeout_seconds,
+          config.persistent_timeout_seconds,
           config.workers,
+          config.socket_queue_capacity,
+          config.stats_path,
+          config.metrics_endpoint,
           debug_logging};
       recovery_policy_ = RecoveryPolicy{kReplacementFailureLimit};
       debug_logging_.store(debug_logging, std::memory_order_release);
     }
     configure_runtime_logging(config.structured_logs, config.access_log, config.error_log);
     configure_runtime_tracing(config.trace_enabled, config.trace_endpoint, config.trace_service_name);
-    log_runtime_banner_start(config.host, config.port, config.workers, config.min_threads, config.max_threads);
-    flush_runtime_logs();
     const BootContractResult master_boot_result = BootContract::run(
         BootContractConfig{config.port, config.max_request_head_bytes, kMasterPreloadRuntimeRole});
     BootContract::ensure_ready(master_boot_result);
+
+    listener::Socket listener_socket;
+    listener::SocketBinding listener_binding = listener_socket.open(config.host, config.port, false);
+    log_runtime_banner_start(config.host, listener_binding.port, config.workers, config.min_threads, config.max_threads);
+    flush_runtime_logs();
+    if (runtime_state_ != nullptr)
+    {
+      release_runtime_state(runtime_state_);
+    }
+    runtime_state_ = allocate_runtime_state();
+    install_master_runtime_state(
+        runtime_state_,
+        static_cast<std::size_t>(config.workers),
+        config.max_threads,
+        config.socket_queue_capacity);
+    set_runtime_listener_fd(listener_binding.fd);
+
     start_worker_spawner(worker_spawn_config_);
 
     std::vector<std::shared_ptr<SharedWorkerState>> booted_worker_states;
@@ -2346,25 +3164,14 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
             std::string("worker bootstrap pipe creation failed: ") + std::strerror(error_number));
       }
 
-      std::vector<std::array<int, 2>> request_channels;
-      request_channels.reserve(config.max_threads);
-      for (std::size_t thread_index = 0; thread_index < config.max_threads; ++thread_index)
+      std::array<int, 2> control_channel = {-1, -1};
+      if (socketpair(AF_UNIX, worker_control_socket_type(), 0, control_channel.data()) != 0)
       {
-        std::array<int, 2> request_channel = {-1, -1};
-        if (socketpair(AF_UNIX, SOCK_STREAM, 0, request_channel.data()) != 0)
-        {
-          const int error_number = errno;
-          close_fd_if_open(readiness_pipe[0]);
-          close_fd_if_open(readiness_pipe[1]);
-          for (const auto &pair : request_channels)
-          {
-            close_fd_if_open(pair[0]);
-            close_fd_if_open(pair[1]);
-          }
-          throw std::runtime_error(
-              std::string("worker request channel creation failed: ") + std::strerror(error_number));
-        }
-        request_channels.push_back(request_channel);
+        const int error_number = errno;
+        close_fd_if_open(readiness_pipe[0]);
+        close_fd_if_open(readiness_pipe[1]);
+        throw std::runtime_error(
+            std::string("worker control channel creation failed: ") + std::strerror(error_number));
       }
 
 #if defined(__APPLE__)
@@ -2380,11 +3187,8 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
         const int error_number = errno;
         close_fd_if_open(readiness_pipe[0]);
         close_fd_if_open(readiness_pipe[1]);
-        for (const auto &pair : request_channels)
-        {
-          close_fd_if_open(pair[0]);
-          close_fd_if_open(pair[1]);
-        }
+        close_fd_if_open(control_channel[0]);
+        close_fd_if_open(control_channel[1]);
         throw std::runtime_error(
             std::string("worker fork failed: ") + std::strerror(error_number));
       }
@@ -2394,33 +3198,30 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
         rb_thread_atfork();
         close_fd_if_open(worker_spawner_fd_);
         close_fd_if_open(readiness_pipe[0]);
-        std::vector<int> child_request_channels;
-        child_request_channels.reserve(request_channels.size());
-        for (const auto &pair : request_channels)
-        {
-          close_fd_if_open(pair[0]);
-          child_request_channels.push_back(pair[1]);
-        }
+        close_fd_if_open(control_channel[0]);
         run_worker_process(
-            std::move(child_request_channels),
+            {control_channel[1]},
             config.max_threads,
-            config.port,
+            listener_binding.port,
             config.max_request_head_bytes,
             readiness_pipe[1],
             worker_index,
             config.workers,
+            listener_binding.fd,
+            config.socket_queue_capacity,
+            config.host,
+            config.max_connections,
+            config.request_head_timeout_seconds,
+            config.first_data_timeout_seconds,
+            config.persistent_timeout_seconds,
+            config.stats_path,
+            config.metrics_endpoint,
             debug_logging);
       }
 
-      std::vector<int> worker_parent_channels;
-      worker_parent_channels.reserve(request_channels.size());
-      for (const auto &pair : request_channels)
-      {
-        close_fd_if_open(pair[1]);
-        worker_parent_channels.push_back(pair[0]);
-      }
       const std::shared_ptr<SharedWorkerState> worker_state =
-          register_worker_runtime(static_cast<std::size_t>(worker_index), pid, std::move(worker_parent_channels));
+          register_worker_runtime(static_cast<std::size_t>(worker_index), pid, {control_channel[0]});
+      close_fd_if_open(control_channel[1]);
       replay_pending_stop_if_needed();
       close_fd_if_open(readiness_pipe[1]);
 
@@ -2457,27 +3258,26 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
     }
 
     ensure_worker_exit_watcher_started();
-    std::atomic_bool server_thread_completed{false};
-    std::mutex server_thread_mutex;
-    std::string server_thread_error;
-    const RuntimeConfig server_config = config;
-    const std::vector<std::shared_ptr<SharedWorkerState>> server_worker_states = booted_worker_states;
-    std::thread server_thread([this, server_config, server_worker_states, debug_logging, &server_thread_completed, &server_thread_mutex, &server_thread_error]() mutable {
+    Vajra::runtime::start_runtime_logging_worker();
+    std::atomic_bool master_loop_completed{false};
+    std::mutex master_loop_mutex;
+    std::string master_loop_error;
+    std::thread master_loop_thread([this, config, booted_worker_states, listener_fd = listener_binding.fd, &master_loop_completed, &master_loop_mutex, &master_loop_error]() mutable {
       try
       {
-        run_master_runtime_server(server_config, server_worker_states, debug_logging);
+        run_master_dispatch_loop(listener_fd, config, booted_worker_states);
       }
       catch (const std::exception &error)
       {
-        const std::lock_guard<std::mutex> lock(server_thread_mutex);
-        server_thread_error = error.what();
+        const std::lock_guard<std::mutex> lock(master_loop_mutex);
+        master_loop_error = error.what();
       }
       catch (...)
       {
-        const std::lock_guard<std::mutex> lock(server_thread_mutex);
-        server_thread_error = "server failed with an unknown native error";
+        const std::lock_guard<std::mutex> lock(master_loop_mutex);
+        master_loop_error = "master loop failed with an unknown native error";
       }
-      server_thread_completed.store(true, std::memory_order_release);
+      master_loop_completed.store(true, std::memory_order_release);
       worker_state_changed_.notify_all();
     });
 
@@ -2497,20 +3297,12 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
       if (shutdown_requested() || shutdown_in_progress)
       {
         begin_runtime_shutdown();
+        mark_runtime_shutdown_requested();
         (void)stop_worker_processes();
-        Vajra::Server *server = nullptr;
-        std::shared_ptr<Vajra::Server> server_handle;
-        {
-          std::lock_guard<std::mutex> lock(server_mutex_);
-          server_handle = server_instance_;
-          server = server_handle.get();
-        }
-        if (server != nullptr)
-        {
-          server->stop();
-        }
+        close_fd_if_open(listener_binding.fd);
+        set_runtime_listener_fd(-1);
       }
-      if (server_thread_completed.load(std::memory_order_acquire))
+      if (master_loop_completed.load(std::memory_order_acquire))
       {
         break;
       }
@@ -2526,33 +3318,20 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
           nullptr);
     }
 
-    if (server_thread.joinable())
+    if (master_loop_thread.joinable())
     {
-      if (!server_thread_completed.load(std::memory_order_acquire))
-      {
-        Vajra::Server *server = nullptr;
-        std::shared_ptr<Vajra::Server> server_handle;
-        {
-          std::lock_guard<std::mutex> lock(server_mutex_);
-          server_handle = server_instance_;
-          server = server_handle.get();
-        }
-        if (server != nullptr)
-        {
-          server->stop();
-        }
-      }
-      server_thread.join();
+      master_loop_thread.join();
     }
     {
-      const std::lock_guard<std::mutex> lock(server_thread_mutex);
-      if (!server_thread_error.empty())
+      const std::lock_guard<std::mutex> lock(master_loop_mutex);
+      if (!master_loop_error.empty())
       {
-        throw std::runtime_error(server_thread_error);
+        throw std::runtime_error(master_loop_error);
       }
     }
 
     begin_runtime_shutdown();
+    mark_runtime_shutdown_requested();
     stop_worker_processes();
     wait_for_worker_exit(booted_worker_states);
     clear_worker_runtime();
@@ -2561,10 +3340,12 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
       log_runtime_stop_completed();
     }
     log_runtime_shutdown_complete();
+    Vajra::runtime::stop_runtime_logging_worker();
   }
   catch (...)
   {
     begin_runtime_shutdown();
+    mark_runtime_shutdown_requested();
     stop_worker_processes();
     const std::vector<std::shared_ptr<SharedWorkerState>> live_worker_states = worker_states();
     if (!live_worker_states.empty())
@@ -2572,6 +3353,7 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
       wait_for_worker_exit(live_worker_states);
     }
     clear_worker_runtime();
+    Vajra::runtime::stop_runtime_logging_worker();
     throw;
   }
 }
@@ -2582,20 +3364,8 @@ void Vajra::runtime::NativeRuntime::stop()
   if (had_runtime)
   {
     begin_runtime_shutdown();
+    mark_runtime_shutdown_requested();
     (void)stop_worker_processes();
-  }
-
-  Vajra::Server *server = nullptr;
-  std::shared_ptr<Vajra::Server> server_handle;
-  {
-    std::lock_guard<std::mutex> lock(server_mutex_);
-    server_handle = server_instance_;
-    server = server_handle.get();
-  }
-
-  if (server != nullptr)
-  {
-    server->stop();
   }
 }
 
@@ -2616,8 +3386,7 @@ void VajraNative::start(
     std::size_t min_threads,
     std::size_t max_threads,
     std::size_t max_connections,
-    std::size_t queue_capacity,
-    std::string scheduler_policy,
+    std::size_t socket_queue_capacity,
     std::size_t max_request_head_bytes,
     std::size_t request_timeout_seconds,
     int request_head_timeout_seconds,
@@ -2641,8 +3410,7 @@ void VajraNative::start(
       min_threads,
       max_threads,
       max_connections,
-      queue_capacity,
-      std::move(scheduler_policy),
+      socket_queue_capacity,
       max_request_head_bytes,
       request_timeout_seconds,
       request_head_timeout_seconds,

@@ -1,13 +1,13 @@
 ---
 title: Troubleshooting
-nav_order: 12
+nav_order: 6
 permalink: /troubleshooting/
 ---
 
 # Troubleshooting
 
 Use this page to triage package setup, extension build drift, executable boot
-failures, docs-site issues, and small repository-shape regressions.
+failures, docs-site problems, and small repository-shape regressions.
 
 The fastest way to use this page is to identify the symptom first, then jump to
 the boundary that owns it: package setup, native build, executable boot, docs
@@ -119,7 +119,7 @@ cd docs
 bundle exec jekyll build
 ```
 
-If the docs build fails, fix the issue in `docs/` before treating the change as
+If the docs build fails, fix the problem in `docs/` before treating the change as
 complete. Repository and package docs agree on canonical paths, commands, and
 product naming.
 

@@ -7,7 +7,7 @@
 
 require_relative 'support'
 
-RSpec.describe 'Vajra error responses', :e2e, :integration do # rubocop:disable RSpec/DescribeClass
+RSpec.describe 'Vajra error responses', :e2e, :integration do
   it 'rejects a malformed request line with 400 Bad Request' do
     result = raw_request_result(
       request: "GET /only-two-parts\r\nHost: localhost\r\nConnection: close\r\n\r\n"

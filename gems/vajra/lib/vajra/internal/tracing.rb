@@ -43,7 +43,6 @@ module Vajra
         available
       end
 
-      # :reek:NilCheck
       def with_request_span(env, &)
         tracer = TRACE_MUTEX.synchronize { TRACE_STATE.tracer }
         case tracer

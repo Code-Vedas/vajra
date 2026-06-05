@@ -7,96 +7,53 @@ description: Vajra product overview and documentation entrypoint.
 
 # Vajra
 
-Vajra is a native Ruby application server implemented in C++ and delivered as a
-Ruby extension. The project combines a package-local Ruby entrypoint with a
-native runtime that owns the server loop, connection lifecycle, and runtime
-orchestration.
+Vajra is a native Ruby application server for Rack and Rails applications. It is
+distributed as a Ruby gem with a C++ runtime that owns the listener, request
+parsing, response writing, worker lifecycle, and shutdown behavior.
 
-## What The Product Includes
+Use Vajra when you want a Rack-compatible Ruby server with a native runtime
+boundary and explicit operational behavior.
 
-- a canonical gem under `gems/vajra`
-- a native extension source tree under `gems/vajra/ext/vajra`
-- a package-local executable for local runtime startup
-- explicit build, smoke-test, and release workflows
-- product documentation for setup, runtime behavior, and operations
+## Framework Support
 
-## Product Posture
+Vajra plays through the standard Rack contract, so the same server runtime can
+host the common Ruby web framework shapes tested by this project.
 
-Vajra is organized as one gem with one clear runtime boundary.
+| Framework | How Vajra Fits |
+| --- | --- |
+| Rack | Loads a standard `config.ru` and executes the Rack app through Vajra's native request path. |
+| Rails | Integrates with `bin/rails server`; Rails owns application boot and middleware, Vajra owns the server runtime. |
+| Sinatra | Runs through the app's Rack entrypoint with Sinatra keeping routing and application behavior. |
+| Roda | Runs through `config.ru`; Roda keeps routing while Vajra owns listener and response transport. |
+| Hanami | Runs as a Rack application with Hanami routing/application code behind Vajra's server boundary. |
 
-- Ruby owns package installation, executable entrypoints, developer tooling, and
-  the contract for loading the extension.
-- C++ owns the native listener, request loop, signal-aware shutdown behavior,
-  and response path.
-- `docs/` is the product documentation surface. Package READMEs support it;
-  they do not replace it.
+## Documentation
 
-## Recommended Reading Path
+1. [Installation](/installation/)
+2. [Configuration](/configuration/)
+3. [Architecture](/architecture/)
+4. [Development](/development/)
+5. [Troubleshooting](/troubleshooting/)
 
-1. [Getting Started](/getting-started/)
-2. [Installation](/installation/)
-3. [Running Vajra](/running-vajra/)
-4. [Architecture](/architecture/)
-5. [Runtime Model](/runtime-model/)
-6. [Configuration](/configuration/)
-7. [Operations](/operations/)
-8. [Observability](/observability/)
-9. [Benchmarking](/benchmarking/)
-10. [Troubleshooting](/troubleshooting/)
-11. [Frameworks](/frameworks/)
-12. [Development](/development/)
+## Quick Start
 
-## Support Snapshot
+Add Vajra to an application bundle:
 
-| Area                  | Position                                                                       |
-| --------------------- | ------------------------------------------------------------------------------ |
-| Canonical package     | `gems/vajra`                                                                   |
-| Native source tree    | `gems/vajra/ext/vajra`                                                         |
-| Runtime executable    | `gems/vajra/exe/vajra`                                                         |
-| Default local startup | `bundle exec exe/vajra`                                                        |
-| Native build flow     | `bundle exec rake compile`                                                     |
-| Package validation    | `bin/rspec-unit`, `bin/rubocop`, `bin/reek`, `bundle exec rbs -I sig validate` |
-| Repository validation | `scripts/ci-install-bundles`, `scripts/run-all`                                |
-| Docs surface          | Jekyll + Just the Docs under `docs/`                                           |
-| Public docs host      | `https://vajra.codevedas.com`                                                  |
+```ruby
+gem "vajra"
+```
 
-## Explore The Docs
+For Rack, Sinatra, Roda, or Hanami apps, keep the normal `config.ru` and run:
 
-- [Getting Started](/getting-started/): repository setup, first validation,
-  and the fastest reading path through the project
-- [Installation](/installation/): toolchain requirements, native build path,
-  artifact expectations, and clean rebuild workflow
-- [Running Vajra](/running-vajra/): executable startup, request handling
-  expectations, and shutdown behavior
-- [Architecture](/architecture/): repository map, ownership boundaries, and the
-  Ruby-to-native boot chain
-- [Runtime Model](/runtime-model/): listener lifecycle, connection handling, and
-  where runtime behavior lives
-- [Configuration](/configuration/): configuration surfaces, precedence, and
-  the complete product configuration reference
-- [Operations](/operations/): boot, shutdown, runtime checks, and the operator
-  view of normal and degraded service
-- [Observability](/observability/): startup diagnostics, request visibility, and
-  operating signals
-- [Integration](/integration/): Rack and Rails integration posture plus the
-  framework-support boundary
-- [Frameworks](/frameworks/): framework-specific setup for Rails, Sinatra,
-  Roda, and Hanami
-- [Benchmarking](/benchmarking/): benchmark interpretation, fixture families, and
-  environment caveats
-- [Troubleshooting](/troubleshooting/): build, boot, docs, and local runtime
-  failure paths
-- [Development](/development/): package-local workflow, repository checks, and
-  release-supporting maintenance
-- [Docs Publishing](/docs-publishing/): local preview, CI validation, Pages
-  deployment, and `vajra.codevedas.com`
+```bash
+bundle exec vajra
+```
 
-## Deep Reference
+For Rails apps, keep the normal Rails command:
 
-These pages describe the internal product architecture and protocol model in
-more detail:
+```bash
+bin/rails server
+```
 
-- [Engineering Runtime](/engineering-runtime/)
-- [Engineering IPC](/engineering-ipc/)
-- [Engineering Scheduling](/engineering-scheduling/)
-- [Engineering Failure Modes](/engineering-failure-modes/)
+Add `config/vajra.rb` when the app needs server-specific settings such as host,
+port, worker count, thread count, access logs, or request limits.

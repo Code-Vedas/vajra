@@ -18,6 +18,7 @@ namespace Vajra
     struct HeadReadResult
     {
       bool complete;
+      bool peer_closed = false;
       std::string request_head;
       std::string trailing_bytes;
     };
@@ -35,7 +36,7 @@ namespace Vajra
           int initial_timeout_seconds = 30) const;
 
     private:
-      bool configure_read_timeout(int client_fd, int timeout_seconds) const;
+      bool wait_for_readable(int client_fd, int timeout_seconds) const;
 
       RequestHeadSizeValidator request_head_size_validator_;
       int continuation_timeout_seconds_;

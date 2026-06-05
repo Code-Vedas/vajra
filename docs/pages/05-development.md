@@ -1,6 +1,6 @@
 ---
 title: Development
-nav_order: 14
+nav_order: 5
 permalink: /development/
 ---
 
@@ -51,6 +51,20 @@ bin/rspec-e2e
 
 Keep the extension sources, load path, executable boot path, and smoke coverage
 aligned in the same change.
+
+## Performance Test
+
+Run the local performance comparison from the Vajra package:
+
+```bash
+cd gems/vajra/performance
+bundle exec rake performance:run
+```
+
+The runner starts Vajra and peer Rack servers against generated Rack, Rails,
+Roda, Sinatra, and Hanami fixtures. It reports throughput, p95/p99 latency,
+error rate, requests per CPU core, and process-group RSS min, max, and final
+memory.
 
 ## Root-Level Commands
 

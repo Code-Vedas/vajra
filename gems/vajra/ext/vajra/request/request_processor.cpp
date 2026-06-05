@@ -10,7 +10,9 @@
 #include "response/http_header_utils.hpp"
 #include "response/response_serializer.hpp"
 #include "runtime/runtime_logging.hpp"
+#include "runtime/runtime_state.hpp"
 
+#include <chrono>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -72,6 +74,23 @@ namespace
   private:
     int fd_;
   };
+
+  class RequestWallClockProbe
+  {
+  public:
+    RequestWallClockProbe() : started_at_(std::chrono::steady_clock::now()) {}
+
+    ~RequestWallClockProbe()
+    {
+      Vajra::runtime::note_worker_request_time(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - started_at_)
+              .count());
+    }
+
+  private:
+    std::chrono::steady_clock::time_point started_at_;
+  };
 }
 
 Vajra::request::RequestProcessor::RequestProcessor(
@@ -104,147 +123,201 @@ void Vajra::request::RequestProcessor::handle(int client_fd, const SocketContext
 
   while (true)
   {
-    HeadReadResult read_result;
-    try
+    RequestProcessingResult result = handle_one(
+        client_fd,
+        socket_context,
+        std::move(buffered_bytes),
+        first_request);
+    if (result.outcome != RequestProcessingOutcome::keep_alive)
     {
-      read_result = request_head_reader_.read(
-          client_fd,
+      return;
+    }
+
+    buffered_bytes = std::move(result.buffered_bytes);
+    first_request = result.first_request;
+  }
+}
+
+Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle_one(
+    int client_fd,
+    const SocketContext &socket_context,
+    std::string buffered_bytes,
+    bool first_request) const
+{
+  RequestWallClockProbe request_wall_clock_probe;
+  HeadReadResult read_result;
+  try
+  {
+    const auto head_started_at = std::chrono::steady_clock::now();
+    read_result = request_head_reader_.read(
+        client_fd,
+        std::move(buffered_bytes),
+        first_request ? first_data_timeout_seconds_ : persistent_timeout_seconds_);
+    Vajra::runtime::note_worker_request_head_time(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - head_started_at)
+            .count());
+  }
+  catch (const HeadError &error)
+  {
+    reject_request_head(client_fd, error);
+    return RequestProcessingResult{RequestProcessingOutcome::close, "", first_request};
+  }
+
+  if (!read_result.complete)
+  {
+    return RequestProcessingResult{
+        read_result.peer_closed ? RequestProcessingOutcome::close : RequestProcessingOutcome::await_read,
+        std::move(read_result.request_head),
+        first_request};
+  }
+
+  buffered_bytes = std::move(read_result.trailing_bytes);
+
+  RequestContext request_context;
+  try
+  {
+    const auto parse_started_at = std::chrono::steady_clock::now();
+    request_context = RequestContext{
+        request_head_parser_.parse(read_result.request_head),
+        socket_context,
+        client_fd,
+        ""};
+    Vajra::runtime::note_worker_request_parse_time(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - parse_started_at)
+            .count());
+  }
+  catch (const HeadError &error)
+  {
+    reject_request_head(client_fd, error);
+    return RequestProcessingResult{RequestProcessingOutcome::close, "", first_request};
+  }
+
+  const Vajra::response::ConnectionBehavior connection_behavior = connection_behavior_for(request_context.request);
+  if (request_executor_)
+  {
+    std::optional<Vajra::response::Response> control_response = request_executor_->control_response(request_context);
+    if (control_response)
+    {
+      control_response->headers = Vajra::response::strip_framing_headers(control_response->headers);
+      control_response->connection_behavior = connection_behavior;
+      if (!response_writer_.send(client_fd, *control_response))
+      {
+        return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
+      }
+      Vajra::runtime::note_worker_request_completed();
+      Vajra::runtime::log_access_event(
+          request_context.request.request_line.method,
+          request_context.request.request_line.target,
+          control_response->status.code);
+      return RequestProcessingResult{
+          connection_behavior == Vajra::response::ConnectionBehavior::close
+              ? RequestProcessingOutcome::close
+              : RequestProcessingOutcome::keep_alive,
           std::move(buffered_bytes),
-          first_request ? first_data_timeout_seconds_ : persistent_timeout_seconds_);
+          false};
     }
-    catch (const HeadError &error)
-    {
-      reject_request_head(client_fd, error);
-      return;
-    }
+  }
 
-    if (!read_result.complete)
-    {
-      return;
-    }
-
-    buffered_bytes = std::move(read_result.trailing_bytes);
-
-    RequestContext request_context;
-    try
-    {
-      request_context = RequestContext{
-          request_head_parser_.parse(read_result.request_head),
-          socket_context,
-          client_fd,
-          ""};
-    }
-    catch (const HeadError &error)
-    {
-      reject_request_head(client_fd, error);
-      return;
-    }
-
-    const Vajra::response::ConnectionBehavior connection_behavior = connection_behavior_for(request_context.request);
+  Vajra::response::Response response;
+  try
+  {
+    std::unique_ptr<RequestExecutionSession> execution_session;
     if (request_executor_)
     {
-      std::optional<Vajra::response::Response> control_response = request_executor_->control_response(request_context);
-      if (control_response)
-      {
-        control_response->headers = Vajra::response::strip_framing_headers(control_response->headers);
-        control_response->connection_behavior = connection_behavior;
-        Vajra::response::ResponseSerializer serializer;
-        serializer.validate(*control_response);
-        if (!response_writer_.send(client_fd, *control_response))
-        {
-          return;
-        }
-        Vajra::runtime::log_access_event(
-            request_context.request.request_line.method,
-            request_context.request.request_line.target,
-            control_response->status.code);
-        if (connection_behavior == Vajra::response::ConnectionBehavior::close)
-        {
-          return;
-        }
-        first_request = false;
-        continue;
-      }
+      const auto rack_start_started_at = std::chrono::steady_clock::now();
+      execution_session = request_executor_->start(request_context);
+      Vajra::runtime::note_worker_rack_start_time(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - rack_start_started_at)
+              .count());
+    }
+    else
+    {
+      execution_session = nullptr;
     }
 
-    Vajra::response::Response response;
-    try
-    {
-      std::unique_ptr<RequestExecutionSession> execution_session;
-      if (request_executor_)
-      {
-        execution_session = request_executor_->start(request_context);
-      }
-      else
-      {
-        execution_session = nullptr;
-      }
+    const auto body_started_at = std::chrono::steady_clock::now();
+    BodyReadResult body_read_result = request_body_reader_.stream_read(
+        client_fd,
+        request_context.request,
+        [&request_context, &execution_session](const std::string &chunk) {
+          if (execution_session)
+          {
+            execution_session->append_request_body_chunk(chunk);
+            return;
+          }
 
-      BodyReadResult body_read_result = request_body_reader_.stream_read(
-          client_fd,
-          request_context.request,
-          [&request_context, &execution_session](const std::string &chunk) {
-            if (execution_session)
-            {
-              execution_session->append_request_body_chunk(chunk);
-              return;
-            }
+          request_context.request_body.append(chunk);
+        },
+        std::move(buffered_bytes));
+    Vajra::runtime::note_worker_request_body_time(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - body_started_at)
+            .count());
+    buffered_bytes = std::move(body_read_result.remaining_buffered_bytes);
 
-            request_context.request_body.append(chunk);
-          },
-          std::move(buffered_bytes));
-      buffered_bytes = std::move(body_read_result.remaining_buffered_bytes);
-
-      if (execution_session)
-      {
-        response = response_for(*execution_session, connection_behavior);
-      }
-      else
-      {
-        response = response_for(request_context, connection_behavior);
-      }
-    }
-    catch (const BodyReadIncompleteError &)
+    if (execution_session)
     {
-      return;
+      const auto rack_finish_started_at = std::chrono::steady_clock::now();
+      response = response_for(*execution_session, connection_behavior);
+      Vajra::runtime::note_worker_rack_finish_time(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - rack_finish_started_at)
+              .count());
     }
-    catch (const HeadError &error)
+    else
     {
-      reject_request_head(client_fd, error);
-      return;
+      const auto rack_finish_started_at = std::chrono::steady_clock::now();
+      response = response_for(request_context, connection_behavior);
+      Vajra::runtime::note_worker_rack_finish_time(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - rack_finish_started_at)
+              .count());
     }
-    catch (const QueueCapacityError &error)
-    {
-      reject_request_queue_capacity(client_fd, error);
-      return;
-    }
-    catch (const RequestTimeoutError &error)
-    {
-      reject_request_timeout(client_fd, error);
-      return;
-    }
-    catch (const std::exception &error)
-    {
-      reject_request_execution(client_fd, error);
-      return;
-    }
-
-    if (!response_writer_.send(client_fd, response))
-    {
-      return;
-    }
-    Vajra::runtime::log_access_event(
-        request_context.request.request_line.method,
-        request_context.request.request_line.target,
-        response.status.code);
-
-    if (connection_behavior == Vajra::response::ConnectionBehavior::close)
-    {
-      return;
-    }
-
-    first_request = false;
   }
+  catch (const BodyReadIncompleteError &)
+  {
+    return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
+  }
+  catch (const HeadError &error)
+  {
+    reject_request_head(client_fd, error);
+    return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
+  }
+  catch (const QueueCapacityError &error)
+  {
+    reject_request_queue_capacity(client_fd, error);
+    return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
+  }
+  catch (const RequestTimeoutError &error)
+  {
+    reject_request_timeout(client_fd, error);
+    return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
+  }
+  catch (const std::exception &error)
+  {
+    reject_request_execution(client_fd, error);
+    return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
+  }
+
+  if (!response_writer_.send(client_fd, response))
+  {
+    return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
+  }
+  Vajra::runtime::note_worker_request_completed();
+  Vajra::runtime::log_access_event(
+      request_context.request.request_line.method,
+      request_context.request.request_line.target,
+      response.status.code);
+
+  return RequestProcessingResult{
+      connection_behavior == Vajra::response::ConnectionBehavior::close
+          ? RequestProcessingOutcome::close
+          : RequestProcessingOutcome::keep_alive,
+      std::move(buffered_bytes),
+      false};
 }
 
 Vajra::response::Response Vajra::request::RequestProcessor::response_for(
@@ -259,8 +332,6 @@ Vajra::response::Response Vajra::request::RequestProcessor::response_for(
 
   response->headers = Vajra::response::strip_framing_headers(response->headers);
   response->connection_behavior = connection_behavior;
-  Vajra::response::ResponseSerializer serializer;
-  serializer.validate(*response);
   return *response;
 }
 
@@ -281,8 +352,6 @@ Vajra::response::Response Vajra::request::RequestProcessor::response_for(
 
   response->headers = Vajra::response::strip_framing_headers(response->headers);
   response->connection_behavior = connection_behavior;
-  Vajra::response::ResponseSerializer serializer;
-  serializer.validate(*response);
   return *response;
 }
 
@@ -340,7 +409,7 @@ Vajra::response::ConnectionBehavior Vajra::request::RequestProcessor::connection
 
     if (header_named(header, "Content-Length"))
     {
-      if (saw_content_length || !Vajra::request::content_length_is_zero(header.value))
+      if (saw_content_length)
       {
         return Vajra::response::ConnectionBehavior::close;
       }

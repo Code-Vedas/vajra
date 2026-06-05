@@ -1,0 +1,19 @@
+# frozen_string_literal: true
+
+source 'https://rubygems.org'
+
+gem 'base64'
+gem 'falcon'
+gem 'fiddle'
+gem 'hanami'
+gem 'hanami-controller'
+gem 'hanami-router'
+gem 'passenger'
+gem 'puma'
+gem 'rack'
+gem 'rackup'
+gem 'rails'
+gem 'rake', require: false
+gem 'roda'
+gem 'sinatra'
+gem 'vajra', path: '..'

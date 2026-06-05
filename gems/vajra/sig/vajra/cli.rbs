@@ -71,7 +71,7 @@ module Vajra
       def http2_max_frame_size: (Integer) -> Integer
       def http2_header_table_size: (Integer) -> Integer
       def log_level: (String) -> String
-      def access_log: (String) -> String
+      def access_log: (String?) -> String?
       def error_log: (String) -> String
       def structured_logs: (?bool) -> bool
       def stats_path: (String) -> String

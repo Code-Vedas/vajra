@@ -33,6 +33,7 @@ add_executable(vajra_server_test
   ../../ext/vajra/response/response_serializer.cpp
   ../../ext/vajra/response/response_writer.cpp
   ../../ext/vajra/runtime/runtime_logging.cpp
+  ../../ext/vajra/runtime/runtime_state.cpp
   ../../ext/vajra/server.cpp
 )
 

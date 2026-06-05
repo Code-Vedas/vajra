@@ -8,6 +8,7 @@
 
 #include "runtime/boot_contract.hpp"
 #include "runtime/runtime_config.hpp"
+#include "runtime/runtime_state.hpp"
 #include "runtime/worker_pool.hpp"
 #include "server.hpp"
 
@@ -37,10 +38,18 @@ namespace Vajra
 
     struct WorkerSpawnConfig
     {
+      std::string host;
       std::size_t max_threads = 0;
       int port = 0;
+      std::size_t max_connections = 0;
       std::size_t max_request_head_bytes = 0;
+      int request_head_timeout_seconds = 5;
+      int first_data_timeout_seconds = 30;
+      int persistent_timeout_seconds = 30;
       int worker_processes = 0;
+      std::size_t socket_queue_capacity = 0;
+      std::string stats_path;
+      std::string metrics_endpoint;
       bool debug_logging = false;
     };
 
@@ -71,7 +80,7 @@ namespace Vajra
       std::shared_ptr<SharedWorkerState> register_worker_runtime(
           std::size_t worker_index,
           pid_t pid,
-          std::vector<int> request_channel_fds);
+          std::vector<int> control_channel_fds);
       void mark_worker_ready(const std::shared_ptr<SharedWorkerState> &worker_state);
       void mark_worker_stopping(const std::shared_ptr<SharedWorkerState> &worker_state);
       void mark_worker_exit(
@@ -80,6 +89,7 @@ namespace Vajra
           int exit_detail);
       void prepare_worker_replacement(const std::shared_ptr<SharedWorkerState> &worker_state);
       void close_worker_request_channels(const std::shared_ptr<SharedWorkerState> &worker_state);
+      void close_worker_control_channels(const std::shared_ptr<SharedWorkerState> &worker_state);
       void replace_failed_workers(const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states);
       void maybe_recover_unhealthy_workers(const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states);
       void initiate_worker_recovery(const std::shared_ptr<SharedWorkerState> &worker_state);
@@ -92,14 +102,14 @@ namespace Vajra
           std::size_t worker_index,
           const WorkerSpawnConfig &spawn_config,
           pid_t &pid,
-          std::vector<int> &parent_request_channels,
+          std::vector<int> &parent_control_channels,
           BootDiagnostic &failure_diagnostic,
           int inherited_control_fd);
       bool boot_replacement_worker(
           const std::shared_ptr<SharedWorkerState> &worker_state,
           const WorkerSpawnConfig &spawn_config,
           pid_t &pid,
-          std::vector<int> &parent_request_channels,
+          std::vector<int> &parent_control_channels,
           BootDiagnostic &failure_diagnostic);
       void clear_worker_runtime();
       void install_server_instance(std::shared_ptr<Vajra::Server> server);
@@ -118,18 +128,27 @@ namespace Vajra
       void stop_worker_exit_watcher();
       void watch_worker_exits();
       void run_worker_process(
-          std::vector<int> request_channel_fds,
+          std::vector<int> control_channel_fds,
           std::size_t max_threads,
           int port,
           std::size_t max_request_head_bytes,
           int readiness_write_fd,
           int worker_index,
           int worker_processes,
+          int inherited_listener_fd,
+          std::size_t socket_queue_capacity,
+          std::string host,
+          std::size_t max_connections,
+          int request_head_timeout_seconds,
+          int first_data_timeout_seconds,
+          int persistent_timeout_seconds,
+          std::string stats_path,
+          std::string metrics_endpoint,
           bool debug_logging);
-      void run_master_runtime_server(
+      void run_master_dispatch_loop(
+          int listener_fd,
           const RuntimeConfig &config,
-          const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states,
-          bool debug_logging);
+          const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states);
 
       bool runtime_shutdown_started_ = false;
       mutable std::mutex server_mutex_;
@@ -143,6 +162,7 @@ namespace Vajra
       RecoveryPolicy recovery_policy_{};
       std::atomic_bool debug_logging_{false};
       std::vector<std::shared_ptr<SharedWorkerState>> pending_replacements_;
+      RuntimeState *runtime_state_ = nullptr;
       pid_t worker_spawner_pid_ = -1;
       int worker_spawner_fd_ = -1;
       bool worker_exit_watcher_stop_requested_ = false;

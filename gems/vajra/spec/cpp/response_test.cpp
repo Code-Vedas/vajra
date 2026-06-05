@@ -691,7 +691,7 @@ namespace VajraSpecCpp
       }
     }
 
-    void test_request_processor_closes_after_request_body_framing()
+    void test_request_processor_keeps_connection_open_after_request_body_framing()
     {
       int sockets[2];
       if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
@@ -733,14 +733,42 @@ namespace VajraSpecCpp
           fail("request processor did not transport the fixed-length request body");
         }
 
-        if (response.find("Connection: close\r\n") == std::string::npos)
+        if (response.find("Connection: close\r\n") != std::string::npos)
         {
-          fail("request with body framing did not force connection close");
+          fail("request with body framing unexpectedly forced connection close");
+        }
+
+        if (!send_all(
+                client_socket.get(),
+                "POST /second HTTP/1.1\r\n"
+                "Host: example.test\r\n"
+                "Content-Length: 6\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+                "second"))
+        {
+          fail("failed to send second request after request body framing");
+        }
+
+        const std::string second_response = read_http_response(client_socket.get());
+        if (second_response.find("HTTP/1.1 200 OK\r\n") != 0)
+        {
+          fail("second request with body framing did not receive the success response");
+        }
+
+        if (second_response.size() < 6 || second_response.compare(second_response.size() - 6, 6, "second") != 0)
+        {
+          fail("request processor did not transport the second fixed-length request body");
+        }
+
+        if (second_response.find("Connection: close\r\n") == std::string::npos)
+        {
+          fail("second request with explicit close did not advertise connection close");
         }
 
         if (!peer_closed_within(client_socket.get(), 500))
         {
-          fail("request processor left the connection open after request body framing");
+          fail("request processor left the connection open after explicit close");
         }
 
         client_socket.close_if_open();
@@ -1510,7 +1538,7 @@ namespace VajraSpecCpp
     test_request_processor_keeps_connection_open_for_sequential_requests();
     test_request_processor_handles_pipelined_read_ahead_without_losing_the_next_request();
     test_request_processor_closes_after_parse_error_response();
-    test_request_processor_closes_after_request_body_framing();
+    test_request_processor_keeps_connection_open_after_request_body_framing();
     test_request_body_reader_preserves_buffered_suffix_after_fixed_length_body();
     test_request_body_reader_preserves_buffered_suffix_after_chunked_body();
     test_request_body_reader_rejects_oversized_content_length_body();

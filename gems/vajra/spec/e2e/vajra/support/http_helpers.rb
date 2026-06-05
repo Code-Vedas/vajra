@@ -583,7 +583,7 @@ module VajraE2EHttpHelpers
       socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, port)
       socket.write(request)
       return read_raw_http_response(socket, wait_thread:, output:, request_label:)
-    rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH, Errno::ECONNRESET, EOFError
+    rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH, Errno::ECONNRESET, EOFError, Timeout::Error
       if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
         raise Timeout::Error, "#{request_label} timed out: #{process_diagnostics(wait_thread, output)}"
       end

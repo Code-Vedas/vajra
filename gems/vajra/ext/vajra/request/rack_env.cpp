@@ -8,11 +8,13 @@
 #include "request_head_error.hpp"
 
 #include <cctype>
+#include <unordered_map>
 #include <utility>
 
 namespace
 {
   constexpr std::size_t kFixedRackEnvEntryCount = 10;
+  using RackEnvEntryIndex = std::unordered_map<std::string, std::size_t>;
 
   bool valid_header_name_character(unsigned char character)
   {
@@ -85,25 +87,25 @@ namespace
 
   Vajra::request::RackEnvEntry *find_env_entry(
       std::vector<Vajra::request::RackEnvEntry> &entries,
+      const RackEnvEntryIndex &entry_index,
       const std::string &key)
   {
-    for (Vajra::request::RackEnvEntry &entry : entries)
+    const auto existing_entry = entry_index.find(key);
+    if (existing_entry == entry_index.end())
     {
-      if (entry.key == key)
-      {
-        return &entry;
-      }
+      return nullptr;
     }
 
-    return nullptr;
+    return &entries.at(existing_entry->second);
   }
 
   void insert_or_append_header(
       std::vector<Vajra::request::RackEnvEntry> &entries,
+      RackEnvEntryIndex &entry_index,
       const std::string &key,
       const std::string &value)
   {
-    if (Vajra::request::RackEnvEntry *entry = find_env_entry(entries, key))
+    if (Vajra::request::RackEnvEntry *entry = find_env_entry(entries, entry_index, key))
     {
       if (key == "CONTENT_LENGTH" || key == "CONTENT_TYPE" || key == "HTTP_HOST")
       {
@@ -115,6 +117,7 @@ namespace
     }
 
     entries.push_back(Vajra::request::RackEnvEntry{key, value});
+    entry_index.emplace(key, entries.size() - 1);
   }
 }
 
@@ -125,6 +128,8 @@ std::vector<Vajra::request::RackEnvEntry> Vajra::request::RackEnvBuilder::build(
 
   std::vector<RackEnvEntry> entries;
   entries.reserve(request_context.request.headers.size() + kFixedRackEnvEntryCount);
+  RackEnvEntryIndex entry_index;
+  entry_index.reserve(request_context.request.headers.size());
   entries.push_back(RackEnvEntry{"REQUEST_METHOD", request_context.request.request_line.method});
   entries.push_back(RackEnvEntry{"SCRIPT_NAME", ""});
   entries.push_back(RackEnvEntry{"PATH_INFO", request_target.path_info});
@@ -138,7 +143,7 @@ std::vector<Vajra::request::RackEnvEntry> Vajra::request::RackEnvBuilder::build(
   for (const ParsedHeader &header : request_context.request.headers)
   {
     validate_header_value(header.value);
-    insert_or_append_header(entries, normalize_header_env_key(header.name), header.value);
+    insert_or_append_header(entries, entry_index, normalize_header_env_key(header.name), header.value);
   }
 
   return entries;

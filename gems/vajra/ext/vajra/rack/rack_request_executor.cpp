@@ -1011,7 +1011,7 @@ namespace
     VALUE body = rb_ary_entry(value, 2);
 
     HeaderCollectionContext header_context;
-    rb_block_call(headers, id_each, 0, nullptr, RUBY_METHOD_FUNC(rack_header_each_callback), reinterpret_cast<VALUE>(&header_context));
+    rb_block_call(headers, id_each, 0, nullptr, rack_header_each_callback, reinterpret_cast<VALUE>(&header_context));
     if (!header_context.error_message.empty())
     {
       throw std::runtime_error(header_context.error_message);
@@ -1020,7 +1020,7 @@ namespace
     BodyCollectionContext body_context;
     try
     {
-      rb_block_call(body, id_each, 0, nullptr, RUBY_METHOD_FUNC(rack_body_each_callback), reinterpret_cast<VALUE>(&body_context));
+      rb_block_call(body, id_each, 0, nullptr, rack_body_each_callback, reinterpret_cast<VALUE>(&body_context));
     }
     catch (...)
     {

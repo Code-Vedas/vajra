@@ -54,6 +54,7 @@ namespace
 
     return false;
   }
+
   class ClientSocketGuard
   {
   public:
@@ -276,6 +277,8 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
               std::chrono::steady_clock::now() - rack_finish_started_at)
               .count());
     }
+
+    Vajra::response::ResponseSerializer().validate(response);
   }
   catch (const BodyReadIncompleteError &)
   {

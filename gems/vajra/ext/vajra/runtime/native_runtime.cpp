@@ -26,7 +26,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
-#include <fcntl.h>
 #include <iostream>
 #include <limits>
 #include <mutex>
@@ -49,9 +48,7 @@ namespace
 {
   volatile std::sig_atomic_t shutting_down = 0;
   constexpr const char *kMasterPreloadRuntimeRole = "ruby_master_preload";
-  constexpr const char *kNativeRuntimeControlRole = "native_runtime_control";
   constexpr const char *kWorkerBootstrapRuntimeRole = "ruby_worker_bootstrap";
-  constexpr const char *kMasterWorkerMode = "master_worker";
   constexpr std::size_t kMaxWorkerBootstrapStringPayloadBytes = 64 * 1024;
   constexpr auto kWorkerTimeoutGracePeriod = std::chrono::seconds(1);
   constexpr auto kWorkerExitWatcherIdlePollInterval = std::chrono::seconds(1);
@@ -672,110 +669,6 @@ namespace
     }
 
     return true;
-  }
-
-  int accept_client_connection(int listener_fd, int control_fd)
-  {
-    for (;;)
-    {
-      pollfd descriptors[2] = {
-          {listener_fd, POLLIN, 0},
-          {control_fd, POLLIN | POLLHUP | POLLERR, 0}};
-      const nfds_t descriptor_count = control_fd >= 0 ? 2 : 1;
-      const int poll_result = poll(descriptors, descriptor_count, 100);
-      if (poll_result == 0)
-      {
-        if (shutdown_requested_or_runtime_draining())
-        {
-          return -1;
-        }
-        continue;
-      }
-      if (poll_result < 0)
-      {
-        if (errno == EINTR)
-        {
-          if (shutdown_requested_or_runtime_draining())
-          {
-            return -1;
-          }
-          continue;
-        }
-        throw std::runtime_error(std::string("worker accept poll failed: ") + std::strerror(errno));
-      }
-      if (control_fd >= 0 && (descriptors[1].revents & (POLLIN | POLLHUP | POLLERR)) != 0)
-      {
-        return -1;
-      }
-      if ((descriptors[0].revents & POLLIN) == 0)
-      {
-        if (shutdown_requested_or_runtime_draining())
-        {
-          return -1;
-        }
-        continue;
-      }
-
-      const int client_fd = accept(listener_fd, nullptr, nullptr);
-      if (client_fd >= 0)
-      {
-        return client_fd;
-      }
-      if (errno == EINTR)
-      {
-        if (shutdown_requested_or_runtime_draining())
-        {
-          return -1;
-        }
-        continue;
-      }
-      if (shutdown_requested_or_runtime_draining())
-      {
-        return -1;
-      }
-      throw std::runtime_error(std::string("worker accept failed: ") + std::strerror(errno));
-    }
-  }
-
-  void set_nonblocking_or_throw(int fd)
-  {
-    const int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0)
-    {
-      throw std::runtime_error(std::string("fcntl(F_GETFL) failed: ") + std::strerror(errno));
-    }
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
-    {
-      throw std::runtime_error(std::string("fcntl(F_SETFL) failed: ") + std::strerror(errno));
-    }
-  }
-
-  std::int64_t connection_deadline_nanoseconds(
-      bool first_request,
-      int first_data_timeout_seconds,
-      int persistent_timeout_seconds)
-  {
-    const std::int64_t timeout_seconds = first_request ? first_data_timeout_seconds : persistent_timeout_seconds;
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-               std::chrono::steady_clock::now().time_since_epoch() + std::chrono::seconds(timeout_seconds))
-        .count();
-  }
-
-  bool socket_has_pending_readable_bytes(int client_fd)
-  {
-    if (client_fd < 0)
-    {
-      return false;
-    }
-
-    pollfd descriptor{client_fd, POLLIN | POLLHUP | POLLERR, 0};
-    const int poll_result = poll(&descriptor, 1, 0);
-    if (poll_result <= 0)
-    {
-      return false;
-    }
-
-    return (descriptor.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
   }
 
   bool enqueue_worker_connection(
@@ -2800,6 +2693,8 @@ void Vajra::runtime::NativeRuntime::run_worker_process(
     std::string metrics_endpoint,
     bool debug_logging)
 {
+  (void)host;
+
   try
   {
     if (runtime_state_ != nullptr)

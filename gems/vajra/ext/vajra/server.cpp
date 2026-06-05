@@ -5,6 +5,7 @@
 
 #include "server.hpp"
 #include "vajra.hpp"
+#include "response/response_writer.hpp"
 #include "runtime/runtime_state.hpp"
 
 #include <arpa/inet.h>
@@ -788,6 +789,7 @@ void Vajra::Server::start()
         close(client_fd);
         continue;
       }
+      Vajra::response::ResponseWriter::prepare_client_socket(client_fd);
 
       std::uint64_t client_token = 0;
       try

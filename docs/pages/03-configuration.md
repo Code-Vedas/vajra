@@ -97,10 +97,7 @@ Vajra.configure do |config|
   config.max_connections 256
 
   # Limit the global pending request queue.
-  config.queue_capacity 100_000
-
-  # Choose the worker selection policy.
-  config.scheduler_policy "least_loaded"
+  config.socket_queue_capacity 100_000
 
   # Enable TLS for the listener.
   config.tls false
@@ -192,8 +189,7 @@ These environment variables override the matching runtime settings:
 | `VAJRA_FIRST_DATA_TIMEOUT` | `first_data_timeout` |
 | `VAJRA_PERSISTENT_TIMEOUT` | `persistent_timeout` |
 | `VAJRA_WORKER_TIMEOUT` | `worker_timeout` |
-| `VAJRA_QUEUE_CAPACITY` | `queue_capacity` |
-| `VAJRA_SCHEDULER_POLICY` | `scheduler_policy` |
+| `VAJRA_SOCKET_QUEUE_CAPACITY` | `socket_queue_capacity` |
 | `VAJRA_LOG_LEVEL` | `log_level` |
 | `VAJRA_ACCESS_LOG` | `access_log` |
 

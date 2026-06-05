@@ -80,7 +80,7 @@ Vajra::request::HeadReadResult Vajra::request::HeadReader::read(
         return HeadReadResult{false, true, request_head, ""};
       }
 
-      return HeadReadResult{false, true, request_head, ""};
+      return HeadReadResult{false, false, request_head, ""};
     }
 
     if (bytes_read == 0)

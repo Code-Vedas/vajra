@@ -639,46 +639,6 @@ namespace
     return std::min(idle_executions + 1, remaining_capacity);
   }
 
-  bool control_channel_shutdown_requested(int control_fd)
-  {
-    if (control_fd < 0)
-    {
-      return false;
-    }
-
-    pollfd control_poll{control_fd, POLLIN | POLLHUP | POLLERR, 0};
-    const int poll_result = poll(&control_poll, 1, 0);
-    if (poll_result <= 0)
-    {
-      return false;
-    }
-    if ((control_poll.revents & (POLLHUP | POLLERR)) != 0)
-    {
-      return true;
-    }
-    if ((control_poll.revents & POLLIN) == 0)
-    {
-      return false;
-    }
-
-    char buffer[16];
-    const ssize_t bytes_read = recv(control_fd, buffer, sizeof(buffer), MSG_DONTWAIT);
-    if (bytes_read == 0)
-    {
-      return true;
-    }
-    if (bytes_read < 0)
-    {
-      if (errno == EAGAIN || errno == EWOULDBLOCK)
-      {
-        return false;
-      }
-      return errno != EINTR || shutdown_requested_or_runtime_draining();
-    }
-
-    return true;
-  }
-
   bool enqueue_worker_connection(
       WorkerConnectionQueueState &queue_state,
       int client_fd,
@@ -2787,10 +2747,6 @@ void Vajra::runtime::NativeRuntime::run_worker_process(
 
     while (!shutdown_requested_or_runtime_draining())
     {
-      if (control_channel_shutdown_requested(control_channel_fds.empty() ? -1 : control_channel_fds.front()))
-      {
-        break;
-      }
       if (connection_queue_state != nullptr)
       {
         std::lock_guard<std::mutex> lock(connection_queue_state->mutex);

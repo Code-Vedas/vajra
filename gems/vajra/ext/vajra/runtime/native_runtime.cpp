@@ -10,6 +10,7 @@
 #include "request/request_processor.hpp"
 #include "response/response_writer.hpp"
 #include "ruby/thread.h"
+#include "ruby/version.h"
 #include "runtime/boot_contract.hpp"
 #include "runtime/runtime_logging.hpp"
 #include "vajra.hpp"
@@ -147,6 +148,13 @@ namespace
   bool start_called_from_ruby_main_thread()
   {
     return rb_equal(rb_thread_current(), rb_thread_main()) == Qtrue;
+  }
+
+  void lock_current_ruby_thread_to_native_thread()
+  {
+#if defined(RUBY_API_VERSION_CODE) && RUBY_API_VERSION_CODE >= 30400
+    rb_thread_lock_native_thread();
+#endif
   }
 
   void close_fd_if_open(int fd)
@@ -760,7 +768,7 @@ namespace
 
   VALUE run_worker_connection_receiver(void *data)
   {
-    rb_thread_lock_native_thread();
+    lock_current_ruby_thread_to_native_thread();
     rb_thread_call_without_gvl(
         run_worker_connection_receiver_without_gvl,
         data,
@@ -848,7 +856,7 @@ namespace
 
   VALUE run_worker_connection_loop(void *data)
   {
-    rb_thread_lock_native_thread();
+    lock_current_ruby_thread_to_native_thread();
     rb_thread_call_without_gvl(
         run_worker_connection_loop_without_gvl,
         data,

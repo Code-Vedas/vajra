@@ -7,15 +7,26 @@
 
 #include <chrono>
 #include <cstdio>
+#include <fstream>
+#include <mutex>
 #include <new>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <sys/mman.h>
+#include <unordered_map>
 #include <unistd.h>
 
 namespace
 {
+  constexpr std::chrono::seconds kRssSampleRefreshInterval(1);
+
+  struct RssSample
+  {
+    std::int64_t bytes = -1;
+    std::chrono::steady_clock::time_point refreshed_at{};
+  };
+
   Vajra::runtime::RuntimeState *installed_runtime_state = nullptr;
   thread_local Vajra::runtime::WorkerRuntimeState *installed_worker_state = nullptr;
   thread_local std::size_t installed_worker_index = 0;
@@ -27,7 +38,29 @@ namespace
         .count();
   }
 
-  std::int64_t rss_bytes_for_pid(pid_t pid)
+#if defined(__linux__)
+  std::int64_t rss_bytes_for_pid_from_proc(pid_t pid)
+  {
+    std::ifstream statm("/proc/" + std::to_string(pid) + "/statm");
+    long long total_pages = 0;
+    long long resident_pages = 0;
+    statm >> total_pages >> resident_pages;
+    if (statm.fail() || resident_pages < 0)
+    {
+      return -1;
+    }
+
+    const long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0)
+    {
+      return -1;
+    }
+
+    return static_cast<std::int64_t>(resident_pages) * static_cast<std::int64_t>(page_size);
+  }
+#endif
+
+  std::int64_t rss_bytes_for_pid_from_ps(pid_t pid)
   {
     if (pid <= 0)
     {
@@ -58,6 +91,48 @@ namespace
     }
 
     return static_cast<std::int64_t>(rss_kilobytes) * 1024;
+  }
+
+  std::int64_t cached_rss_bytes_for_pid_from_ps(pid_t pid)
+  {
+    static std::mutex cache_mutex;
+    static std::unordered_map<pid_t, RssSample> cache;
+
+    const auto now = std::chrono::steady_clock::now();
+    {
+      std::lock_guard<std::mutex> lock(cache_mutex);
+      const auto cached = cache.find(pid);
+      if (cached != cache.end() && now - cached->second.refreshed_at < kRssSampleRefreshInterval)
+      {
+        return cached->second.bytes;
+      }
+    }
+
+    const std::int64_t bytes = rss_bytes_for_pid_from_ps(pid);
+    {
+      std::lock_guard<std::mutex> lock(cache_mutex);
+      cache[pid] = RssSample{bytes, now};
+    }
+
+    return bytes;
+  }
+
+  std::int64_t rss_bytes_for_pid(pid_t pid)
+  {
+    if (pid <= 0)
+    {
+      return -1;
+    }
+
+#if defined(__linux__)
+    const std::int64_t proc_rss_bytes = rss_bytes_for_pid_from_proc(pid);
+    if (proc_rss_bytes >= 0)
+    {
+      return proc_rss_bytes;
+    }
+#endif
+
+    return cached_rss_bytes_for_pid_from_ps(pid);
   }
 
   Vajra::runtime::WorkerRuntimeState *worker_state_at(std::size_t worker_index)

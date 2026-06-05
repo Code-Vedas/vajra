@@ -131,6 +131,8 @@ void Vajra::response::ResponseWriter::log_serialization_error(const Serializatio
 
 bool Vajra::response::ResponseWriter::send_response_message(int client_fd, const std::string &response_message) const
 {
+  prepare_client_socket(client_fd);
+
   std::size_t bytes_sent = 0;
   while (bytes_sent < response_message.size())
   {

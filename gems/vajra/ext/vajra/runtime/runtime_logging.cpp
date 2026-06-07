@@ -505,6 +505,19 @@ namespace
     }
   }
 
+  void delete_async_logger_queue()
+  {
+    LogNode *node = async_logger.head;
+    while (node != nullptr)
+    {
+      LogNode *next = node->next.load(std::memory_order_acquire);
+      delete node;
+      node = next;
+    }
+    async_logger.head = nullptr;
+    async_logger.tail.store(nullptr, std::memory_order_release);
+  }
+
   bool enqueue_log_event(LogEvent event)
   {
     if (!async_logger_owned_by_current_process() || async_logger.stopping.load(std::memory_order_acquire))
@@ -783,8 +796,7 @@ void Vajra::runtime::start_runtime_logging_worker()
     async_logger.stopping.store(false, std::memory_order_release);
     async_logger.in_flight = 0;
     async_logger.pending.store(0, std::memory_order_release);
-    async_logger.head = nullptr;
-    async_logger.tail.store(nullptr, std::memory_order_release);
+    delete_async_logger_queue();
   }
 
   auto *stub = new LogNode(LogEvent{});
@@ -827,9 +839,7 @@ void Vajra::runtime::stop_runtime_logging_worker()
     async_logger.stopping.store(false, std::memory_order_release);
     async_logger.in_flight = 0;
     async_logger.pending.store(0, std::memory_order_release);
-    delete async_logger.head;
-    async_logger.head = nullptr;
-    async_logger.tail.store(nullptr, std::memory_order_release);
+    delete_async_logger_queue();
     async_logger.owner_pid.store(-1, std::memory_order_release);
   }
 }

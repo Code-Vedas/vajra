@@ -25,7 +25,7 @@ module Vajra
     def self.start: (?argv: Array[String], ?root: String, ?stdout: IO) -> nil
 
     class Launcher
-      attr_reader start_options: Hash[Symbol, Integer | String | bool | Array[String] | Array[Integer]]
+      attr_reader start_options: Hash[Symbol, Integer | String | bool | nil | Array[String] | Array[Integer]]
 
       def initialize: (root: String) -> void
       def load: (config_path: String?, default_config_path: String) -> Launcher
@@ -55,9 +55,8 @@ module Vajra
       def max_keepalive_requests: (Integer) -> Integer
       def linger_timeout: (Integer) -> Integer
       def max_connections: (Integer) -> Integer
-      def queue_capacity: (Integer) -> Integer
+      def socket_queue_capacity: (Integer) -> Integer
       def max_requests_per_worker: (Integer) -> Integer
-      def scheduler_policy: (String) -> String
       def tls: (?bool) -> bool
       def tls_certificate: (String) -> String
       def tls_private_key: (String) -> String

@@ -145,7 +145,6 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
     std::string buffered_bytes,
     bool first_request) const
 {
-  RequestWallClockProbe request_wall_clock_probe;
   HeadReadResult read_result;
   try
   {
@@ -173,6 +172,7 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
         first_request};
   }
 
+  RequestWallClockProbe request_wall_clock_probe;
   buffered_bytes = std::move(read_result.trailing_bytes);
 
   RequestContext request_context;

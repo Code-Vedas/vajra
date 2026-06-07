@@ -13,6 +13,7 @@
 
 #include <chrono>
 #include <atomic>
+#include <cerrno>
 #include <cctype>
 #include <condition_variable>
 #include <cstdint>

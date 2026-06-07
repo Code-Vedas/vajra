@@ -52,7 +52,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ env.BUNDLE_PATH }}
-          key: ${{ runner.os }}-ruby-${{ matrix.ruby_version }}-bundle-${{ hashFiles('gems/**/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
+          key: ${{ runner.os }}-ruby-${{ matrix.ruby_version }}-bundle-${{ hashFiles('gems/vajra/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
           restore-keys: |
             ${{ runner.os }}-ruby-${{ matrix.ruby_version }}-bundle-
       - name: Install bundles
@@ -90,7 +90,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ env.BUNDLE_PATH }}
-          key: ${{ runner.os }}-ruby-${{ matrix.ruby_version }}-bundle-${{ hashFiles('gems/**/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
+          key: ${{ runner.os }}-ruby-${{ matrix.ruby_version }}-bundle-${{ hashFiles('gems/vajra/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
           restore-keys: |
             ${{ runner.os }}-ruby-${{ matrix.ruby_version }}-bundle-
       - name: Install bundles
@@ -133,7 +133,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ env.BUNDLE_PATH }}
-          key: ${{ runner.os }}-ruby-${{ matrix.ruby_version }}-bundle-${{ hashFiles('gems/**/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
+          key: ${{ runner.os }}-ruby-${{ matrix.ruby_version }}-bundle-${{ hashFiles('gems/vajra/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
           restore-keys: |
             ${{ runner.os }}-ruby-${{ matrix.ruby_version }}-bundle-
       - name: Install bundles
@@ -179,7 +179,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ env.BUNDLE_PATH }}
-          key: ${{ runner.os }}-ruby-${{ matrix.ruby_version }}-bundle-${{ hashFiles('gems/**/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
+          key: ${{ runner.os }}-ruby-${{ matrix.ruby_version }}-bundle-${{ hashFiles('gems/vajra/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
           restore-keys: |
             ${{ runner.os }}-ruby-${{ matrix.ruby_version }}-bundle-
       - name: Install bundles
@@ -211,7 +211,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ env.BUNDLE_PATH }}
-          key: ${{ runner.os }}-ruby-${{ env.RUBY_VERSION }}-bundle-${{ hashFiles('gems/**/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
+          key: ${{ runner.os }}-ruby-${{ env.RUBY_VERSION }}-bundle-${{ hashFiles('gems/vajra/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
           restore-keys: |
             ${{ runner.os }}-ruby-${{ env.RUBY_VERSION }}-bundle-
       - name: Install bundles
@@ -245,7 +245,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ env.BUNDLE_PATH }}
-          key: ${{ runner.os }}-ruby-${{ env.RUBY_VERSION }}-bundle-${{ hashFiles('gems/**/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
+          key: ${{ runner.os }}-ruby-${{ env.RUBY_VERSION }}-bundle-${{ hashFiles('gems/vajra/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
           restore-keys: |
             ${{ runner.os }}-ruby-${{ env.RUBY_VERSION }}-bundle-
       - name: Install bundles

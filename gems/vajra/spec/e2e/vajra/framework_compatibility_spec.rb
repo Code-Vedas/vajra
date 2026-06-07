@@ -8,7 +8,7 @@
 require 'json'
 require_relative 'support'
 
-RSpec.describe 'Vajra framework compatibility', :e2e, :integration do # rubocop:disable RSpec/DescribeClass
+RSpec.describe 'Vajra framework compatibility', :e2e, :integration do
   def framework_request(trace_id)
     "POST /framework HTTP/1.1\r\n" \
       "Host: example.test\r\n" \

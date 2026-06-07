@@ -13,7 +13,7 @@ require 'rackup/handler/vajra'
 require 'vajra/railtie'
 require_relative '../support/documented_server_options'
 
-RSpec.describe 'Vajra Rails integration', :aggregate_failures do # rubocop:disable RSpec/DescribeClass
+RSpec.describe 'Vajra Rails integration', :aggregate_failures do
   let(:rack_app) { ->(_env) { [200, { 'Content-Type' => 'text/plain' }, ['OK']] } }
 
   around do |example|
@@ -71,7 +71,7 @@ RSpec.describe 'Vajra Rails integration', :aggregate_failures do # rubocop:disab
 
   it 'installs the rack app and starts Vajra with rackup options' do
     Dir.mktmpdir('vajra-handler-root') do |root|
-      Dir.chdir(root) do # rubocop:disable ThreadSafety/DirChdir
+      Dir.chdir(root) do
         Rackup::Handler::Vajra.run(rack_app, Host: '127.0.0.1', Port: 4321, user_supplied_options: %i[Host Port])
       end
     end
@@ -82,7 +82,7 @@ RSpec.describe 'Vajra Rails integration', :aggregate_failures do # rubocop:disab
 
   it 'loads max_request_head_bytes from config/vajra.rb' do
     Dir.mktmpdir('vajra-handler-root') do |root|
-      Dir.chdir(root) do # rubocop:disable ThreadSafety/DirChdir
+      Dir.chdir(root) do
         FileUtils.mkdir_p('config')
         File.write('config/vajra.rb', <<~RUBY)
           Vajra.configure do
@@ -99,7 +99,7 @@ RSpec.describe 'Vajra Rails integration', :aggregate_failures do # rubocop:disab
 
   it 'accepts the native-backed config surface while keeping the current handler start surface' do
     Dir.mktmpdir('vajra-handler-root') do |root|
-      Dir.chdir(root) do # rubocop:disable ThreadSafety/DirChdir
+      Dir.chdir(root) do
         FileUtils.mkdir_p('config')
         File.write('config/vajra.rb', DocumentedServerOptions.native_config_file_contents)
 
@@ -112,7 +112,7 @@ RSpec.describe 'Vajra Rails integration', :aggregate_failures do # rubocop:disab
 
   it 'prefers an explicit handler max_request_head_bytes option over config defaults' do
     Dir.mktmpdir('vajra-handler-root') do |root|
-      Dir.chdir(root) do # rubocop:disable ThreadSafety/DirChdir
+      Dir.chdir(root) do
         FileUtils.mkdir_p('config')
         File.write('config/vajra.rb', <<~RUBY)
           Vajra.configure do
@@ -134,7 +134,7 @@ RSpec.describe 'Vajra Rails integration', :aggregate_failures do # rubocop:disab
 
   it 'keeps the configured port when rails did not receive an explicit port flag' do
     Dir.mktmpdir('vajra-handler-root') do |root|
-      Dir.chdir(root) do # rubocop:disable ThreadSafety/DirChdir
+      Dir.chdir(root) do
         FileUtils.mkdir_p('config')
         File.write('config/vajra.rb', <<~RUBY)
           Vajra.configure do
@@ -151,7 +151,7 @@ RSpec.describe 'Vajra Rails integration', :aggregate_failures do # rubocop:disab
 
   it 'keeps the configured host when rails did not receive an explicit host flag' do
     Dir.mktmpdir('vajra-handler-root') do |root|
-      Dir.chdir(root) do # rubocop:disable ThreadSafety/DirChdir
+      Dir.chdir(root) do
         FileUtils.mkdir_p('config')
         File.write('config/vajra.rb', <<~RUBY)
           Vajra.configure do

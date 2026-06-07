@@ -28,6 +28,7 @@ module Vajra
         # This callback is bootstrap transport only. Later worker IPC routing
         # must preserve the normalized Rack execution contract without relying
         # on same-process callback execution as the supported hot path.
+        __native_set_app__(app)
         __native_set_callback__(bootstrap_callback)
         app
       rescue NameError
@@ -36,6 +37,7 @@ module Vajra
 
       def uninstall!
         APP_MUTEX.synchronize { APP_STATE.app = nil }
+        __native_set_app__(nil)
         __native_set_callback__(nil)
       end
 

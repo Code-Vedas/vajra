@@ -7,9 +7,8 @@
 
 #include <cerrno>
 #include <cstring>
-#include <iostream>
+#include <poll.h>
 #include <sys/socket.h>
-#include <sys/time.h>
 #include <utility>
 
 namespace
@@ -35,10 +34,6 @@ Vajra::request::HeadReadResult Vajra::request::HeadReader::read(
     int initial_timeout_seconds) const
 {
   int next_timeout_seconds = buffered_bytes.empty() ? initial_timeout_seconds : continuation_timeout_seconds_;
-  if (!configure_read_timeout(client_fd, next_timeout_seconds))
-  {
-    return HeadReadResult{false, "", ""};
-  }
 
   char buffer[4096];
   std::string request_head = std::move(buffered_bytes);
@@ -54,7 +49,7 @@ Vajra::request::HeadReadResult Vajra::request::HeadReader::read(
 
       const std::string trailing_bytes = request_head.substr(request_head_bytes);
       request_head.resize(request_head_bytes);
-      return HeadReadResult{true, request_head, trailing_bytes};
+      return HeadReadResult{true, false, request_head, trailing_bytes};
     }
 
     request_head_size_validator_.validate(request_head.size());
@@ -63,12 +58,12 @@ Vajra::request::HeadReadResult Vajra::request::HeadReader::read(
       next_header_boundary_search_start = request_head.size() - (kHeaderBoundaryLength - 1);
     }
 
-    if (!configure_read_timeout(client_fd, next_timeout_seconds))
+    if (!wait_for_readable(client_fd, next_timeout_seconds))
     {
-      return HeadReadResult{false, request_head, ""};
+      return HeadReadResult{false, false, request_head, ""};
     }
 
-    const ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer), 0);
+    const ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer), MSG_DONTWAIT);
     if (bytes_read < 0)
     {
       if (errno == EINTR)
@@ -78,36 +73,44 @@ Vajra::request::HeadReadResult Vajra::request::HeadReader::read(
 
       if (errno == EAGAIN || errno == EWOULDBLOCK)
       {
-        return HeadReadResult{false, request_head, ""};
+        continue;
       }
       if (peer_closed_recv_error(errno))
       {
-        return HeadReadResult{false, request_head, ""};
+        return HeadReadResult{false, true, request_head, ""};
       }
 
-      std::cerr << "recv failed: " << std::strerror(errno) << std::endl;
-      return HeadReadResult{false, request_head, ""};
+      return HeadReadResult{false, false, request_head, ""};
     }
 
     if (bytes_read == 0)
     {
-      return HeadReadResult{false, request_head, ""};
+      return HeadReadResult{false, true, request_head, ""};
     }
     request_head.append(buffer, bytes_read);
     next_timeout_seconds = continuation_timeout_seconds_;
   }
 }
 
-bool Vajra::request::HeadReader::configure_read_timeout(int client_fd, int timeout_seconds) const
+bool Vajra::request::HeadReader::wait_for_readable(int client_fd, int timeout_seconds) const
 {
-  timeval timeout{};
-  timeout.tv_sec = timeout_seconds;
-  timeout.tv_usec = 0;
-  if (setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0)
-  {
-    std::cerr << "setsockopt(SO_RCVTIMEO) failed: " << std::strerror(errno) << std::endl;
-    return false;
-  }
+  pollfd descriptor{client_fd, POLLIN | POLLHUP | POLLERR, 0};
+  const int timeout_milliseconds = timeout_seconds <= 0 ? 0 : timeout_seconds * 1000;
 
-  return true;
+  for (;;)
+  {
+    const int poll_result = poll(&descriptor, 1, timeout_milliseconds);
+    if (poll_result > 0)
+    {
+      return (descriptor.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
+    }
+    if (poll_result == 0)
+    {
+      return false;
+    }
+    if (errno != EINTR)
+    {
+      return false;
+    }
+  }
 }

@@ -7,7 +7,7 @@
 
 require_relative 'support'
 
-RSpec.describe 'Vajra lifecycle', :e2e, :integration do # rubocop:disable RSpec/DescribeClass
+RSpec.describe 'Vajra lifecycle', :e2e, :integration do
   it 'shuts down cleanly while idle and releases the listener for immediate restart' do
     shutdown = idle_shutdown
 

@@ -36,8 +36,7 @@ namespace
           config.min_threads,
           config.max_threads,
           config.max_connections,
-          config.queue_capacity,
-          config.scheduler_policy,
+          config.socket_queue_capacity,
           config.max_request_head_bytes,
           config.request_timeout_seconds,
           config.request_head_timeout_seconds,
@@ -82,6 +81,13 @@ namespace
     (void)self;
     Vajra::rack::set_rack_execution_callback(callback);
     return callback;
+  }
+
+  VALUE rb_rack_execution_native_set_app(VALUE self, VALUE app)
+  {
+    (void)self;
+    Vajra::rack::set_rack_execution_app(app);
+    return app;
   }
 
   VALUE rb_boot_native_set_callback(VALUE self, VALUE callback)
@@ -138,6 +144,11 @@ extern "C" void Init_vajra()
       mRackExecution,
       "__native_set_callback__",
       RUBY_METHOD_FUNC(rb_rack_execution_native_set_callback),
+      1);
+  rb_define_singleton_method(
+      mRackExecution,
+      "__native_set_app__",
+      RUBY_METHOD_FUNC(rb_rack_execution_native_set_app),
       1);
   rb_define_singleton_method(
       mTracing,

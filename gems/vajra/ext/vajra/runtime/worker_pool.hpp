@@ -62,16 +62,21 @@ namespace Vajra
       SharedWorkerState(
           std::size_t index,
           pid_t worker_pid,
-          std::vector<int> parent_request_channels)
+          std::vector<int> parent_control_channels)
           : worker_index(index),
-            request_channel_fds(std::move(parent_request_channels)),
+            control_channel_fds(std::move(parent_control_channels)),
+            request_channel_fds(control_channel_fds),
             pid(worker_pid)
       {
       }
 
       const std::size_t worker_index;
+      mutable std::mutex control_channel_mutex;
+      std::vector<int> control_channel_fds;
+      std::atomic<std::size_t> control_channel_count{0};
       mutable std::mutex request_channel_mutex;
       std::vector<int> request_channel_fds;
+      std::atomic<std::size_t> request_channel_count{0};
       std::atomic<pid_t> pid;
       std::atomic<WorkerLifecycleState> lifecycle_state{WorkerLifecycleState::booting};
       std::atomic<WorkerHealthState> health_state{WorkerHealthState::healthy};
@@ -82,6 +87,7 @@ namespace Vajra
       std::atomic_bool expected_shutdown{false};
       std::atomic_bool timeout_escalation_pending{false};
       std::atomic<std::int64_t> timeout_kill_deadline_nanoseconds{0};
+      std::atomic_bool control_channels_closed{false};
       std::atomic_bool request_channels_closed{false};
       std::atomic_bool timeout_handling_started{false};
       std::atomic<std::uint64_t> channel_generation{0};

@@ -1,0 +1,684 @@
+# frozen_string_literal: true
+
+require 'fileutils'
+require 'etc'
+require 'json'
+require 'net/http'
+require 'socket'
+require 'time'
+require 'timeout'
+
+module Performance
+  ROOT = File.expand_path(__dir__)
+  TMP_ROOT = File.join(ROOT, 'tmp')
+  DEFAULT_SERVERS = %w[vajra puma passenger falcon].freeze
+  DEFAULT_FIXTURES = %w[rack rails roda sinatra hanami].freeze
+  DURATION_SECONDS = 20
+  RSS_SAMPLE_INTERVAL_SECONDS = 1
+  VUS = 20
+  ROUTES = [
+    ['get', '/text'],
+    ['get', '/json'],
+    ['post', '/json'],
+    ['post', '/form'],
+    ['post', '/upload']
+  ].freeze
+
+  Handle = Struct.new(:fixture, :server, :pid, :url, keyword_init: true)
+
+  class << self
+    def run
+      options = config
+      run_root = run_root_path
+      puts "[performance] output=#{run_root}"
+
+      summaries = []
+      options.fetch(:fixtures).each do |fixture|
+        fixture_root = File.join(run_root, fixture)
+        write_fixture(fixture, fixture_root)
+        handles = start_servers(fixture, fixture_root, options)
+        summaries.concat(handles.map { |handle| run_k6(fixture_root, handle, options) })
+      ensure
+        Array(handles).each { |handle| stop_process_group(handle.pid) }
+      end
+
+      print_results(summaries)
+      write_session_summary(run_root, options, summaries)
+    end
+
+    def config
+      {
+        servers: ENV.fetch('SERVERS', DEFAULT_SERVERS.join(',')).split(',').map(&:strip).reject(&:empty?),
+        fixtures: DEFAULT_FIXTURES,
+        worker_count: Integer(ENV.fetch('WORKER_COUNT', '1')),
+        thread_count: Integer(ENV.fetch('THREAD_COUNT', '4')),
+        soak_seconds: Integer(ENV.fetch('SOAK_SECONDS', '0')),
+        cpu_cores: Etc.nprocessors
+      }
+    end
+
+    def start_servers(fixture, fixture_root, options)
+      options.fetch(:servers).filter_map do |server|
+        start_server(fixture, server, fixture_root, options)
+      rescue StandardError => e
+        warn "[performance] #{fixture}/#{server}: skipped (#{e.message})"
+        nil
+      end
+    end
+
+    def start_server(fixture, server, fixture_root, options)
+      port = reserve_port
+      env = server_env(server, port, options)
+      raise 'missing server' unless available?(server, env, fixture_root)
+
+      log_path = File.join(fixture_root, "#{server}.log")
+      pid = Process.spawn(env, *command_for(server, port, options), chdir: fixture_root, pgroup: true, out: log_path, err: log_path)
+      handle = Handle.new(fixture:, server:, pid:, url: "http://127.0.0.1:#{port}")
+      wait_until_ready(handle)
+      puts "[performance] #{fixture}/#{server}: ready"
+      handle
+    end
+
+    def run_k6(fixture_root, handle, options)
+      script_path = File.join(fixture_root, "#{handle.server}.k6.js")
+      summary_path = File.join(fixture_root, "#{handle.server}.summary.json")
+      File.write(script_path, k6_script(handle.url, duration_seconds(options)))
+
+      rss_sampler = start_rss_sampler(handle)
+      rss_sampler = run_k6_load(fixture_root, handle, summary_path, script_path, rss_sampler)
+      snapshot_vajra_stats(fixture_root, handle) if handle.server == 'vajra'
+      summary = summarize_k6(handle.fixture, handle.server, JSON.parse(File.read(summary_path)), rss_sampler.fetch(:samples), options)
+      File.write(File.join(fixture_root, "#{handle.server}.run-summary.json"), JSON.pretty_generate(summary))
+      summary
+    end
+
+    def run_k6_load(fixture_root, handle, summary_path, script_path, rss_sampler)
+      log_path = File.join(fixture_root, "#{handle.server}.k6.log")
+      puts "[performance] #{handle.fixture}/#{handle.server}: k6"
+      system('k6', 'run', '--quiet', '--summary-export', summary_path, script_path, out: log_path, err: log_path) ||
+        raise("k6 failed for #{handle.fixture}/#{handle.server}")
+      stop_rss_sampler(rss_sampler)
+    ensure
+      stop_rss_sampler(rss_sampler) if rss_sampler&.fetch(:thread)&.alive?
+    end
+
+    def k6_script(url, duration)
+      <<~JS
+        import http from 'k6/http';
+
+        export const options = {
+          scenarios: {
+            steady: {
+              executor: 'constant-vus',
+              vus: #{VUS},
+              duration: '#{duration}s',
+              gracefulStop: '0s'
+            }
+          },
+          noConnectionReuse: #{ENV.fetch('NO_CONNECTION_REUSE', '0') == '1'},
+          summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
+          thresholds: {
+            http_req_failed: ['rate==0']
+          }
+        };
+
+        const baseUrl = #{url.to_json};
+        const traceHeaders = { 'X-Trace-Id': 'performance-k6' };
+        const uploadFile = http.file('vajra performance file payload\\n', 'payload.txt', 'text/plain');
+
+        export default function () {
+          switch ((__ITER + __VU) % 5) {
+            case 0:
+              http.get(`${baseUrl}/text`, { headers: traceHeaders });
+              break;
+            case 1:
+              http.get(`${baseUrl}/json`, { headers: { ...traceHeaders, Accept: 'application/json' } });
+              break;
+            case 2:
+              http.post(`${baseUrl}/json`, JSON.stringify({ source: 'k6', value: 42 }), {
+                headers: { ...traceHeaders, 'Content-Type': 'application/json' }
+              });
+              break;
+            case 3:
+              http.post(`${baseUrl}/form`, { name: 'vajra', kind: 'multipart-form', file: uploadFile }, { headers: traceHeaders });
+              break;
+            default:
+              http.post(`${baseUrl}/upload`, { file: uploadFile }, { headers: traceHeaders });
+              break;
+          }
+        }
+      JS
+    end
+
+    def summarize_k6(fixture, server, summary, rss_samples, options)
+      metrics = summary.fetch('metrics')
+      requests_per_second = metric_value(metrics, 'http_reqs', 'rate')
+      {
+        fixture:,
+        server:,
+        requests_per_second:,
+        requests: metric_value(metrics, 'http_reqs', 'count').to_i,
+        error_rate: metric_value(metrics, 'http_req_failed', 'rate') * 100.0,
+        p95_ms: metric_value(metrics, 'http_req_duration', 'p(95)'),
+        p99_ms: metric_value(metrics, 'http_req_duration', 'p(99)'),
+        requests_per_core: requests_per_second / options.fetch(:cpu_cores),
+        rss_bytes: rss_summary(rss_samples),
+        rss_samples:
+      }
+    end
+
+    def metric_value(metrics, metric, key)
+      metric_payload = metrics.fetch(metric)
+      values = metric_payload.fetch('values', metric_payload)
+      values.fetch(key, 0).to_f
+    end
+
+    def print_results(summaries)
+      puts
+      puts 'performance profile'
+      summaries.group_by { |summary| summary.fetch(:fixture) }.each do |fixture, fixture_summaries|
+        puts
+        puts fixture
+        print_table(result_headers, fixture_summaries.map { |summary| result_row(summary) })
+      end
+    end
+
+    def result_headers
+      ['Server', 'Req/s', 'Req/core', 'Requests', 'Error %', 'P95 ms', 'P99 ms', 'RSS min', 'RSS max', 'RSS final']
+    end
+
+    def result_row(summary)
+      [
+        summary.fetch(:server),
+        format('%.2f', summary.fetch(:requests_per_second)),
+        format('%.2f', summary.fetch(:requests_per_core)),
+        summary.fetch(:requests).to_s,
+        format('%.2f', summary.fetch(:error_rate)),
+        format('%.2f', summary.fetch(:p95_ms)),
+        format('%.2f', summary.fetch(:p99_ms)),
+        format_bytes(summary.fetch(:rss_bytes).fetch(:min)),
+        format_bytes(summary.fetch(:rss_bytes).fetch(:max)),
+        format_bytes(summary.fetch(:rss_bytes).fetch(:final))
+      ]
+    end
+
+    def write_session_summary(run_root, options, summaries)
+      payload = {
+        generated_at: Time.now.utc.iso8601,
+        duration_seconds: duration_seconds(options),
+        soak: options.fetch(:soak_seconds).positive?,
+        cpu_cores: options.fetch(:cpu_cores),
+        worker_count: options.fetch(:worker_count),
+        thread_count: options.fetch(:thread_count),
+        servers: options.fetch(:servers),
+        fixtures: options.fetch(:fixtures),
+        access_log: access_logging_enabled?,
+        results: summaries
+      }
+      File.write(File.join(run_root, 'summary.json'), JSON.pretty_generate(payload))
+    end
+
+    def print_table(headers, rows)
+      widths = headers.each_with_index.map { |header, index| ([header] + rows.map { |row| row[index] }).map(&:length).max }
+      ([headers] + rows).each do |row|
+        puts row.each_with_index.map { |value, index| value.ljust(widths[index]) }.join('  ')
+      end
+    end
+
+    def duration_seconds(options)
+      soak_seconds = options.fetch(:soak_seconds)
+      soak_seconds.positive? ? soak_seconds : DURATION_SECONDS
+    end
+
+    def format_bytes(bytes)
+      return '-' if bytes.to_i <= 0
+
+      format('%.1f MiB', bytes.to_f / (1024 * 1024))
+    end
+
+    def send_request(handle)
+      uri = URI("#{handle.url}/text")
+      response = Net::HTTP.get_response(uri)
+      response.code.to_i == 200
+    rescue StandardError
+      false
+    end
+
+    def write_fixture(fixture, fixture_root)
+      FileUtils.mkdir_p(File.join(fixture_root, 'config'))
+      File.write(File.join(fixture_root, 'config.ru'), fixture_app(fixture))
+      File.write(File.join(fixture_root, 'config', 'vajra.rb'), vajra_config)
+    end
+
+    def run_root_path
+      FileUtils.mkdir_p(TMP_ROOT)
+      timestamp = Time.now.utc.strftime('%Y%m%dT%H%M%SZ')
+      path = File.join(TMP_ROOT, timestamp)
+      suffix = 0
+      while File.exist?(path)
+        suffix += 1
+        path = File.join(TMP_ROOT, "#{timestamp}-#{suffix}")
+      end
+      FileUtils.mkdir_p(path)
+      path
+    end
+
+    def fixture_app(fixture)
+      case fixture
+      when 'rack' then rack_app
+      when 'rails' then rails_app
+      when 'roda' then roda_app
+      when 'sinatra' then sinatra_app
+      when 'hanami' then hanami_app
+      else raise ArgumentError, "unknown fixture: #{fixture}"
+      end
+    end
+
+    def endpoint_helpers
+      <<~RUBY
+        require 'json'
+        require 'rack'
+        require 'stringio'
+
+        module PerformanceEndpoint
+          module_function
+
+          def call(env)
+            request = Rack::Request.new(env)
+            case [request.request_method, request.path_info]
+            when ['GET', '/text']
+              text_response
+            when ['GET', '/json']
+              json_response({ fixture: 'performance', kind: 'json' })
+            when ['POST', '/json']
+              json_response({ received: JSON.parse(read_body(env)), kind: 'json' })
+            when ['POST', '/form']
+              params = multipart_params(env)
+              json_response({ name: params['name'], kind: params['kind'], file: file_metadata(params['file']) })
+            when ['POST', '/upload']
+              json_response({ file: file_metadata(multipart_params(env)['file']) })
+            else
+              [404, { 'content-type' => 'text/plain' }, ['not found']]
+            end
+          rescue JSON::ParserError
+            [400, { 'content-type' => 'text/plain' }, ['invalid json']]
+          end
+
+          def text_response
+            [200, { 'content-type' => 'text/plain' }, ['vajra performance text']]
+          end
+
+          def json_response(payload)
+            [200, { 'content-type' => 'application/json' }, [JSON.generate(payload)]]
+          end
+
+          def read_body(env)
+            return env['performance.raw_body'] if env.key?('performance.raw_body')
+
+            input = env.fetch('rack.input')
+            input.read.to_s
+          end
+
+          def multipart_params(env)
+            content_type = env.fetch('CONTENT_TYPE', '')
+            boundary = content_type[/boundary=([^;]+)/, 1]
+            return {} unless boundary
+
+            read_body(env).split("--\#{boundary}").each_with_object({}) do |part, params|
+              headers, value = part.split("\\r\\n\\r\\n", 2)
+              next unless headers && value
+
+              name = headers[/name="([^"]+)"/, 1]
+              next unless name
+
+              payload = value.sub(/\\r\\n\\z/, '')
+              filename = headers[/filename="([^"]+)"/, 1]
+              params[name] = filename ? { filename: filename, size: payload.bytesize } : payload
+            end
+          end
+
+          def file_metadata(upload)
+            return nil unless upload
+
+            filename = upload[:filename] || upload['filename']
+            size = upload[:size] || upload['size'] || 0
+            { filename: filename, size: size }
+          end
+        end
+
+        class PerformanceBodyBuffer
+          def initialize(app)
+            @app = app
+          end
+
+          def call(env)
+            if (input = env['rack.input'])
+              body = input.read.to_s
+              env['performance.raw_body'] = body
+              env['rack.input'] = StringIO.new(body)
+            end
+            @app.call(env)
+          end
+        end
+      RUBY
+    end
+
+    def access_logger_setup
+      <<~RUBY
+        if ENV['PERFORMANCE_ACCESS_LOG'] && !ENV['PERFORMANCE_ACCESS_LOG'].empty?
+          access_log = File.open(ENV.fetch('PERFORMANCE_ACCESS_LOG'), 'a')
+          use Rack::CommonLogger, access_log
+        end
+      RUBY
+    end
+
+    def endpoint_routes(style)
+      case style
+      when :rack
+        ROUTES.map { |verb, path| "          #{verb} '#{path}', to: PerformanceEndpoint" }.join("\n")
+      when :sinatra
+        ROUTES.map { |verb, path| "          #{verb}('#{path}') { dispatch_endpoint }" }.join("\n")
+      else
+        raise ArgumentError, "unknown route style: #{style}"
+      end
+    end
+
+    def rack_app
+      <<~RUBY
+        # frozen_string_literal: true
+
+        #{endpoint_helpers}
+
+        #{access_logger_setup}
+
+        run PerformanceEndpoint
+      RUBY
+    end
+
+    def rails_app
+      <<~RUBY
+        # frozen_string_literal: true
+
+        require 'logger'
+        require 'rails'
+        require 'action_controller/railtie'
+
+        #{endpoint_helpers}
+
+        class PerformanceRailsApp < Rails::Application
+          config.root = __dir__
+          config.eager_load = false
+          config.secret_key_base = 'performance'
+          config.hosts.clear
+          config.logger = Logger.new(File::NULL)
+          config.active_support.report_deprecations = false
+          config.middleware.delete Rails::Rack::Logger
+          config.middleware.delete Rack::Runtime
+        end
+
+        PerformanceRailsApp.initialize!
+        PerformanceRailsApp.routes.draw do
+        #{endpoint_routes(:rack)}
+        end
+
+        #{access_logger_setup}
+
+        run PerformanceRailsApp
+      RUBY
+    end
+
+    def roda_app
+      <<~RUBY
+        # frozen_string_literal: true
+
+        require 'roda'
+
+        #{endpoint_helpers}
+
+        class PerformanceRodaApp < Roda
+          route do |r|
+            r.on 'text' do
+              r.get { dispatch_endpoint(r.env) }
+            end
+            r.on 'json' do
+              r.get { dispatch_endpoint(r.env) }
+              r.post { dispatch_endpoint(r.env) }
+            end
+            r.on 'form' do
+              r.post { dispatch_endpoint(r.env) }
+            end
+            r.on 'upload' do
+              r.post { dispatch_endpoint(r.env) }
+            end
+          end
+
+          def dispatch_endpoint(env)
+            status, headers, chunks = PerformanceEndpoint.call(env)
+            response.status = status
+            headers.each { |key, value| response[key] = value }
+            chunks.each { |chunk| response.write(chunk) }
+          end
+        end
+
+        #{access_logger_setup}
+
+        run PerformanceRodaApp
+      RUBY
+    end
+
+    def sinatra_app
+      <<~RUBY
+        # frozen_string_literal: true
+
+        require 'sinatra/base'
+
+        #{endpoint_helpers}
+
+        class PerformanceSinatraApp < Sinatra::Base
+          disable :logging
+          set :raise_errors, true
+          set :show_exceptions, false
+
+        #{endpoint_routes(:sinatra)}
+
+          def dispatch_endpoint
+            code, response_headers, chunks = PerformanceEndpoint.call(request.env)
+            status code
+            headers response_headers
+            body chunks
+          end
+        end
+
+        #{access_logger_setup}
+
+        run PerformanceSinatraApp
+      RUBY
+    end
+
+    def hanami_app
+      <<~RUBY
+        # frozen_string_literal: true
+
+        require 'hanami/router'
+
+        #{endpoint_helpers}
+
+        app = Hanami::Router.new do
+        #{endpoint_routes(:rack)}
+        end
+
+        #{access_logger_setup}
+
+        use PerformanceBodyBuffer
+
+        run app
+      RUBY
+    end
+
+    def vajra_config
+      lines = [
+        'Vajra.configure do |config|',
+        '  config.rackup "config.ru"',
+        access_logging_enabled? ? "  config.access_log #{access_log_path_for('vajra').inspect}" : nil,
+        ENV.fetch('STRUCTURED_LOGS', '0') == '1' ? '  config.structured_logs' : nil,
+        '  config.stats_path "/__vajra/stats"',
+        'end'
+      ]
+      "#{lines.compact.join("\n")}\n"
+    end
+
+    def snapshot_vajra_stats(fixture_root, handle)
+      uri = URI(handle.url)
+      uri.path = '/__vajra/stats'
+      uri.query = nil
+      response = Net::HTTP.get_response(uri)
+      File.write(File.join(fixture_root, 'vajra.stats.json'), response.body) if response.is_a?(Net::HTTPSuccess)
+    rescue StandardError
+      nil
+    end
+
+    def start_rss_sampler(handle)
+      sampler = { pgid: handle.pid, stop: false, samples: [] }
+      sampler[:thread] = Thread.new do
+        until sampler.fetch(:stop)
+          sampler.fetch(:samples) << {
+            at: Time.now.utc.iso8601,
+            bytes: process_group_rss_bytes(sampler.fetch(:pgid))
+          }
+          sleep RSS_SAMPLE_INTERVAL_SECONDS
+        end
+      end
+      sampler
+    end
+
+    def stop_rss_sampler(sampler)
+      return { samples: [] } unless sampler
+
+      sampler[:stop] = true
+      sampler.fetch(:thread).join
+      sampler.fetch(:samples) << {
+        at: Time.now.utc.iso8601,
+        bytes: process_group_rss_bytes(sampler.fetch(:pgid))
+      }
+      sampler
+    rescue Errno::ESRCH
+      sampler
+    end
+
+    def process_group_rss_bytes(pgid)
+      output = IO.popen(%w[ps -axo pgid=,rss=], &:read)
+      output.each_line.sum do |line|
+        process_group_id, rss_kilobytes = line.split.map(&:to_i)
+        process_group_id == pgid ? rss_kilobytes * 1024 : 0
+      end
+    rescue StandardError
+      0
+    end
+
+    def rss_summary(samples)
+      values = samples.map { |sample| sample.fetch(:bytes).to_i }
+      {
+        min: values.min || 0,
+        max: values.max || 0,
+        final: values.last || 0
+      }
+    end
+
+    def command_for(server, port, options)
+      workers = options.fetch(:worker_count).to_s
+      threads = options.fetch(:thread_count).to_s
+      case server
+      when 'vajra'
+        %w[bundle exec vajra]
+      when 'puma'
+        ['bundle', 'exec', 'puma', '-b', "tcp://127.0.0.1:#{port}", '-w', workers, '-t', "#{threads}:#{threads}", 'config.ru']
+      when 'passenger'
+        ['bundle', 'exec', 'passenger', 'start', '-a', '127.0.0.1', '-p', port.to_s, '--min-instances', workers, '--max-pool-size', workers]
+      when 'falcon'
+        ['bundle', 'exec', 'falcon', 'serve', '--bind', "http://127.0.0.1:#{port}", '--hybrid', '--forks', workers, '--threads', threads, '--config',
+         'config.ru']
+      else
+        raise ArgumentError, "unknown server: #{server}"
+      end
+    end
+
+    def server_env(server, port, options)
+      env = {
+        'BUNDLE_GEMFILE' => File.join(__dir__, 'Gemfile'),
+        'PORT' => port.to_s,
+        'VAJRA_PORT' => port.to_s,
+        'VAJRA_WORKERS' => options.fetch(:worker_count).to_s,
+        'WEB_CONCURRENCY' => options.fetch(:worker_count).to_s,
+        'VAJRA_THREADS' => "#{options.fetch(:thread_count)},#{options.fetch(:thread_count)}",
+        'MAX_THREADS' => options.fetch(:thread_count).to_s,
+        'RACK_ENV' => 'development',
+        'RAILS_ENV' => 'development'
+      }
+      env['PERFORMANCE_ACCESS_LOG'] = access_log_path_for(server) if access_logging_enabled? && server != 'vajra'
+      env
+    end
+
+    def access_logging_enabled?
+      value = ENV.fetch('ACCESS_LOG', '')
+      !value.empty? && value != '0' && value != 'false' && value != File::NULL
+    end
+
+    def access_log_path_for(server)
+      return nil unless access_logging_enabled?
+
+      value = ENV.fetch('ACCESS_LOG')
+      return "#{server}.access.log" if %w[1 true].include?(value)
+      return value.gsub('%<server>s', server) if value.include?('%<server>s')
+
+      directory = File.dirname(value)
+      basename = File.basename(value)
+      path = "#{server}.#{basename}"
+      directory == '.' ? path : File.join(directory, path)
+    end
+
+    def available?(server, env, fixture_root)
+      return true if server == 'vajra'
+      return system(env, 'bundle', 'exec', 'passenger', '--version', chdir: fixture_root, out: File::NULL, err: File::NULL) if server == 'passenger'
+
+      system(env, 'bundle', 'exec', 'ruby', '-e', "require #{server.inspect}", chdir: fixture_root, out: File::NULL, err: File::NULL)
+    end
+
+    def wait_until_ready(handle)
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 20
+      until Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        return if send_request(handle)
+
+        sleep 0.1
+      end
+      raise "server did not become ready on #{handle.url}/text"
+    end
+
+    def reserve_port
+      server = TCPServer.new('127.0.0.1', 0)
+      server.addr[1]
+    ensure
+      server&.close
+    end
+
+    def stop_process_group(pid)
+      return unless pid
+
+      Process.kill('INT', -pid)
+      Timeout.timeout(5) { Process.wait(pid) }
+    rescue Errno::ECHILD, Errno::ESRCH
+      nil
+    rescue Timeout::Error
+      Process.kill('KILL', -pid)
+      Process.wait(pid)
+    end
+  end
+end
+
+namespace :performance do
+  desc 'Run k6 performance comparison'
+  task :run do
+    Performance.run
+  end
+end
+
+task performance: 'performance:run'

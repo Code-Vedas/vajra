@@ -1,4 +1,7 @@
 detectors:
+  ControlParameter:
+    exclude:
+      - Vajra::CLI::Launcher#app
   UncommunicativeVariableName:
     accept:
       - e
@@ -6,9 +9,18 @@ detectors:
   TooManyStatements:
     enabled: true
     max_statements: 25
+  TooManyConstants:
+    enabled: true
+    max_constants: 10
   UtilityFunction:
     enabled: false
+  NilCheck:
+    enabled: true
+    exclude:
+      - Vajra::CLI::Launcher#normalize_setting_values
+      - Vajra::Internal::Tracing#with_request_span
 exclude_paths:
+  - performance/**/*
   - spec/**/*
   - bin/*
   - tmp/**/*

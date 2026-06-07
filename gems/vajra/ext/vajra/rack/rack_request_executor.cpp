@@ -11,6 +11,7 @@
 #include "request/rack_env.hpp"
 #include "request/request_head_error.hpp"
 #include "runtime/runtime_logging.hpp"
+#include "runtime/runtime_state.hpp"
 #include "ruby.h"
 #include "ruby/encoding.h"
 #include "ruby/thread.h"
@@ -22,6 +23,7 @@
 #include <cstdint>
 #include <deque>
 #include <chrono>
+#include <cstdio>
 #include <functional>
 #include <iomanip>
 #include <iostream>
@@ -45,13 +47,53 @@ namespace
   std::atomic<bool> rack_execution_callback_installed_flag{false};
   std::mutex rack_execution_callback_mutex;
   VALUE rack_execution_callback = Qnil;
+  std::atomic<bool> rack_execution_app_installed_flag{false};
+  std::mutex rack_execution_app_mutex;
+  VALUE rack_execution_app = Qnil;
   ID id_exception_message;
+  ID id_call;
+  ID id_close;
+  ID id_each;
+  ID id_new;
+  ID id_to_s;
+  VALUE rb_cStringIO = Qnil;
+  VALUE rb_key_content_length = Qnil;
+  VALUE rb_key_content_type = Qnil;
+  VALUE rb_key_path_info = Qnil;
+  VALUE rb_key_query_string = Qnil;
+  VALUE rb_key_rack_errors = Qnil;
+  VALUE rb_key_rack_input = Qnil;
+  VALUE rb_key_rack_multiprocess = Qnil;
+  VALUE rb_key_rack_multithread = Qnil;
+  VALUE rb_key_rack_run_once = Qnil;
+  VALUE rb_key_rack_url_scheme = Qnil;
+  VALUE rb_key_rack_version = Qnil;
+  VALUE rb_key_remote_addr = Qnil;
+  VALUE rb_key_remote_port = Qnil;
+  VALUE rb_key_request_method = Qnil;
+  VALUE rb_key_script_name = Qnil;
+  VALUE rb_key_server_name = Qnil;
+  VALUE rb_key_server_port = Qnil;
+  VALUE rb_key_server_protocol = Qnil;
 
   struct ExecutionCallContext
   {
     const std::vector<Vajra::request::RackEnvEntry> *env_entries;
     const std::string *request_body;
     std::optional<Vajra::response::Response> response;
+    std::string error_message;
+    bool use_native_app = false;
+  };
+
+  struct HeaderCollectionContext
+  {
+    std::vector<Vajra::response::Header> headers;
+    std::string error_message;
+  };
+
+  struct BodyCollectionContext
+  {
+    std::string body;
     std::string error_message;
   };
 
@@ -87,6 +129,52 @@ namespace
       static_cast<std::size_t>(Vajra::ipc::kMaxFramePayloadLength) - 1;
   constexpr std::size_t kMillisecondsPerSecond = 1000;
   constexpr auto kQueueHousekeepingInterval = std::chrono::milliseconds(500);
+
+  struct RuntimeProfilingCounters
+  {
+    std::atomic<std::uint64_t> scheduler_selection_count{0};
+    std::atomic<std::int64_t> scheduler_selection_nanoseconds{0};
+    std::atomic<std::uint64_t> ruby_execution_count{0};
+    std::atomic<std::int64_t> ruby_execution_nanoseconds{0};
+    std::atomic<std::uint64_t> request_ipc_write_count{0};
+    std::atomic<std::int64_t> request_ipc_write_nanoseconds{0};
+    std::atomic<std::uint64_t> response_ipc_read_count{0};
+    std::atomic<std::int64_t> response_ipc_read_nanoseconds{0};
+    std::atomic<std::uint64_t> response_completion_count{0};
+    std::atomic<std::int64_t> response_completion_nanoseconds{0};
+  };
+
+  RuntimeProfilingCounters runtime_profiling_counters;
+
+  std::int64_t steady_clock_nanoseconds_now()
+  {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  }
+
+  class ScopedProfilingSample
+  {
+  public:
+    ScopedProfilingSample(std::atomic<std::uint64_t> &count, std::atomic<std::int64_t> &nanoseconds)
+        : count_(count),
+          nanoseconds_(nanoseconds),
+          started_at_(steady_clock_nanoseconds_now())
+    {
+    }
+
+    ~ScopedProfilingSample()
+    {
+      count_.fetch_add(1, std::memory_order_acq_rel);
+      nanoseconds_.fetch_add(steady_clock_nanoseconds_now() - started_at_, std::memory_order_acq_rel);
+    }
+
+  private:
+    std::atomic<std::uint64_t> &count_;
+    std::atomic<std::int64_t> &nanoseconds_;
+    std::int64_t started_at_;
+  };
+
   struct DecodedResponseMetadata
   {
     ResponseMetadataKind kind = ResponseMetadataKind::no_response;
@@ -440,6 +528,39 @@ namespace
     return false;
   }
 
+  std::int64_t rss_bytes_for_pid(pid_t pid)
+  {
+    if (pid <= 0)
+    {
+      return -1;
+    }
+
+    const std::string command = "ps -o rss= -p " + std::to_string(pid);
+    FILE *pipe = popen(command.c_str(), "r");
+    if (pipe == nullptr)
+    {
+      return -1;
+    }
+
+    char buffer[128];
+    std::string output;
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr)
+    {
+      output.append(buffer);
+    }
+    pclose(pipe);
+
+    std::stringstream parser(output);
+    long rss_kilobytes = 0;
+    parser >> rss_kilobytes;
+    if (parser.fail() || rss_kilobytes < 0)
+    {
+      return -1;
+    }
+
+    return static_cast<std::int64_t>(rss_kilobytes) * 1024;
+  }
+
   std::string request_path_for(const std::string &target)
   {
     const std::size_t delimiter = target.find('?');
@@ -495,6 +616,139 @@ namespace
     }
 
     return ruby_entries;
+  }
+
+  VALUE ruby_string_from_header_value(VALUE value)
+  {
+    return rb_funcall(value, id_to_s, 0);
+  }
+
+  VALUE frozen_ruby_key(const char *name)
+  {
+    return rb_obj_freeze(rb_str_new_cstr(name));
+  }
+
+  VALUE ruby_rack_env_key_from(const std::string &key)
+  {
+    if (key == "REQUEST_METHOD")
+    {
+      return rb_key_request_method;
+    }
+    if (key == "SCRIPT_NAME")
+    {
+      return rb_key_script_name;
+    }
+    if (key == "PATH_INFO")
+    {
+      return rb_key_path_info;
+    }
+    if (key == "QUERY_STRING")
+    {
+      return rb_key_query_string;
+    }
+    if (key == "SERVER_PROTOCOL")
+    {
+      return rb_key_server_protocol;
+    }
+    if (key == "SERVER_NAME")
+    {
+      return rb_key_server_name;
+    }
+    if (key == "SERVER_PORT")
+    {
+      return rb_key_server_port;
+    }
+    if (key == "REMOTE_ADDR")
+    {
+      return rb_key_remote_addr;
+    }
+    if (key == "REMOTE_PORT")
+    {
+      return rb_key_remote_port;
+    }
+    if (key == "rack.url_scheme")
+    {
+      return rb_key_rack_url_scheme;
+    }
+    if (key == "CONTENT_TYPE")
+    {
+      return rb_key_content_type;
+    }
+    if (key == "CONTENT_LENGTH")
+    {
+      return rb_key_content_length;
+    }
+
+    return ruby_binary_string_from(key);
+  }
+
+  VALUE rack_header_each_callback(VALUE yielded, VALUE data, int argc, const VALUE *argv, VALUE)
+  {
+    auto *context = reinterpret_cast<HeaderCollectionContext *>(data);
+    VALUE name = Qnil;
+    VALUE value = Qnil;
+    if (argc >= 2)
+    {
+      name = argv[0];
+      value = argv[1];
+    }
+    else if (argc == 1 && TYPE(yielded) == T_ARRAY && RARRAY_LEN(yielded) >= 2)
+    {
+      name = rb_ary_entry(yielded, 0);
+      value = rb_ary_entry(yielded, 1);
+    }
+    else
+    {
+      context->error_message = "Rack execution returned invalid headers";
+      return Qnil;
+    }
+
+    context->headers.push_back(Vajra::response::Header{
+        ruby_string_value(ruby_string_from_header_value(name)),
+        ruby_string_value(ruby_string_from_header_value(value))});
+    return Qnil;
+  }
+
+  VALUE rack_body_each_callback(VALUE yielded, VALUE data, int, const VALUE *, VALUE)
+  {
+    auto *context = reinterpret_cast<BodyCollectionContext *>(data);
+    context->body.append(ruby_string_value(ruby_string_from_header_value(yielded)));
+    return Qnil;
+  }
+
+  void close_rack_body(VALUE body)
+  {
+    if (rb_respond_to(body, id_close) == 0)
+    {
+      return;
+    }
+    rb_funcall(body, id_close, 0);
+  }
+
+  VALUE ruby_rack_env_from(
+      const std::vector<Vajra::request::RackEnvEntry> &env_entries,
+      const std::string &request_body)
+  {
+    VALUE env = rb_hash_new();
+    for (const Vajra::request::RackEnvEntry &entry : env_entries)
+    {
+      rb_hash_aset(env, ruby_rack_env_key_from(entry.key), ruby_binary_string_from(entry.value));
+    }
+
+    VALUE rack_version = rb_ary_new_capa(2);
+    rb_ary_push(rack_version, INT2FIX(1));
+    rb_ary_push(rack_version, INT2FIX(6));
+    rb_hash_aset(env, rb_key_rack_version, rack_version);
+    if (NIL_P(rb_cStringIO))
+    {
+      rb_cStringIO = rb_path2class("StringIO");
+    }
+    rb_hash_aset(env, rb_key_rack_input, rb_funcall(rb_cStringIO, id_new, 1, ruby_binary_string_from(request_body)));
+    rb_hash_aset(env, rb_key_rack_errors, rb_gv_get("$stderr"));
+    rb_hash_aset(env, rb_key_rack_multithread, Qfalse);
+    rb_hash_aset(env, rb_key_rack_multiprocess, Qfalse);
+    rb_hash_aset(env, rb_key_rack_run_once, Qfalse);
+    return env;
   }
 
   VALUE protected_execute_rack_request(VALUE data)
@@ -745,6 +999,79 @@ namespace
         Vajra::response::ConnectionBehavior::close};
   }
 
+  Vajra::response::Response response_from_rack_result(VALUE value)
+  {
+    if (TYPE(value) != T_ARRAY || RARRAY_LEN(value) != 3)
+    {
+      throw std::runtime_error("Rack execution returned an invalid response");
+    }
+
+    VALUE status = rb_ary_entry(value, 0);
+    VALUE headers = rb_ary_entry(value, 1);
+    VALUE body = rb_ary_entry(value, 2);
+
+    HeaderCollectionContext header_context;
+    rb_block_call(headers, id_each, 0, nullptr, rack_header_each_callback, reinterpret_cast<VALUE>(&header_context));
+    if (!header_context.error_message.empty())
+    {
+      throw std::runtime_error(header_context.error_message);
+    }
+
+    BodyCollectionContext body_context;
+    try
+    {
+      rb_block_call(body, id_each, 0, nullptr, rack_body_each_callback, reinterpret_cast<VALUE>(&body_context));
+    }
+    catch (...)
+    {
+      close_rack_body(body);
+      throw;
+    }
+    close_rack_body(body);
+    if (!body_context.error_message.empty())
+    {
+      throw std::runtime_error(body_context.error_message);
+    }
+
+    const int status_code = status_code_from_ruby(status);
+    return Vajra::response::Response{
+        Vajra::response::Status{status_code, reason_phrase_for_status(status_code)},
+        std::move(header_context.headers),
+        std::move(body_context.body),
+        Vajra::response::ConnectionBehavior::close};
+  }
+
+  VALUE protected_execute_native_rack_request(VALUE data)
+  {
+    auto *context = reinterpret_cast<ExecutionCallContext *>(data);
+    try
+    {
+      VALUE app = Qnil;
+      {
+        const std::lock_guard<std::mutex> app_lock(rack_execution_app_mutex);
+        app = rack_execution_app;
+      }
+
+      if (NIL_P(app))
+      {
+        return Qnil;
+      }
+
+      VALUE env = ruby_rack_env_from(*context->env_entries, *context->request_body);
+      VALUE result = rb_funcall(app, id_call, 1, env);
+      context->response = response_from_rack_result(result);
+      return Qnil;
+    }
+    catch (const std::exception &error)
+    {
+      rb_raise(rb_eRuntimeError, "%s", error.what());
+    }
+    catch (...)
+    {
+      rb_raise(rb_eRuntimeError, "Rack native request execution failed with an unknown native error");
+    }
+  }
+
   VALUE protected_normalize_rack_response(VALUE data)
   {
     auto *context = reinterpret_cast<ResponseNormalizationContext *>(data);
@@ -761,18 +1088,34 @@ namespace
 
   void *execute_rack_request_with_gvl(void *data)
   {
+    const auto started_at = std::chrono::steady_clock::now();
+    ScopedProfilingSample profiling_sample(
+        runtime_profiling_counters.ruby_execution_count,
+        runtime_profiling_counters.ruby_execution_nanoseconds);
+    Vajra::runtime::note_worker_execution_started();
+    const auto profiling_cleanup = []() {
+      Vajra::runtime::note_worker_execution_finished();
+    };
     auto *context = static_cast<ExecutionCallContext *>(data);
 
     int state = 0;
-    VALUE result = rb_protect(protected_execute_rack_request, reinterpret_cast<VALUE>(context), &state);
+    VALUE result = rb_protect(
+        context->use_native_app ? protected_execute_native_rack_request : protected_execute_rack_request,
+        reinterpret_cast<VALUE>(context),
+        &state);
     if (state != 0)
     {
       context->error_message = exception_message(rb_errinfo());
       rb_set_errinfo(Qnil);
+      profiling_cleanup();
+      Vajra::runtime::note_worker_rack_execution_time(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - started_at)
+              .count());
       return nullptr;
     }
 
-    if (!NIL_P(result))
+    if (!context->use_native_app && !NIL_P(result))
     {
       ResponseNormalizationContext normalization_context{result, std::nullopt, ""};
       state = 0;
@@ -781,17 +1124,32 @@ namespace
       {
         context->error_message = exception_message(rb_errinfo());
         rb_set_errinfo(Qnil);
+        profiling_cleanup();
+        Vajra::runtime::note_worker_rack_execution_time(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - started_at)
+                .count());
         return nullptr;
       }
       if (!normalization_context.error_message.empty())
       {
         context->error_message = normalization_context.error_message;
+        profiling_cleanup();
+        Vajra::runtime::note_worker_rack_execution_time(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - started_at)
+                .count());
         return nullptr;
       }
 
       context->response = std::move(normalization_context.response);
     }
 
+    profiling_cleanup();
+    Vajra::runtime::note_worker_rack_execution_time(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started_at)
+            .count());
     return nullptr;
   }
 
@@ -1026,6 +1384,9 @@ namespace
       }
 
       ExecutionCallContext context{&env_entries, &request_body, std::nullopt, ""};
+      context.use_native_app =
+          rack_execution_app_installed_flag.load(std::memory_order_acquire) &&
+          !Vajra::runtime::runtime_tracing_enabled();
       rb_thread_call_with_gvl(execute_rack_request_with_gvl, &context);
 
       if (!context.error_message.empty())
@@ -1050,6 +1411,9 @@ namespace
       }
 
       ExecutionCallContext context{&env_entries, &request_body, std::nullopt, ""};
+      context.use_native_app =
+          rack_execution_app_installed_flag.load(std::memory_order_acquire) &&
+          !Vajra::runtime::runtime_tracing_enabled();
       execute_rack_request_with_gvl(&context);
 
       if (!context.error_message.empty())
@@ -1095,11 +1459,17 @@ namespace
 
     void send_request_start(const std::vector<Vajra::request::RackEnvEntry> &env_entries)
     {
+      ScopedProfilingSample profiling_sample(
+          runtime_profiling_counters.request_ipc_write_count,
+          runtime_profiling_counters.request_ipc_write_nanoseconds);
       write_frame(channel_fd_, Vajra::ipc::FrameFamily::request_execution_input, encode_request_execution_input(env_entries));
     }
 
     void append_request_body_chunk(const std::string &chunk) override
     {
+      ScopedProfilingSample profiling_sample(
+          runtime_profiling_counters.request_ipc_write_count,
+          runtime_profiling_counters.request_ipc_write_nanoseconds);
       std::size_t cursor = 0;
       while (cursor < chunk.size())
       {
@@ -1114,14 +1484,25 @@ namespace
 
     std::optional<Vajra::response::Response> finish() override
     {
-      write_frame(
-          channel_fd_,
-          Vajra::ipc::FrameFamily::request_body_continuation,
-          encode_request_body_chunk(RequestBodyEvent::complete, ""));
+      ScopedProfilingSample response_completion_sample(
+          runtime_profiling_counters.response_completion_count,
+          runtime_profiling_counters.response_completion_nanoseconds);
+      {
+        ScopedProfilingSample request_write_sample(
+            runtime_profiling_counters.request_ipc_write_count,
+            runtime_profiling_counters.request_ipc_write_nanoseconds);
+        write_frame(
+            channel_fd_,
+            Vajra::ipc::FrameFamily::request_body_continuation,
+            encode_request_body_chunk(RequestBodyEvent::complete, ""));
+      }
       finished_ = true;
 
       Vajra::ipc::FrameHeader header{};
       std::string payload;
+      ScopedProfilingSample response_read_sample(
+          runtime_profiling_counters.response_ipc_read_count,
+          runtime_profiling_counters.response_ipc_read_nanoseconds);
       const TimedReadResult metadata_result =
           read_frame_with_timeout(channel_fd_, header, payload, worker_timeout_milliseconds_);
       if (metadata_result != TimedReadResult::ready)
@@ -1382,7 +1763,7 @@ namespace
 
     GlobalQueuedWorkerProcessRackExecutionTransport(
         const std::vector<std::shared_ptr<Vajra::runtime::SharedWorkerState>> &worker_states,
-        std::size_t min_threads,
+        std::size_t max_threads,
         std::size_t queue_capacity,
         std::size_t request_timeout_seconds,
         std::size_t worker_timeout_seconds,
@@ -1421,7 +1802,7 @@ namespace
         slots_.push_back(std::make_shared<WorkerSlot>(
             std::move(worker_channels),
             worker_state,
-            min_threads));
+            max_threads));
       }
 
       housekeeping_thread_ = std::thread([this]() { housekeeping_loop(); });
@@ -1465,9 +1846,7 @@ namespace
 
     std::string stats_payload_json() const override
     {
-      std::lock_guard<std::mutex> lock(scheduler_mutex_);
-      const auto now = std::chrono::steady_clock::now();
-      update_worker_queue_pressure_locked(now);
+      const pid_t master_pid = getpid();
       std::size_t healthy_workers = 0;
       std::size_t busy_workers = 0;
       std::size_t overloaded_workers = 0;
@@ -1477,15 +1856,38 @@ namespace
       std::ostringstream payload;
       payload << '{'
               << "\"scheduler_policy\":\"least_loaded\","
-              << "\"queue_depth\":" << queued_request_count_ << ','
+              << "\"master_pid\":" << master_pid << ','
+              << "\"master_rss_bytes\":" << rss_bytes_for_pid(master_pid) << ','
+              << "\"queue_depth\":" << queued_request_count_.load(std::memory_order_acquire) << ','
               << "\"queue_capacity\":" << queue_capacity_ << ','
-              << "\"oldest_queue_age_nanoseconds\":"
-              << std::chrono::duration_cast<std::chrono::nanoseconds>(oldest_queue_age_locked(now)).count() << ','
+              << "\"oldest_queue_age_nanoseconds\":" << oldest_queue_age_nanoseconds_.load(std::memory_order_acquire) << ','
               << "\"tracing\":{\"enabled\":" << (Vajra::runtime::runtime_tracing_enabled() ? "true" : "false")
               << ",\"available\":" << (Vajra::runtime::runtime_tracing_available() ? "true" : "false")
               << ",\"endpoint\":" << escaped_json_string(Vajra::runtime::runtime_tracing_endpoint())
               << ",\"service_name\":" << escaped_json_string(Vajra::runtime::runtime_tracing_service_name()) << "},"
-              << "\"request_admission_rejections\":" << request_admission_rejection_count_ << ','
+              << "\"profiling\":{\"scheduler_selection_count\":"
+              << runtime_profiling_counters.scheduler_selection_count.load(std::memory_order_acquire)
+              << ",\"scheduler_selection_nanoseconds\":"
+              << runtime_profiling_counters.scheduler_selection_nanoseconds.load(std::memory_order_acquire)
+              << ",\"ruby_execution_count\":"
+              << runtime_profiling_counters.ruby_execution_count.load(std::memory_order_acquire)
+              << ",\"ruby_execution_nanoseconds\":"
+              << runtime_profiling_counters.ruby_execution_nanoseconds.load(std::memory_order_acquire)
+              << ",\"request_ipc_write_count\":"
+              << runtime_profiling_counters.request_ipc_write_count.load(std::memory_order_acquire)
+              << ",\"request_ipc_write_nanoseconds\":"
+              << runtime_profiling_counters.request_ipc_write_nanoseconds.load(std::memory_order_acquire)
+              << ",\"response_ipc_read_count\":"
+              << runtime_profiling_counters.response_ipc_read_count.load(std::memory_order_acquire)
+              << ",\"response_ipc_read_nanoseconds\":"
+              << runtime_profiling_counters.response_ipc_read_nanoseconds.load(std::memory_order_acquire)
+              << ",\"response_completion_count\":"
+              << runtime_profiling_counters.response_completion_count.load(std::memory_order_acquire)
+              << ",\"response_completion_nanoseconds\":"
+              << runtime_profiling_counters.response_completion_nanoseconds.load(std::memory_order_acquire)
+              << "},"
+              << "\"request_admission_rejections\":"
+              << request_admission_rejection_count_.load(std::memory_order_acquire) << ','
               << "\"workers\":[";
       for (std::size_t index = 0; index < slots_.size(); ++index)
       {
@@ -1494,7 +1896,6 @@ namespace
           payload << ',';
         }
         const std::shared_ptr<WorkerSlot> &slot = slots_[index];
-        sync_slot_channels_locked(slot);
         const auto health_state = slot->state->health_state.load(std::memory_order_acquire);
         switch (health_state)
         {
@@ -1507,8 +1908,10 @@ namespace
         }
         payload << '{'
                 << "\"worker_index\":" << slot->state->worker_index << ','
-                << "\"active_channels\":" << inflight_count_locked(*slot) << ','
-                << "\"channel_capacity\":" << slot->channels.size() << ','
+                << "\"pid\":" << slot->state->pid.load(std::memory_order_acquire) << ','
+                << "\"rss_bytes\":" << rss_bytes_for_pid(slot->state->pid.load(std::memory_order_acquire)) << ','
+                << "\"active_channels\":" << slot->state->active_execution_count.load(std::memory_order_acquire) << ','
+                << "\"channel_capacity\":" << slot->state->request_channel_count.load(std::memory_order_acquire) << ','
                 << "\"active_execution_count\":" << slot->state->active_execution_count.load(std::memory_order_acquire) << ','
                 << "\"idle_execution_count\":" << slot->state->idle_execution_count.load(std::memory_order_acquire) << ','
                 << "\"local_queue_depth\":" << slot->state->local_queue_depth.load(std::memory_order_acquire) << ','
@@ -1527,6 +1930,13 @@ namespace
                 << ",\"replacement_failure_count\":" << slot->state->replacement_failure_count.load(std::memory_order_acquire)
                 << ",\"health_transition_count\":" << slot->state->health_transition_count.load(std::memory_order_acquire)
                 << ",\"timeout_escalation_count\":" << slot->state->timeout_escalation_count.load(std::memory_order_acquire)
+                << ",\"unexpected_exit_count\":" << slot->state->unexpected_exit_count.load(std::memory_order_acquire)
+                << ",\"last_unexpected_exit_nanoseconds\":" << slot->state->last_unexpected_exit_nanoseconds.load(std::memory_order_acquire)
+                << ",\"last_progress_nanoseconds\":" << slot->state->last_progress_nanoseconds.load(std::memory_order_acquire)
+                << ",\"last_lifecycle_transition_nanoseconds\":" << slot->state->last_lifecycle_transition_nanoseconds.load(std::memory_order_acquire)
+                << ",\"last_health_transition_nanoseconds\":" << slot->state->last_health_transition_nanoseconds.load(std::memory_order_acquire)
+                << ",\"overload_started_nanoseconds\":" << slot->state->overload_started_nanoseconds.load(std::memory_order_acquire)
+                << ",\"recovery_deadline_nanoseconds\":" << slot->state->recovery_deadline_nanoseconds.load(std::memory_order_acquire)
                 << ",\"terminal_replacement_failure\":"
                 << (slot->state->terminal_replacement_failure.load(std::memory_order_acquire) ? "true" : "false")
                 << '}';
@@ -1543,26 +1953,49 @@ namespace
 
     std::string metrics_payload_text() const override
     {
-      std::lock_guard<std::mutex> lock(scheduler_mutex_);
-      const auto now = std::chrono::steady_clock::now();
-      update_worker_queue_pressure_locked(now);
       std::ostringstream payload;
-      payload << "vajra_scheduler_queue_depth " << queued_request_count_ << '\n';
+      payload << "vajra_scheduler_queue_depth " << queued_request_count_.load(std::memory_order_acquire) << '\n';
+      payload << "vajra_master_pid " << getpid() << '\n';
+      payload << "vajra_master_rss_bytes " << rss_bytes_for_pid(getpid()) << '\n';
       payload << "vajra_scheduler_queue_capacity " << queue_capacity_ << '\n';
       payload << "vajra_scheduler_oldest_queue_age_nanoseconds "
-              << std::chrono::duration_cast<std::chrono::nanoseconds>(oldest_queue_age_locked(now)).count() << '\n';
-      payload << "vajra_request_admission_rejections_total " << request_admission_rejection_count_ << '\n';
+              << oldest_queue_age_nanoseconds_.load(std::memory_order_acquire) << '\n';
+      payload << "vajra_request_admission_rejections_total "
+              << request_admission_rejection_count_.load(std::memory_order_acquire) << '\n';
       payload << "vajra_tracing_enabled " << (Vajra::runtime::runtime_tracing_enabled() ? 1 : 0) << '\n';
       payload << "vajra_tracing_available " << (Vajra::runtime::runtime_tracing_available() ? 1 : 0) << '\n';
+      payload << "vajra_scheduler_selection_total "
+              << runtime_profiling_counters.scheduler_selection_count.load(std::memory_order_acquire) << '\n';
+      payload << "vajra_scheduler_selection_nanoseconds_total "
+              << runtime_profiling_counters.scheduler_selection_nanoseconds.load(std::memory_order_acquire) << '\n';
+      payload << "vajra_ruby_execution_total "
+              << runtime_profiling_counters.ruby_execution_count.load(std::memory_order_acquire) << '\n';
+      payload << "vajra_ruby_execution_nanoseconds_total "
+              << runtime_profiling_counters.ruby_execution_nanoseconds.load(std::memory_order_acquire) << '\n';
+      payload << "vajra_request_ipc_write_total "
+              << runtime_profiling_counters.request_ipc_write_count.load(std::memory_order_acquire) << '\n';
+      payload << "vajra_request_ipc_write_nanoseconds_total "
+              << runtime_profiling_counters.request_ipc_write_nanoseconds.load(std::memory_order_acquire) << '\n';
+      payload << "vajra_response_ipc_read_total "
+              << runtime_profiling_counters.response_ipc_read_count.load(std::memory_order_acquire) << '\n';
+      payload << "vajra_response_ipc_read_nanoseconds_total "
+              << runtime_profiling_counters.response_ipc_read_nanoseconds.load(std::memory_order_acquire) << '\n';
+      payload << "vajra_response_completion_total "
+              << runtime_profiling_counters.response_completion_count.load(std::memory_order_acquire) << '\n';
+      payload << "vajra_response_completion_nanoseconds_total "
+              << runtime_profiling_counters.response_completion_nanoseconds.load(std::memory_order_acquire) << '\n';
       for (const auto &slot : slots_)
       {
-        sync_slot_channels_locked(slot);
         const std::size_t worker_index = slot->state->worker_index;
         const auto health_state = slot->state->health_state.load(std::memory_order_acquire);
         payload << "vajra_worker_active_channels{worker=\"" << worker_index << "\"} "
-                << inflight_count_locked(*slot) << '\n';
+                << slot->state->active_execution_count.load(std::memory_order_acquire) << '\n';
+        payload << "vajra_worker_pid{worker=\"" << worker_index << "\"} "
+                << slot->state->pid.load(std::memory_order_acquire) << '\n';
+        payload << "vajra_worker_rss_bytes{worker=\"" << worker_index << "\"} "
+                << rss_bytes_for_pid(slot->state->pid.load(std::memory_order_acquire)) << '\n';
         payload << "vajra_worker_channel_capacity{worker=\"" << worker_index << "\"} "
-                << slot->channels.size() << '\n';
+                << slot->state->request_channel_count.load(std::memory_order_acquire) << '\n';
         payload << "vajra_worker_available{worker=\"" << worker_index << "\"} "
                 << (slot->state->available.load(std::memory_order_acquire) ? 1 : 0) << '\n';
         payload << "vajra_worker_active_executions{worker=\"" << worker_index << "\"} "
@@ -1583,6 +2016,12 @@ namespace
                 << slot->state->replacement_failure_count.load(std::memory_order_acquire) << '\n';
         payload << "vajra_worker_timeout_escalations_total{worker=\"" << worker_index << "\"} "
                 << slot->state->timeout_escalation_count.load(std::memory_order_acquire) << '\n';
+        payload << "vajra_worker_unexpected_exits_total{worker=\"" << worker_index << "\"} "
+                << slot->state->unexpected_exit_count.load(std::memory_order_acquire) << '\n';
+        payload << "vajra_worker_last_unexpected_exit_nanoseconds{worker=\"" << worker_index << "\"} "
+                << slot->state->last_unexpected_exit_nanoseconds.load(std::memory_order_acquire) << '\n';
+        payload << "vajra_worker_recovery_deadline_nanoseconds{worker=\"" << worker_index << "\"} "
+                << slot->state->recovery_deadline_nanoseconds.load(std::memory_order_acquire) << '\n';
         payload << "vajra_worker_terminal_replacement_failure{worker=\"" << worker_index << "\"} "
                 << (slot->state->terminal_replacement_failure.load(std::memory_order_acquire) ? 1 : 0) << '\n';
       }
@@ -1652,10 +2091,10 @@ namespace
                     " selected_worker=" + std::to_string(assignment->first) +
                     " channel=" + std::to_string(assignment->second) +
                     " inflight=" + std::to_string(inflight) +
-                    " queue_depth=" + std::to_string(queued_request_count_ - 1),
+                    " queue_depth=" + std::to_string(queued_request_count_.load(std::memory_order_acquire) - 1),
                 debug_logging_);
             pending_request->enqueued = false;
-            --queued_request_count_;
+            queued_request_count_.fetch_sub(1, std::memory_order_acq_rel);
             pending_requests_.pop_front();
             update_worker_queue_pressure_locked(now);
             break;
@@ -1817,6 +2256,7 @@ namespace
       const auto oldest_queue_age = oldest_queue_age_locked(now);
       const auto oldest_queue_age_nanoseconds =
           std::chrono::duration_cast<std::chrono::nanoseconds>(oldest_queue_age).count();
+      oldest_queue_age_nanoseconds_.store(oldest_queue_age_nanoseconds, std::memory_order_release);
 
       for (const auto &slot : slots_)
       {
@@ -1824,7 +2264,7 @@ namespace
         const std::size_t inflight = inflight_count_locked(*slot);
         const std::size_t channel_capacity = slot->channels.size();
         const bool saturated = channel_capacity > 0 && inflight >= channel_capacity;
-        const std::size_t local_queue_depth = saturated ? queued_request_count_ : 0;
+        const std::size_t local_queue_depth = saturated ? queued_request_count_.load(std::memory_order_acquire) : 0;
 
         slot->state->active_execution_count.store(inflight, std::memory_order_release);
         slot->state->idle_execution_count.store(channel_capacity - std::min(inflight, channel_capacity), std::memory_order_release);
@@ -1848,9 +2288,9 @@ namespace
       prune_queue_locked(now);
       prune_queue_head_locked(now);
       update_worker_queue_pressure_locked(now);
-      if (queued_request_count_ >= queue_capacity_)
+      if (queued_request_count_.load(std::memory_order_acquire) >= queue_capacity_)
       {
-        ++request_admission_rejection_count_;
+        request_admission_rejection_count_.fetch_add(1, std::memory_order_acq_rel);
         log_scheduler_debug_event(
             "event=queue_capacity_reached policy=least_loaded queue_capacity=" + std::to_string(queue_capacity_),
             debug_logging_);
@@ -1866,7 +2306,7 @@ namespace
       pending_request->deadline = std::chrono::steady_clock::now() + request_timeout_;
       pending_request->enqueued = true;
       pending_requests_.push_back(pending_request);
-      ++queued_request_count_;
+      queued_request_count_.fetch_add(1, std::memory_order_acq_rel);
       update_worker_queue_pressure_locked(now);
       scheduler_condition_.notify_all();
       return pending_request;
@@ -1928,6 +2368,9 @@ namespace
 
     std::optional<std::pair<std::size_t, std::size_t>> least_busy_channel_locked() const
     {
+      ScopedProfilingSample profiling_sample(
+          runtime_profiling_counters.scheduler_selection_count,
+          runtime_profiling_counters.scheduler_selection_nanoseconds);
       std::optional<std::pair<std::size_t, std::size_t>> best_assignment;
       std::size_t best_worker_load = std::numeric_limits<std::size_t>::max();
       const std::size_t worker_count = slots_.size();
@@ -2014,7 +2457,7 @@ namespace
         }
 
         pending_request->enqueued = false;
-        --queued_request_count_;
+        queued_request_count_.fetch_sub(1, std::memory_order_acq_rel);
         pending_requests_.pop_front();
         update_worker_queue_pressure_locked(now);
       }
@@ -2042,7 +2485,7 @@ namespace
                 if (pending_request->enqueued)
                 {
                   pending_request->enqueued = false;
-                  --queued_request_count_;
+                  queued_request_count_.fetch_sub(1, std::memory_order_acq_rel);
                 }
                 return true;
               }),
@@ -2061,7 +2504,7 @@ namespace
       if ((*iterator)->enqueued)
       {
         (*iterator)->enqueued = false;
-        --queued_request_count_;
+        queued_request_count_.fetch_sub(1, std::memory_order_acq_rel);
       }
       pending_requests_.erase(iterator);
       update_worker_queue_pressure_locked(std::chrono::steady_clock::now());
@@ -2069,8 +2512,7 @@ namespace
 
     std::size_t queue_depth() const
     {
-      std::lock_guard<std::mutex> lock(scheduler_mutex_);
-      return queued_request_count_;
+      return queued_request_count_.load(std::memory_order_acquire);
     }
 
     void housekeeping_loop() const
@@ -2083,10 +2525,10 @@ namespace
           return;
         }
 
-        if (queued_request_count_ == 0)
+        if (queued_request_count_.load(std::memory_order_acquire) == 0)
         {
           scheduler_condition_.wait(lock, [this]() {
-            return housekeeping_stop_requested_ || queued_request_count_ > 0;
+            return housekeeping_stop_requested_ || queued_request_count_.load(std::memory_order_acquire) > 0;
           });
         }
         else
@@ -2096,7 +2538,7 @@ namespace
           update_worker_queue_pressure_locked(std::chrono::steady_clock::now());
           scheduler_condition_.notify_all();
           scheduler_condition_.wait_for(lock, kQueueHousekeepingInterval, [this]() {
-            return housekeeping_stop_requested_ || queued_request_count_ == 0;
+            return housekeeping_stop_requested_ || queued_request_count_.load(std::memory_order_acquire) == 0;
           });
         }
         if (housekeeping_stop_requested_)
@@ -2114,8 +2556,9 @@ namespace
     mutable std::mutex scheduler_mutex_;
     mutable std::condition_variable scheduler_condition_;
     mutable std::deque<std::shared_ptr<PendingRequest>> pending_requests_;
-    mutable std::size_t queued_request_count_ = 0;
-    mutable std::uint64_t request_admission_rejection_count_ = 0;
+    mutable std::atomic<std::size_t> queued_request_count_{0};
+    mutable std::atomic<std::int64_t> oldest_queue_age_nanoseconds_{0};
+    mutable std::atomic<std::uint64_t> request_admission_rejection_count_{0};
     mutable std::uint64_t next_request_id_ = 0;
     mutable std::size_t next_preferred_worker_ = 0;
     mutable bool housekeeping_stop_requested_ = false;
@@ -2454,12 +2897,12 @@ namespace
   struct WorkerRequestReaderThreadContext final : public WorkerLoopThreadContext
   {
     int channel_fd = -1;
-    std::shared_ptr<WorkerRequestLoopSharedState> shared_state;
+    std::shared_ptr<WorkerRequestLoopSharedState> runtime_state;
   };
 
   struct WorkerRequestExecutorThreadContext final : public WorkerLoopThreadContext
   {
-    std::shared_ptr<WorkerRequestLoopSharedState> shared_state;
+    std::shared_ptr<WorkerRequestLoopSharedState> runtime_state;
   };
 
   struct WorkerChannelSignalReadContext
@@ -2619,7 +3062,7 @@ namespace
         auto task = std::make_shared<WorkerRequestExecutionTask>(
             std::move(read_result.env_entries),
             std::move(read_result.request_body));
-        (void)context->shared_state->execution_pool.enqueue(task);
+        (void)context->runtime_state->execution_pool.enqueue(task);
 
         WorkerRequestExecutionTaskWaitContext wait_context{task.get()};
         rb_thread_call_without_gvl(
@@ -2631,10 +3074,10 @@ namespace
       }
       catch (const std::exception &error)
       {
-        context->shared_state->abort(error.what());
+        context->runtime_state->abort(error.what());
         if (!reader_finished)
         {
-          context->shared_state->mark_reader_finished();
+          context->runtime_state->mark_reader_finished();
           reader_finished = true;
         }
         notify_worker_loop_thread_completion(context, error.what());
@@ -2644,7 +3087,7 @@ namespace
 
     if (!reader_finished)
     {
-      context->shared_state->mark_reader_finished();
+      context->runtime_state->mark_reader_finished();
     }
     notify_worker_loop_thread_completion(context);
     return Qnil;
@@ -2658,7 +3101,7 @@ namespace
     {
       for (;;)
       {
-        WorkerRequestExecutionPoolWaitContext wait_context{&context->shared_state->execution_pool, nullptr};
+        WorkerRequestExecutionPoolWaitContext wait_context{&context->runtime_state->execution_pool, nullptr};
         rb_thread_call_without_gvl(
             wait_for_worker_execution_task_without_gvl,
             &wait_context,
@@ -2670,12 +3113,12 @@ namespace
         }
 
         wait_context.task->execute();
-        context->shared_state->execution_pool.finish_task();
+        context->runtime_state->execution_pool.finish_task();
       }
     }
     catch (const std::exception &error)
     {
-      context->shared_state->abort(error.what());
+      context->runtime_state->abort(error.what());
       notify_worker_loop_thread_completion(context, error.what());
       return Qnil;
     }
@@ -2710,7 +3153,50 @@ namespace
 void Vajra::rack::initialize_rack_execution_bridge()
 {
   rb_global_variable(&rack_execution_callback);
+  rb_global_variable(&rack_execution_app);
+  rb_global_variable(&rb_cStringIO);
+  rb_global_variable(&rb_key_content_length);
+  rb_global_variable(&rb_key_content_type);
+  rb_global_variable(&rb_key_path_info);
+  rb_global_variable(&rb_key_query_string);
+  rb_global_variable(&rb_key_rack_errors);
+  rb_global_variable(&rb_key_rack_input);
+  rb_global_variable(&rb_key_rack_multiprocess);
+  rb_global_variable(&rb_key_rack_multithread);
+  rb_global_variable(&rb_key_rack_run_once);
+  rb_global_variable(&rb_key_rack_url_scheme);
+  rb_global_variable(&rb_key_rack_version);
+  rb_global_variable(&rb_key_remote_addr);
+  rb_global_variable(&rb_key_remote_port);
+  rb_global_variable(&rb_key_request_method);
+  rb_global_variable(&rb_key_script_name);
+  rb_global_variable(&rb_key_server_name);
+  rb_global_variable(&rb_key_server_port);
+  rb_global_variable(&rb_key_server_protocol);
   id_exception_message = rb_intern("message");
+  id_call = rb_intern("call");
+  id_close = rb_intern("close");
+  id_each = rb_intern("each");
+  id_new = rb_intern("new");
+  id_to_s = rb_intern("to_s");
+  rb_key_content_length = frozen_ruby_key("CONTENT_LENGTH");
+  rb_key_content_type = frozen_ruby_key("CONTENT_TYPE");
+  rb_key_path_info = frozen_ruby_key("PATH_INFO");
+  rb_key_query_string = frozen_ruby_key("QUERY_STRING");
+  rb_key_rack_errors = frozen_ruby_key("rack.errors");
+  rb_key_rack_input = frozen_ruby_key("rack.input");
+  rb_key_rack_multiprocess = frozen_ruby_key("rack.multiprocess");
+  rb_key_rack_multithread = frozen_ruby_key("rack.multithread");
+  rb_key_rack_run_once = frozen_ruby_key("rack.run_once");
+  rb_key_rack_url_scheme = frozen_ruby_key("rack.url_scheme");
+  rb_key_rack_version = frozen_ruby_key("rack.version");
+  rb_key_remote_addr = frozen_ruby_key("REMOTE_ADDR");
+  rb_key_remote_port = frozen_ruby_key("REMOTE_PORT");
+  rb_key_request_method = frozen_ruby_key("REQUEST_METHOD");
+  rb_key_script_name = frozen_ruby_key("SCRIPT_NAME");
+  rb_key_server_name = frozen_ruby_key("SERVER_NAME");
+  rb_key_server_port = frozen_ruby_key("SERVER_PORT");
+  rb_key_server_protocol = frozen_ruby_key("SERVER_PROTOCOL");
 }
 
 void Vajra::rack::set_rack_execution_callback(VALUE callback)
@@ -2720,6 +3206,15 @@ void Vajra::rack::set_rack_execution_callback(VALUE callback)
     rack_execution_callback = callback;
   }
   rack_execution_callback_installed_flag.store(!NIL_P(callback), std::memory_order_release);
+}
+
+void Vajra::rack::set_rack_execution_app(VALUE app)
+{
+  {
+    const std::lock_guard<std::mutex> app_lock(rack_execution_app_mutex);
+    rack_execution_app = app;
+  }
+  rack_execution_app_installed_flag.store(!NIL_P(app), std::memory_order_release);
 }
 
 std::shared_ptr<const Vajra::rack::RackExecutionTransport> Vajra::rack::request_channel_transport(int channel_fd)
@@ -2732,7 +3227,7 @@ std::shared_ptr<const Vajra::rack::RackExecutionTransport> Vajra::rack::request_
 
 std::shared_ptr<const Vajra::rack::RackExecutionTransport> Vajra::rack::request_channel_transport(
     const std::vector<std::shared_ptr<Vajra::runtime::SharedWorkerState>> &worker_states,
-    std::size_t min_threads,
+    std::size_t max_threads,
     std::size_t queue_capacity,
     std::size_t request_timeout_seconds,
     std::size_t worker_timeout_seconds,
@@ -2741,7 +3236,7 @@ std::shared_ptr<const Vajra::rack::RackExecutionTransport> Vajra::rack::request_
 {
   return std::make_shared<GlobalQueuedWorkerProcessRackExecutionTransport>(
       worker_states,
-      min_threads,
+      max_threads,
       queue_capacity,
       request_timeout_seconds,
       worker_timeout_seconds,
@@ -2758,12 +3253,12 @@ std::unique_ptr<Vajra::rack::RackExecutionSession> Vajra::rack::RackExecutionTra
 
 std::string Vajra::rack::RackExecutionTransport::stats_payload_json() const
 {
-  return "{\"scheduler_policy\":\"same_process\"}";
+  return Vajra::runtime::runtime_stats_payload_json();
 }
 
 std::string Vajra::rack::RackExecutionTransport::metrics_payload_text() const
 {
-  return "vajra_runtime_up 1\n";
+  return Vajra::runtime::runtime_metrics_payload_text();
 }
 
 Vajra::rack::RackRequestExecutor::RackRequestExecutor()
@@ -2774,13 +3269,9 @@ Vajra::rack::RackRequestExecutor::RackRequestExecutor()
 Vajra::rack::RackRequestExecutor::RackRequestExecutor(
     std::shared_ptr<const RackExecutionTransport> transport,
     ControlPlaneConfig control_plane_config)
-    : transport_(std::move(transport)),
+    : transport_(transport ? std::move(transport) : std::make_shared<SameProcessRackExecutionTransport>()),
       control_plane_config_(std::move(control_plane_config))
 {
-  if (!transport_)
-  {
-    throw std::invalid_argument("rack execution transport must not be null");
-  }
 }
 
 std::optional<Vajra::response::Response> Vajra::rack::RackRequestExecutor::control_response(
@@ -2843,7 +3334,7 @@ void Vajra::rack::run_worker_request_execution_loop(
     throw std::runtime_error("worker request completion signal pipe failed");
   }
 
-  auto shared_state = std::make_shared<WorkerRequestLoopSharedState>(channel_fds, max_threads);
+  auto runtime_state = std::make_shared<WorkerRequestLoopSharedState>(channel_fds, max_threads);
   const std::size_t total_thread_count = channel_fds.size() + max_threads;
   std::vector<WorkerLoopThreadContext *> contexts;
   contexts.reserve(total_thread_count);
@@ -2859,7 +3350,7 @@ void Vajra::rack::run_worker_request_execution_loop(
     auto context = std::make_unique<WorkerRequestReaderThreadContext>();
     context->channel_fd = channel_fd;
     context->completion_signal_fd = completion_signal_pipe[1];
-    context->shared_state = shared_state;
+    context->runtime_state = runtime_state;
     contexts.push_back(context.get());
     threads.push_back(rb_thread_create(run_worker_request_reader_thread, context.get()));
     reader_contexts.push_back(std::move(context));
@@ -2869,7 +3360,7 @@ void Vajra::rack::run_worker_request_execution_loop(
   {
     auto context = std::make_unique<WorkerRequestExecutorThreadContext>();
     context->completion_signal_fd = completion_signal_pipe[1];
-    context->shared_state = shared_state;
+    context->runtime_state = runtime_state;
     contexts.push_back(context.get());
     threads.push_back(rb_thread_create(run_worker_request_executor_thread, context.get()));
     executor_contexts.push_back(std::move(context));
@@ -2926,7 +3417,7 @@ void Vajra::rack::run_worker_request_execution_loop(
     }
   }
 
-  if (const std::optional<std::string> error_message = shared_state->fatal_error())
+  if (const std::optional<std::string> error_message = runtime_state->fatal_error())
   {
     throw std::runtime_error(*error_message);
   }

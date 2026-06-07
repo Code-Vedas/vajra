@@ -7,7 +7,7 @@
 
 require_relative 'support'
 
-RSpec.describe 'Vajra e2e process helpers', :e2e, :integration do # rubocop:disable RSpec/DescribeClass
+RSpec.describe 'Vajra e2e process helpers', :e2e, :integration do
   let(:helper_host) do
     Class.new do
       include VajraE2ESupport

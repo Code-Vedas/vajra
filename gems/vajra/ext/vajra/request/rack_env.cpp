@@ -14,6 +14,7 @@
 namespace
 {
   constexpr std::size_t kFixedRackEnvEntryCount = 10;
+  using RackEnvEntryIndex = std::unordered_map<std::string, std::size_t>;
 
   bool valid_header_name_character(unsigned char character)
   {
@@ -84,27 +85,39 @@ namespace
     }
   }
 
+  Vajra::request::RackEnvEntry *find_env_entry(
+      std::vector<Vajra::request::RackEnvEntry> &entries,
+      const RackEnvEntryIndex &entry_index,
+      const std::string &key)
+  {
+    const auto existing_entry = entry_index.find(key);
+    if (existing_entry == entry_index.end())
+    {
+      return nullptr;
+    }
+
+    return &entries.at(existing_entry->second);
+  }
+
   void insert_or_append_header(
       std::vector<Vajra::request::RackEnvEntry> &entries,
-      std::unordered_map<std::string, std::size_t> &entry_positions,
+      RackEnvEntryIndex &entry_index,
       const std::string &key,
       const std::string &value)
   {
-    const auto existing_entry = entry_positions.find(key);
-    if (existing_entry != entry_positions.end())
+    if (Vajra::request::RackEnvEntry *entry = find_env_entry(entries, entry_index, key))
     {
-      Vajra::request::RackEnvEntry &entry = entries.at(existing_entry->second);
       if (key == "CONTENT_LENGTH" || key == "CONTENT_TYPE" || key == "HTTP_HOST")
       {
         throw Vajra::request::bad_request_error("duplicate Rack CGI header is not allowed");
       }
 
-      entry.value += (key == "HTTP_COOKIE" ? "; " : ",") + value;
+      entry->value += (key == "HTTP_COOKIE" ? "; " : ",") + value;
       return;
     }
 
-    entry_positions.emplace(key, entries.size());
     entries.push_back(Vajra::request::RackEnvEntry{key, value});
+    entry_index.emplace(key, entries.size() - 1);
   }
 }
 
@@ -114,9 +127,9 @@ std::vector<Vajra::request::RackEnvEntry> Vajra::request::RackEnvBuilder::build(
   const RackRequestTarget request_target = split_target(request_context.request.request_line.target);
 
   std::vector<RackEnvEntry> entries;
-  std::unordered_map<std::string, std::size_t> entry_positions;
   entries.reserve(request_context.request.headers.size() + kFixedRackEnvEntryCount);
-  entry_positions.reserve(request_context.request.headers.size() + kFixedRackEnvEntryCount);
+  RackEnvEntryIndex entry_index;
+  entry_index.reserve(request_context.request.headers.size());
   entries.push_back(RackEnvEntry{"REQUEST_METHOD", request_context.request.request_line.method});
   entries.push_back(RackEnvEntry{"SCRIPT_NAME", ""});
   entries.push_back(RackEnvEntry{"PATH_INFO", request_target.path_info});
@@ -127,15 +140,10 @@ std::vector<Vajra::request::RackEnvEntry> Vajra::request::RackEnvBuilder::build(
   entries.push_back(RackEnvEntry{"REMOTE_ADDR", request_context.socket.remote_address});
   entries.push_back(RackEnvEntry{"REMOTE_PORT", std::to_string(request_context.socket.remote_port)});
   entries.push_back(RackEnvEntry{"rack.url_scheme", request_context.socket.scheme});
-  for (std::size_t index = 0; index < entries.size(); ++index)
-  {
-    entry_positions.emplace(entries[index].key, index);
-  }
-
   for (const ParsedHeader &header : request_context.request.headers)
   {
     validate_header_value(header.value);
-    insert_or_append_header(entries, entry_positions, normalize_header_env_key(header.name), header.value);
+    insert_or_append_header(entries, entry_index, normalize_header_env_key(header.name), header.value);
   }
 
   return entries;

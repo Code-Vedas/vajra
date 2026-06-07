@@ -133,8 +133,8 @@ module VajraE2EProcessHelpers
     end
   end
 
-  def idle_shutdown(port: disposable_listener_port, signal: 'INT')
-    managed_popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+  def idle_shutdown(port: disposable_listener_port, signal: 'INT', env: {})
+    managed_popen2e(vajra_env(port:).merge(env), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       startup_output = []
       selected_port = wait_for_banner(output, captured_lines: startup_output)
 

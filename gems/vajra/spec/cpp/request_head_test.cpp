@@ -10,6 +10,7 @@
 
 #include <random>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace VajraSpecCpp
@@ -206,6 +207,37 @@ namespace VajraSpecCpp
       {
         fail("partial request head bytes were not captured");
       }
+
+      if (!outcome.result.peer_closed)
+      {
+        fail("peer close before request head boundary was not classified as peer_closed");
+      }
+    }
+
+    void test_head_reader_does_not_classify_local_descriptor_errors_as_peer_close()
+    {
+      int pipe_fds[2];
+      if (pipe(pipe_fds) < 0)
+      {
+        fail("pipe failed while setting up invalid descriptor reader test");
+      }
+
+      const int read_fd = pipe_fds[0];
+      close(pipe_fds[0]);
+      close(pipe_fds[1]);
+
+      Vajra::request::HeadReader reader(Vajra::request::kDefaultMaxRequestHeadBytes, 0);
+      const Vajra::request::HeadReadResult result = reader.read(read_fd, "", 0);
+
+      if (result.complete)
+      {
+        fail("invalid local descriptor unexpectedly completed a request head");
+      }
+
+      if (result.peer_closed)
+      {
+        fail("invalid local descriptor was incorrectly classified as peer_closed");
+      }
     }
 
     void test_head_reader_accepts_exact_limit_request_head()
@@ -394,6 +426,7 @@ namespace VajraSpecCpp
     test_validate_request_head_size_rejects_oversized_request_head();
     test_head_reader_accepts_fragmented_request_head();
     test_head_reader_returns_incomplete_on_peer_close_before_boundary();
+    test_head_reader_does_not_classify_local_descriptor_errors_as_peer_close();
     test_head_reader_accepts_exact_limit_request_head();
     test_head_reader_preserves_trailing_bytes_after_header_boundary();
     test_head_reader_rejects_limit_plus_one_request_head();

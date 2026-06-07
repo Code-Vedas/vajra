@@ -12,16 +12,24 @@
 #endif
 
 #include <chrono>
+#include <atomic>
+#include <cerrno>
 #include <cctype>
+#include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <ctime>
-#include <fstream>
+#include <fcntl.h>
 #include <iomanip>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <sstream>
-#include <cstdint>
+#include <string>
+#include <sys/stat.h>
+#include <thread>
+#include <utility>
+#include <vector>
 #include <unistd.h>
 
 std::string Vajra::runtime::utc_timestamp()
@@ -62,16 +70,67 @@ namespace
     bool structured_logs = false;
     bool trace_enabled = false;
     bool trace_available = false;
+    bool access_log_disabled = false;
     std::string access_log_path;
     std::string error_log_path;
     std::string trace_endpoint;
     std::string trace_service_name;
-    std::unique_ptr<std::ofstream> access_log_stream;
-    std::unique_ptr<std::ofstream> error_log_stream;
+    int access_log_fd = STDOUT_FILENO;
+    int error_log_fd = STDERR_FILENO;
+    bool close_access_log_fd = false;
+    bool close_error_log_fd = false;
+  };
+
+  enum class LogEventKind
+  {
+    runtime,
+    error,
+    access,
+  };
+
+  struct LogEvent
+  {
+    LogEventKind kind = LogEventKind::runtime;
+    bool structured = false;
+    std::string line;
+    std::string method;
+    std::string target;
+    int status_code = 0;
+  };
+
+  struct LogNode
+  {
+    explicit LogNode(LogEvent event_payload) : event(std::move(event_payload)) {}
+
+    std::atomic<LogNode *> next{nullptr};
+    LogEvent event;
+  };
+
+  struct AsyncLoggerState
+  {
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::condition_variable drained;
+    std::thread worker;
+    std::atomic_bool running{false};
+    std::atomic_bool stopping{false};
+    std::size_t in_flight = 0;
+    std::atomic<pid_t> owner_pid{-1};
+    std::atomic<std::size_t> pending{0};
+    LogNode *head = nullptr;
+    std::atomic<LogNode *> tail{nullptr};
+    bool structured_logs = false;
+    bool access_log_disabled = false;
+    int access_log_fd = STDOUT_FILENO;
+    int error_log_fd = STDERR_FILENO;
+    int runtime_log_fd = STDOUT_FILENO;
   };
 
   std::mutex logging_mutex;
   LoggingConfig logging_config;
+  AsyncLoggerState async_logger;
+  std::atomic_bool access_log_disabled{false};
+  std::atomic_bool structured_logs_enabled{false};
 #ifdef VAJRA_RUNTIME_HAS_RUBY
   VALUE runtime_lifecycle_callback = Qnil;
 
@@ -214,30 +273,291 @@ namespace
     return escaped.str();
   }
 
-  void write_line(std::ostream &stream, const std::string &line)
+  bool write_all(int fd, const char *data, std::size_t length)
   {
-    stream << line << '\n';
+    std::size_t written = 0;
+    while (written < length)
+    {
+      const ssize_t result = ::write(fd, data + written, length - written);
+      if (result < 0)
+      {
+        if (errno == EINTR)
+        {
+          continue;
+        }
+        return false;
+      }
+      if (result == 0)
+      {
+        return false;
+      }
+      written += static_cast<std::size_t>(result);
+    }
+    return true;
+  }
+
+  void write_line_fd(int fd, const std::string &line)
+  {
+    std::string payload;
+    payload.reserve(line.size() + 1);
+    payload.append(line);
+    payload.push_back('\n');
+    (void)write_all(fd, payload.data(), payload.size());
+  }
+
+  void append_line(std::string &buffer, const std::string &line)
+  {
+    buffer.append(line);
+    buffer.push_back('\n');
+  }
+
+  int open_log_fd(const std::string &path)
+  {
+    return open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+  }
+
+  const std::string &cached_utc_timestamp()
+  {
+    thread_local std::time_t cached_time = 0;
+    thread_local std::string cached_timestamp;
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+    if (now_time != cached_time || cached_timestamp.empty())
+    {
+      std::tm utc_time{};
+      gmtime_r(&now_time, &utc_time);
+      std::ostringstream timestamp;
+      timestamp << std::put_time(&utc_time, "%Y-%m-%dT%H:%M:%SZ");
+      cached_time = now_time;
+      cached_timestamp = timestamp.str();
+    }
+    return cached_timestamp;
+  }
+
+  void close_configured_fd(int &fd, bool &should_close, int fallback_fd)
+  {
+    if (should_close && fd >= 0)
+    {
+      close(fd);
+    }
+    fd = fallback_fd;
+    should_close = false;
+  }
+
+  std::string formatted_access_line(const LogEvent &event)
+  {
+    if (event.structured)
+    {
+      std::ostringstream line;
+      line << "{\"component\":\"access\""
+           << ",\"timestamp\":\"" << cached_utc_timestamp() << "\""
+           << ",\"method\":" << escaped_log_value(event.method)
+           << ",\"target\":" << escaped_log_value(event.target)
+           << ",\"status\":" << event.status_code
+           << '}';
+      return line.str();
+    }
+
+    std::ostringstream line;
+    line << "[Vajra][access] " << cached_utc_timestamp()
+         << " method=" << escaped_log_value(event.method)
+         << " target=" << escaped_log_value(event.target)
+         << " status=" << event.status_code;
+    return line.str();
+  }
+
+  bool async_logger_owned_by_current_process()
+  {
+    return async_logger.running.load(std::memory_order_acquire) &&
+           async_logger.owner_pid.load(std::memory_order_acquire) == getpid();
+  }
+
+  void write_log_event(const LogEvent &event)
+  {
+    switch (event.kind)
+    {
+      case LogEventKind::runtime:
+        write_line_fd(async_logger.runtime_log_fd, event.line);
+        return;
+      case LogEventKind::error:
+        write_line_fd(async_logger.error_log_fd, event.line);
+        return;
+      case LogEventKind::access:
+        if (!async_logger.access_log_disabled)
+        {
+          write_line_fd(async_logger.access_log_fd, event.line.empty() ? formatted_access_line(event) : event.line);
+        }
+        return;
+    }
+  }
+
+  void append_log_event(const LogEvent &event, std::string &runtime_buffer, std::string &error_buffer, std::string &access_buffer)
+  {
+    switch (event.kind)
+    {
+      case LogEventKind::runtime:
+        append_line(runtime_buffer, event.line);
+        return;
+      case LogEventKind::error:
+        append_line(error_buffer, event.line);
+        return;
+      case LogEventKind::access:
+        if (!async_logger.access_log_disabled)
+        {
+          append_line(access_buffer, event.line.empty() ? formatted_access_line(event) : event.line);
+        }
+        return;
+    }
+  }
+
+  void write_log_batch(const std::vector<LogEvent> &events)
+  {
+    const bool access_sink_enabled = !async_logger.access_log_disabled;
+    const bool shared_sink = async_logger.runtime_log_fd == async_logger.error_log_fd ||
+                             (access_sink_enabled &&
+                              (async_logger.access_log_fd == async_logger.runtime_log_fd ||
+                               async_logger.access_log_fd == async_logger.error_log_fd));
+    if (shared_sink)
+    {
+      for (const LogEvent &event : events)
+      {
+        write_log_event(event);
+      }
+      return;
+    }
+
+    std::string runtime_buffer;
+    std::string error_buffer;
+    std::string access_buffer;
+    runtime_buffer.reserve(4096);
+    error_buffer.reserve(4096);
+    access_buffer.reserve(events.size() * 96);
+
+    for (const LogEvent &event : events)
+    {
+      append_log_event(event, runtime_buffer, error_buffer, access_buffer);
+    }
+
+    if (!runtime_buffer.empty())
+    {
+      (void)write_all(async_logger.runtime_log_fd, runtime_buffer.data(), runtime_buffer.size());
+    }
+    if (!error_buffer.empty())
+    {
+      (void)write_all(async_logger.error_log_fd, error_buffer.data(), error_buffer.size());
+    }
+    if (!access_buffer.empty())
+    {
+      (void)write_all(async_logger.access_log_fd, access_buffer.data(), access_buffer.size());
+    }
+  }
+
+  void async_logger_loop()
+  {
+    for (;;)
+    {
+      std::vector<LogEvent> events;
+      for (;;)
+      {
+        LogNode *head = async_logger.head;
+        LogNode *next = head == nullptr ? nullptr : head->next.load(std::memory_order_acquire);
+        if (next == nullptr)
+        {
+          break;
+        }
+        events.push_back(std::move(next->event));
+        async_logger.head = next;
+        delete head;
+      }
+
+      if (events.empty())
+      {
+        if (async_logger.stopping.load(std::memory_order_acquire) &&
+            async_logger.pending.load(std::memory_order_acquire) == 0)
+        {
+          async_logger.drained.notify_all();
+          return;
+        }
+
+        std::unique_lock<std::mutex> lock(async_logger.mutex);
+        async_logger.condition.wait_for(lock, std::chrono::milliseconds(1), [] {
+          return async_logger.stopping.load(std::memory_order_acquire) ||
+                 async_logger.pending.load(std::memory_order_acquire) > 0;
+        });
+        continue;
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(async_logger.mutex);
+        async_logger.in_flight += events.size();
+        async_logger.pending.fetch_sub(events.size(), std::memory_order_acq_rel);
+      }
+
+      write_log_batch(events);
+
+      {
+        std::lock_guard<std::mutex> lock(async_logger.mutex);
+        async_logger.in_flight -= events.size();
+        if (async_logger.pending.load(std::memory_order_acquire) == 0 && async_logger.in_flight == 0)
+        {
+          async_logger.drained.notify_all();
+        }
+      }
+    }
+  }
+
+  void delete_async_logger_queue()
+  {
+    LogNode *node = async_logger.head;
+    while (node != nullptr)
+    {
+      LogNode *next = node->next.load(std::memory_order_acquire);
+      delete node;
+      node = next;
+    }
+    async_logger.head = nullptr;
+    async_logger.tail.store(nullptr, std::memory_order_release);
+  }
+
+  bool enqueue_log_event(LogEvent event)
+  {
+    if (!async_logger_owned_by_current_process() || async_logger.stopping.load(std::memory_order_acquire))
+    {
+      return false;
+    }
+    auto *node = new LogNode(std::move(event));
+    const bool should_notify = async_logger.pending.fetch_add(1, std::memory_order_acq_rel) == 0;
+    LogNode *previous = async_logger.tail.exchange(node, std::memory_order_acq_rel);
+    previous->next.store(node, std::memory_order_release);
+    if (should_notify)
+    {
+      async_logger.condition.notify_one();
+    }
+    return true;
+  }
+
+  void drain_async_logger()
+  {
+    std::unique_lock<std::mutex> lock(async_logger.mutex);
+    if (!async_logger_owned_by_current_process())
+    {
+      return;
+    }
+    async_logger.drained.wait(lock, [] {
+      return async_logger.pending.load(std::memory_order_acquire) == 0 && async_logger.in_flight == 0;
+    });
   }
 
   void flush_runtime_streams()
   {
-    std::lock_guard<std::mutex> lock(logging_mutex);
+    drain_async_logger();
     std::cout.flush();
     std::cerr.flush();
-    if (logging_config.access_log_stream)
-    {
-      logging_config.access_log_stream->flush();
-    }
-    if (logging_config.error_log_stream)
-    {
-      logging_config.error_log_stream->flush();
-    }
   }
 
   bool structured_logging_enabled()
   {
-    const std::lock_guard<std::mutex> lock(logging_mutex);
-    return logging_config.structured_logs;
+    return structured_logs_enabled.load(std::memory_order_acquire);
   }
 
 #ifdef VAJRA_RUNTIME_HAS_RUBY
@@ -333,38 +653,51 @@ namespace
 
   void write_runtime_line(const std::string &line)
   {
-    std::lock_guard<std::mutex> lock(logging_mutex);
-    if (logging_config.error_log_stream)
+    if (enqueue_log_event(LogEvent{LogEventKind::runtime, false, line, "", "", 0}))
     {
-      write_line(*logging_config.error_log_stream, line);
       return;
     }
 
-    write_line(std::cout, line);
+    int fd = STDOUT_FILENO;
+    {
+      std::lock_guard<std::mutex> lock(logging_mutex);
+      fd = logging_config.error_log_path.empty() ? STDOUT_FILENO : logging_config.error_log_fd;
+    }
+    write_line_fd(fd, line);
   }
 
   void write_error_line(const std::string &line)
   {
-    std::lock_guard<std::mutex> lock(logging_mutex);
-    if (logging_config.error_log_stream)
+    if (enqueue_log_event(LogEvent{LogEventKind::error, false, line, "", "", 0}))
     {
-      write_line(*logging_config.error_log_stream, line);
       return;
     }
 
-    write_line(std::cerr, line);
+    int fd = STDERR_FILENO;
+    {
+      std::lock_guard<std::mutex> lock(logging_mutex);
+      fd = logging_config.error_log_fd;
+    }
+    write_line_fd(fd, line);
   }
 
   void write_access_line(const std::string &line)
   {
-    std::lock_guard<std::mutex> lock(logging_mutex);
-    if (logging_config.access_log_stream)
+    if (enqueue_log_event(LogEvent{LogEventKind::access, structured_logging_enabled(), line, "", "", 0}))
     {
-      write_line(*logging_config.access_log_stream, line);
       return;
     }
 
-    write_line(std::cout, line);
+    int fd = STDOUT_FILENO;
+    {
+      std::lock_guard<std::mutex> lock(logging_mutex);
+      if (logging_config.access_log_disabled)
+      {
+        return;
+      }
+      fd = logging_config.access_log_fd;
+    }
+    write_line_fd(fd, line);
   }
 }
 
@@ -374,19 +707,24 @@ void Vajra::runtime::configure_runtime_logging(
     const std::string &error_log)
 {
   std::string warning_message;
+  stop_runtime_logging_worker();
   std::lock_guard<std::mutex> lock(logging_mutex);
+  close_configured_fd(logging_config.access_log_fd, logging_config.close_access_log_fd, STDOUT_FILENO);
+  close_configured_fd(logging_config.error_log_fd, logging_config.close_error_log_fd, STDERR_FILENO);
   logging_config.structured_logs = structured_logs;
   logging_config.access_log_path = access_log;
   logging_config.error_log_path = error_log;
-  logging_config.access_log_stream.reset();
-  logging_config.error_log_stream.reset();
+  logging_config.access_log_disabled = access_log.empty() || access_log == "/dev/null";
+  access_log_disabled.store(logging_config.access_log_disabled, std::memory_order_release);
+  structured_logs_enabled.store(structured_logs, std::memory_order_release);
 
-  if (!access_log.empty())
+  if (!access_log.empty() && !logging_config.access_log_disabled)
   {
-    auto access_stream = std::make_unique<std::ofstream>(access_log, std::ios::app);
-    if (access_stream->is_open() && access_stream->good())
+    const int access_fd = open_log_fd(access_log);
+    if (access_fd >= 0)
     {
-      logging_config.access_log_stream = std::move(access_stream);
+      logging_config.access_log_fd = access_fd;
+      logging_config.close_access_log_fd = true;
     }
     else
     {
@@ -395,10 +733,11 @@ void Vajra::runtime::configure_runtime_logging(
   }
   if (!error_log.empty())
   {
-    auto error_stream = std::make_unique<std::ofstream>(error_log, std::ios::app);
-    if (error_stream->is_open() && error_stream->good())
+    const int error_fd = open_log_fd(error_log);
+    if (error_fd >= 0)
     {
-      logging_config.error_log_stream = std::move(error_stream);
+      logging_config.error_log_fd = error_fd;
+      logging_config.close_error_log_fd = true;
     }
     else
     {
@@ -413,7 +752,7 @@ void Vajra::runtime::configure_runtime_logging(
 
   if (!warning_message.empty())
   {
-    write_line(std::cerr, "[Vajra][error] " + utc_timestamp() + ' ' + warning_message);
+    write_line_fd(STDERR_FILENO, "[Vajra][error] " + utc_timestamp() + ' ' + warning_message);
   }
 }
 
@@ -429,6 +768,80 @@ void Vajra::runtime::configure_runtime_tracing(
   if (!trace_enabled)
   {
     logging_config.trace_available = false;
+  }
+}
+
+void Vajra::runtime::start_runtime_logging_worker()
+{
+  LoggingConfig config_snapshot;
+  {
+    const std::lock_guard<std::mutex> lock(logging_mutex);
+    config_snapshot.structured_logs = logging_config.structured_logs;
+    config_snapshot.access_log_disabled = logging_config.access_log_disabled;
+    config_snapshot.access_log_path = logging_config.access_log_path;
+    config_snapshot.error_log_path = logging_config.error_log_path;
+    config_snapshot.access_log_fd = logging_config.access_log_fd;
+    config_snapshot.error_log_fd = logging_config.error_log_fd;
+  }
+
+  std::lock_guard<std::mutex> lock(async_logger.mutex);
+  if (async_logger.running.load(std::memory_order_acquire) &&
+      async_logger.owner_pid.load(std::memory_order_acquire) == getpid())
+  {
+    return;
+  }
+  if (async_logger.running.load(std::memory_order_acquire) &&
+      async_logger.owner_pid.load(std::memory_order_acquire) != getpid())
+  {
+    async_logger.running.store(false, std::memory_order_release);
+    async_logger.stopping.store(false, std::memory_order_release);
+    async_logger.in_flight = 0;
+    async_logger.pending.store(0, std::memory_order_release);
+    delete_async_logger_queue();
+  }
+
+  auto *stub = new LogNode(LogEvent{});
+  async_logger.head = stub;
+  async_logger.tail.store(stub, std::memory_order_release);
+  async_logger.pending.store(0, std::memory_order_release);
+  async_logger.structured_logs = config_snapshot.structured_logs;
+  async_logger.access_log_disabled = config_snapshot.access_log_disabled;
+  async_logger.access_log_fd = config_snapshot.access_log_fd;
+  async_logger.error_log_fd = config_snapshot.error_log_fd;
+  async_logger.runtime_log_fd = config_snapshot.error_log_path.empty() ? STDOUT_FILENO : config_snapshot.error_log_fd;
+  async_logger.owner_pid.store(getpid(), std::memory_order_release);
+  async_logger.stopping.store(false, std::memory_order_release);
+  async_logger.running.store(true, std::memory_order_release);
+  async_logger.worker = std::thread(async_logger_loop);
+}
+
+void Vajra::runtime::stop_runtime_logging_worker()
+{
+  std::thread worker;
+  {
+    std::lock_guard<std::mutex> lock(async_logger.mutex);
+    if (!async_logger_owned_by_current_process())
+    {
+      return;
+    }
+    async_logger.stopping.store(true, std::memory_order_release);
+    async_logger.condition.notify_all();
+    worker = std::move(async_logger.worker);
+  }
+
+  if (worker.joinable())
+  {
+    worker.join();
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(async_logger.mutex);
+    async_logger.running.store(false, std::memory_order_release);
+    async_logger.stopping.store(false, std::memory_order_release);
+    async_logger.in_flight = 0;
+    async_logger.pending.store(0, std::memory_order_release);
+    delete_async_logger_queue();
+    async_logger.owner_pid.store(-1, std::memory_order_release);
   }
 }
 
@@ -501,6 +914,7 @@ void Vajra::runtime::log_runtime_banner_start(
   write_runtime_line("[" + std::to_string(pid) + "] * Min threads: " + std::to_string(min_threads));
   write_runtime_line("[" + std::to_string(pid) + "] * Max threads: " + std::to_string(max_threads));
   write_runtime_line("[" + std::to_string(pid) + "] * Bind: http://" + host + ":" + std::to_string(port));
+  write_runtime_line("[" + std::to_string(pid) + "] Use Ctrl-C to stop");
 }
 
 void Vajra::runtime::log_worker_lifecycle_event(
@@ -657,6 +1071,22 @@ void Vajra::runtime::log_runtime_error(const std::string &message)
 
 void Vajra::runtime::log_access_event(const std::string &method, const std::string &target, int status_code)
 {
+  if (access_log_disabled.load(std::memory_order_acquire))
+  {
+    return;
+  }
+
+  if (enqueue_log_event(LogEvent{
+          LogEventKind::access,
+          structured_logs_enabled.load(std::memory_order_acquire),
+          "",
+          method,
+          target,
+          status_code}))
+  {
+    return;
+  }
+
   if (structured_logging_enabled())
   {
     std::ostringstream line;

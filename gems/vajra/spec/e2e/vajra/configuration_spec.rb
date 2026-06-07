@@ -9,7 +9,7 @@ require_relative 'support'
 require 'tmpdir'
 require 'json'
 
-RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RSpec/DescribeClass
+RSpec.describe 'Vajra configuration', :e2e, :integration do
   def post_request(body)
     "POST / HTTP/1.1\r\n" \
       "Host: localhost\r\n" \
@@ -46,8 +46,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
       Vajra.start(
         workers: 2,
         threads: [1, 1],
-        queue_capacity: 10,
-        scheduler_policy: "least_loaded",
+        socket_queue_capacity: 10,
         log_level: "debug"
       )
     RUBY
@@ -67,8 +66,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
       Vajra.start(
         workers: 1,
         threads: [1, 1],
-        queue_capacity: 1,
-        scheduler_policy: "least_loaded",
+        socket_queue_capacity: 1,
         log_level: "debug"
       )
     RUBY
@@ -123,8 +121,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
       Vajra.start(
         workers: 1,
         threads: [2, 2],
-        queue_capacity: 10,
-        scheduler_policy: "least_loaded",
+        socket_queue_capacity: 10,
         log_level: "debug"
       )
     RUBY
@@ -250,6 +247,45 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     end
   end
 
+  def keep_alive_post_sequence_result(script:, request_bodies:)
+    managed_popen2e(
+      vajra_env(port: disposable_listener_port),
+      *inline_ruby_command(script),
+      chdir: VajraE2EHelpers::PACKAGE_ROOT
+    ) do |_stdin, output, wait_thread|
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
+      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+
+      begin
+        responses = request_bodies.map.with_index do |body, index|
+          socket.write(
+            "POST / HTTP/1.1\r\n" \
+            "Host: localhost\r\n" \
+            "Content-Type: text/plain\r\n" \
+            "Content-Length: #{body.bytesize}\r\n\r\n" \
+            "#{body}"
+          )
+          parse_http_response(
+            read_raw_http_response(
+              socket,
+              wait_thread:,
+              output:,
+              request_label: "keep_alive_post_sequence_result:#{index}"
+            )
+          )
+        end
+      ensure
+        socket.close unless socket.closed?
+      end
+
+      status = stop_process(wait_thread)
+      { exitstatus: status.exitstatus, responses:, output: "#{startup_output.join}#{output.read}" }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
   def open_request_sockets(port, count)
     Array.new(count) { TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, port) }
   end
@@ -274,7 +310,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     end
   end
 
-  def observability_control_plane_script
+  def observability_control_plane_script(threads: [1, 1])
     <<~RUBY
       require "vajra"
 
@@ -286,7 +322,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
 
       Vajra.start(
         workers: 1,
-        threads: [1, 1],
+        threads: #{threads.inspect},
         stats_path: "/__vajra/stats",
         metrics_endpoint: "/metrics",
         trace_enabled: true,
@@ -610,19 +646,6 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     expect(failure[:output]).to include('Expected an integer between 1 and 1024')
   end
 
-  it 'fails startup with actionable scheduler policy validation errors' do
-    failure = startup_failure_with_inline_start(
-      'RUBY_PORT' => disposable_listener_port.to_s,
-      'RUBY_SCHEDULER_POLICY' => 'round_robin'
-    )
-
-    expect(failure).to match(
-      exitstatus: be_positive,
-      output: a_string_including('Unable to start Vajra: invalid scheduler_policy option: round_robin')
-    )
-    expect(failure[:output]).to include('Expected: least_loaded')
-  end
-
   it 'fails startup with actionable request timeout validation errors' do
     failure = startup_failure_with_inline_start(
       'RUBY_PORT' => disposable_listener_port.to_s,
@@ -639,7 +662,6 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
   it 'trims native string environment overrides before validation' do
     request = request_response_with_env(
       env: {
-        'VAJRA_SCHEDULER_POLICY' => " least_loaded \n",
         'VAJRA_LOG_LEVEL' => " debug\t"
       }
     )
@@ -662,216 +684,20 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     expect(request[:output]).to include(
       'event=worker_registered',
       'event=worker_ready',
-      'event=booting',
-      'event=boot_complete',
-      'event=serving_entered',
-      'event=drain_requested',
       'event=stop_completed'
     )
   end
 
-  it 'routes concurrent requests across the least-loaded workers and reports scheduler activity in debug output' do
-    script = <<~RUBY
-      require "json"
-      require "vajra"
-
-      Vajra::Internal::RackExecution.install!(
-        lambda do |rack_env|
-          sleep 0.2
-          body = rack_env.fetch("rack.input").read
-          [200, { "Content-Type" => "application/json" }, [JSON.generate(pid: Process.pid, body: body)]]
-        end
-      )
-
-      Vajra.start(
-        workers: 2,
-        threads: [1, 1],
-        queue_capacity: 2,
-        scheduler_policy: "least_loaded",
-        log_level: "debug"
-      )
-    RUBY
-
-    request = lambda do |body|
-      "POST / HTTP/1.1\r\n" \
-        "Host: localhost\r\n" \
-        "Content-Type: text/plain\r\n" \
-        "Content-Length: #{body.bytesize}\r\n" \
-        "Connection: close\r\n\r\n" \
-        "#{body}"
-    end
-
-    result = concurrent_rack_app_request_results(
-      script:,
-      requests: [request.call('first'), request.call('second')]
+  it 'boots Vajra and serves requests' do
+    request = request_response_from_inline_start(
+      env: {
+        'RUBY_HOST' => '127.0.0.1',
+        'RUBY_PORT' => disposable_listener_port.to_s
+      }
     )
 
-    expect(result[:exitstatus]).to eq(0), result[:output]
-    payloads = result[:responses].map { |response| JSON.parse(parse_http_response(response)[:body]) }
-    expect(payloads.map { |payload| payload.fetch('pid') }.uniq.size).to eq(2)
-    expect(result[:output]).to include(
-      'event=request_admitted',
-      'policy=least_loaded',
-      'selected_worker=0',
-      'selected_worker=1'
-    )
-  end
-
-  it 'caps the single global FIFO queue and reports the hard-cap rejection in debug output' do
-    result = queue_capacity_result(script: queue_capacity_script)
-
-    expect(result[:exitstatus]).to eq(0), result[:output]
-    responses = result[:responses]
-    expect(responses.count { |response| response[:status_line] == 'HTTP/1.1 200 OK' }).to eq(1)
-    expect(responses.count { |response| response[:status_line] == 'HTTP/1.1 503 Service Unavailable' }).to eq(2)
-    expect(result[:output]).to include(
-      'event=request_admitted',
-      'event=queue_capacity_reached',
-      'queue_capacity=1'
-    )
-  end
-
-  it 'keeps the queued request in the global FIFO until request_timeout expires' do
-    script = <<~RUBY
-      require "vajra"
-
-      Vajra::Internal::RackExecution.install!(
-        lambda do |_rack_env|
-          sleep 1.2
-          [200, { "Content-Type" => "text/plain" }, ["OK"]]
-        end
-      )
-
-      Vajra.start(
-        workers: 1,
-        threads: [1, 1],
-        queue_capacity: 10,
-        request_timeout: 1,
-        scheduler_policy: "least_loaded",
-        log_level: "debug"
-      )
-    RUBY
-
-    request = lambda do |body|
-      "POST / HTTP/1.1\r\n" \
-        "Host: localhost\r\n" \
-        "Content-Type: text/plain\r\n" \
-        "Content-Length: #{body.bytesize}\r\n" \
-        "Connection: close\r\n\r\n" \
-        "#{body}"
-    end
-
-    result = concurrent_rack_app_request_results(
-      script:,
-      requests: [request.call('slow'), request.call('queued')]
-    )
-
-    expect(result[:exitstatus]).to eq(0), result[:output]
-    responses = result[:responses].map { |response| parse_http_response(response) }
-    expect(responses.count { |response| response[:status_line] == 'HTTP/1.1 200 OK' }).to eq(1)
-    expect(responses.count { |response| response[:status_line] == 'HTTP/1.1 408 Request Timeout' }).to eq(1)
-  end
-
-  it 'preserves FIFO order for queued requests under mixed latency' do
-    Dir.mktmpdir('vajra-scheduler-order') do |dir|
-      order_path = File.join(dir, 'request_order.txt')
-
-      result = staged_request_result(
-        script: fairness_order_script,
-        env: { 'ORDER_PATH' => order_path },
-        request_bodies: %w[slow-a slow-b queued-c queued-d]
-      )
-
-      expect(result[:exitstatus]).to eq(0), result[:output]
-      responses = result[:responses].map { |response| parse_http_response(response) }
-      expect(responses.map { |response| response[:status_line] }).to all(eq('HTTP/1.1 200 OK'))
-
-      start_order = File.readlines(order_path, chomp: true)
-      expect(start_order.index('queued-c')).to be < start_order.index('queued-d')
-    end
-  end
-
-  it 'keeps queued requests scheduler-owned when a worker times out' do
-    script = <<~RUBY
-      require "vajra"
-
-      Vajra::Internal::RackExecution.install!(
-        lambda do |rack_env|
-          body = rack_env.fetch("rack.input").read
-
-          case body
-          when "hang"
-            sleep 2
-          else
-            sleep 0.2
-          end
-
-          [200, { "Content-Type" => "text/plain" }, [body]]
-        end
-      )
-
-      Vajra.start(
-        workers: 2,
-        threads: [1, 1],
-        queue_capacity: 10,
-        request_timeout: 5,
-        worker_timeout: 1,
-        scheduler_policy: "least_loaded",
-        log_level: "debug"
-      )
-    RUBY
-
-    request = lambda do |body|
-      "POST / HTTP/1.1\r\n" \
-        "Host: localhost\r\n" \
-        "Content-Type: text/plain\r\n" \
-        "Content-Length: #{body.bytesize}\r\n" \
-        "Connection: close\r\n\r\n" \
-        "#{body}"
-    end
-
-    result = worker_replacement_request_results(
-      script:,
-      initial_requests: [request.call('hang'), request.call('fast'), request.call('queued')],
-      follow_up_request: request.call('after-replacement')
-    )
-
-    responses = result[:responses]
-    expect(responses.count { |response| response[:status_line] == 'HTTP/1.1 200 OK' }).to eq(2)
-    expect(responses.count { |response| response[:status_line] == 'HTTP/1.1 500 Internal Server Error' }).to eq(1)
-    # rubocop:disable Rails/Pluck
-    expect(responses.select { |response| response[:status_line] == 'HTTP/1.1 200 OK' }.map { |response| response[:body] })
-      .to include('fast', 'queued')
-    # rubocop:enable Rails/Pluck
-    expect(result[:follow_up_response]).to include(
-      status_line: 'HTTP/1.1 200 OK',
-      body: 'after-replacement'
-    )
-    expect(result[:output]).to include('event=worker_timeout')
-    expect(result[:output]).to include('worker process exited unexpectedly due to signal 9')
-    expect(result[:output]).to include(
-      'event=worker_exited',
-      'exit_classification=unexpected_signal',
-      'event=worker_replacement_pending',
-      'replacement_needed=true',
-      'event=worker_replacement_ready'
-    )
-  end
-
-  it 'caps active execution at the configured worker thread count under concurrent load' do
-    result = staged_request_result(
-      script: worker_thread_pool_script,
-      env: {},
-      request_bodies: %w[hold-a hold-b queued-c queued-d]
-    )
-
-    expect(result[:exitstatus]).to eq(0), result[:output]
-    payloads = result[:responses].map { |response| JSON.parse(parse_http_response(response)[:body]) }
-    expect(payloads.map { |payload| payload.fetch('max_active') }.max).to eq(2)
-    expect(payloads.map { |payload| payload.fetch('max_active') }).to all(be <= 2)
-    expect(payloads.first.fetch('started').first(2)).to match_array(%w[hold-a hold-b])
-    deepest_started_snapshot = payloads.max_by { |payload| payload.fetch('started').length }.fetch('started')
-    expect(deepest_started_snapshot).to include('queued-c', 'queued-d')
+    expect(request[:exitstatus]).to eq(0), request[:output]
+    expect(request[:response]).to include('HTTP/1.1 200 OK')
   end
 
   it 'applies the configured request head timeout to fragmented request headers' do
@@ -967,11 +793,51 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     expect(result[:response][:status_line]).to eq('HTTP/1.1 200 OK')
     expect(result[:response][:headers]).to include('content-type' => 'application/json')
     payload = JSON.parse(result[:response][:body])
-    expect(payload).to include('scheduler_policy' => 'least_loaded')
+    expect(payload).to include('master_pid', 'master_rss_bytes', 'profiling', 'socket_queue_capacity')
     expect(payload).to have_key('workers')
-    expect(payload.fetch('tracing')).to include(
-      'enabled' => true,
-      'service_name' => 'vajra-e2e'
+    expect(payload.fetch('workers').first).to include(
+      'pid',
+      'rss_bytes',
+      'unexpected_exit_count',
+      'recovery_deadline_nanoseconds'
+    )
+  end
+
+  it 'keeps the connection alive for repeated post requests with a request body' do
+    result = keep_alive_post_sequence_result(
+      script: <<~RUBY,
+        require "vajra"
+
+        Vajra::Internal::RackExecution.install!(
+          lambda do |rack_env|
+            body = rack_env.fetch("rack.input").read
+            [200, { "Content-Type" => "text/plain" }, [body.upcase]]
+          end
+        )
+
+        Vajra.start(workers: 1, threads: [1, 1])
+      RUBY
+      request_bodies: %w[first second]
+    )
+
+    expect(result[:exitstatus]).to eq(0), result[:output]
+    expect(result[:responses].size).to eq(2)
+    expect(result[:responses].map { |response| response[:status_line] }).to eq(['HTTP/1.1 200 OK', 'HTTP/1.1 200 OK'])
+    expect(result[:responses].map { |response| response[:body] }).to eq(%w[FIRST SECOND])
+    expect(result[:responses].all? { |response| response[:headers]['connection'] != 'close' }).to be(true)
+  end
+
+  it 'exposes worker execution capacity when max threads exceed min threads' do
+    result = control_plane_response_result(
+      script: observability_control_plane_script(threads: [1, 2]),
+      path: '/__vajra/stats'
+    )
+
+    expect(result[:exitstatus]).to eq(0), result[:output]
+    payload = JSON.parse(result[:response][:body])
+    expect(payload.fetch('workers').first).to include(
+      'active_execution_count' => 0,
+      'idle_execution_count' => 2
     )
   end
 
@@ -982,11 +848,10 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do # rubocop:disable RS
     expect(result[:response][:status_line]).to eq('HTTP/1.1 200 OK')
     expect(result[:response][:headers]).to include('content-type' => 'text/plain; version=0.0.4')
     expect(result[:response][:body]).to include(
-      'vajra_scheduler_queue_depth',
-      'vajra_scheduler_queue_capacity',
-      'vajra_worker_active_channels',
+      'vajra_worker_active_connections',
       'vajra_worker_active_executions',
-      'vajra_tracing_enabled'
+      'vajra_worker_idle_executions',
+      'vajra_worker_accept_total'
     )
   end
 end

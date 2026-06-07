@@ -40,7 +40,7 @@ module Vajra
         max_keepalive_requests
         linger_timeout
         max_connections
-        queue_capacity
+        socket_queue_capacity
         max_requests_per_worker
         http2_max_concurrent_streams
         http2_initial_window_size
@@ -53,7 +53,6 @@ module Vajra
         host
         bind
         unix_socket
-        scheduler_policy
         tls_certificate
         tls_private_key
         tls_ca_certificate
@@ -81,6 +80,7 @@ module Vajra
       ].freeze
     }.freeze
     DOCUMENTED_SERVER_SETTINGS = SETTING_TYPE_GROUPS.values.flatten.freeze
+    NULLABLE_STRING_SETTINGS = %i[access_log].freeze
     ARRAY_SETTING_NORMALIZERS = {
       threads: lambda do |values|
         raise Error, 'threads expects one or two integer values' unless [1, 2].include?(values.length)
@@ -115,6 +115,7 @@ module Vajra
       launcher.load(config_path: parse_args(argv.dup), default_config_path: DEFAULT_CONFIG_PATH)
 
       stdout.puts Vajra.header
+      stdout.flush
       launcher.start
     end
 
@@ -169,7 +170,6 @@ module Vajra
         }
       end
 
-      # :reek:ControlParameter
       def app(*args, &block)
         raise Error, 'app expects at most one Rack app argument' if args.length > 1
         raise Error, 'app requires either a Rack app argument or a block' if args.empty? && !block
@@ -241,6 +241,7 @@ module Vajra
         raise Error, "#{directive} expects a single value" unless values.length == 1
 
         first_value = values.first
+        return nil if NULLABLE_STRING_SETTINGS.include?(directive) && first_value.nil?
         return Integer(first_value) if setting_type_include?(:integer, directive)
         return String(first_value) if setting_type_include?(:string, directive)
 

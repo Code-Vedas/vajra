@@ -16,7 +16,7 @@ unless ENV['NO_COVERAGE'] == '1'
 end
 
 require_relative '../lib/vajra/version'
-require 'vajra'
+require_relative '../lib/vajra'
 
 RSpec.configure do |config|
   # Enable flags like --only-failures and --next-failure

@@ -7,6 +7,9 @@ plugins:
 AllCops:
   NewCops: enable
   TargetRubyVersion: 3.2
+  Exclude:
+    - 'tmp/**/*'
+    - 'performance/tmp/**/*'
 
 Layout/LineLength:
   Max: 160
@@ -19,15 +22,22 @@ Metrics/MethodLength:
 
 Metrics/ModuleLength:
   Max: 300
+  Exclude:
+    - spec/e2e/vajra/support/http_helpers.rb
+    - performance/Rakefile
 
 Metrics/ParameterLists:
   Max: 10
 
 Metrics/ClassLength:
-  Max: 275
+  Max: 300
+  Exclude:
+    - performance/Rakefile
 
 Metrics/AbcSize:
   Max: 30
+  Exclude:
+    - spec/e2e/vajra/support/http_helpers.rb
 
 Metrics/CyclomaticComplexity:
   Max: 10
@@ -49,3 +59,44 @@ RSpec/NestedGroups:
 
 Style/Documentation:
   Enabled: false
+
+Style/GlobalVars:
+  Exclude:
+    - ext/vajra/extconf.rb
+
+Rails/NegateInclude:
+  Exclude:
+    - lib/vajra.rb
+
+Rails/IndexWith:
+  Exclude:
+    - spec/e2e/spec_helper.rb
+
+Rails/RakeEnvironment:
+  Exclude:
+    - performance/Rakefile
+
+Rails/Pluck:
+  Exclude:
+    - spec/e2e/vajra/configuration_spec.rb
+
+ThreadSafety/NewThread:
+  Exclude:
+    - performance/Rakefile
+    - spec/e2e/vajra/support/http_helpers.rb
+
+ThreadSafety/DirChdir:
+  Exclude:
+    - spec/vajra/railtie_spec.rb
+
+RSpec/DescribeClass:
+  Exclude:
+    - spec/e2e/vajra/configuration_spec.rb
+    - spec/e2e/vajra/error_responses_spec.rb
+    - spec/e2e/vajra/framework_compatibility_spec.rb
+    - spec/e2e/vajra/http_helpers_spec.rb
+    - spec/e2e/vajra/lifecycle_spec.rb
+    - spec/e2e/vajra/process_helpers_spec.rb
+    - spec/e2e/vajra/rack_env_integration_spec.rb
+    - spec/e2e/vajra/runtime_contract_spec.rb
+    - spec/vajra/railtie_spec.rb

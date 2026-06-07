@@ -21,6 +21,20 @@ namespace Vajra
 {
   namespace request
   {
+    enum class RequestProcessingOutcome
+    {
+      await_read,
+      keep_alive,
+      close
+    };
+
+    struct RequestProcessingResult
+    {
+      RequestProcessingOutcome outcome = RequestProcessingOutcome::close;
+      std::string buffered_bytes = "";
+      bool first_request = true;
+    };
+
     class RequestProcessor
     {
     public:
@@ -36,6 +50,11 @@ namespace Vajra
           std::shared_ptr<const RequestExecutor> request_executor = nullptr);
 
       void handle(int client_fd, const SocketContext &socket_context) const;
+      RequestProcessingResult handle_one(
+          int client_fd,
+          const SocketContext &socket_context,
+          std::string buffered_bytes = "",
+          bool first_request = true) const;
 
     private:
       Vajra::response::ConnectionBehavior connection_behavior_for(const ParsedRequest &request) const;

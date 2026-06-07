@@ -34,9 +34,8 @@ module DocumentedServerOptions
         config.max_keepalive_requests 1000
         config.linger_timeout 5
         config.max_connections 256
-        config.queue_capacity 5000
+        config.socket_queue_capacity 5000
         config.max_requests_per_worker 10_000
-        config.scheduler_policy "least_loaded"
         config.tls_certificate "config/certs/server.crt"
         config.tls_private_key "config/certs/server.key"
         config.tls_ca_certificate "config/certs/ca.crt"
@@ -81,8 +80,7 @@ module DocumentedServerOptions
         config.persistent_timeout 30
         config.request_head_timeout 15
         config.max_connections 256
-        config.queue_capacity 5000
-        config.scheduler_policy "least_loaded"
+        config.socket_queue_capacity 5000
         config.log_level "info"
         config.access_log "log/vajra-access.log"
         config.error_log "log/vajra-error.log"
@@ -128,11 +126,10 @@ module DocumentedServerOptions
       request_timeout: 25,
       first_data_timeout: 30,
       persistent_timeout: 30,
-      queue_capacity: 5000,
+      socket_queue_capacity: 5000,
       request_body_timeout: 30,
       request_head_timeout: 15,
       reuse_port: true,
-      scheduler_policy: 'least_loaded',
       shutdown_timeout: 60,
       state_path: 'tmp/vajra.state',
       stats_path: '/__vajra/stats',
@@ -167,8 +164,7 @@ module DocumentedServerOptions
       persistent_timeout: 30,
       request_head_timeout: 15,
       max_connections: 256,
-      queue_capacity: 5000,
-      scheduler_policy: 'least_loaded',
+      socket_queue_capacity: 5000,
       log_level: 'info',
       access_log: 'log/vajra-access.log',
       error_log: 'log/vajra-error.log',

@@ -7,7 +7,7 @@
 
 require_relative 'support'
 
-RSpec.describe 'Vajra runtime contract', :e2e, :integration do # rubocop:disable RSpec/DescribeClass
+RSpec.describe 'Vajra runtime contract', :e2e, :integration do
   it 'serves the baseline close-delimited success response' do
     result = request_response
     response = parse_http_response(result[:response])

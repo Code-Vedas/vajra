@@ -66,10 +66,9 @@ module VajraE2EStartupHelpers
       if ENV.key?("RUBY_THREADS")
         options[:threads] = ENV.fetch("RUBY_THREADS").split(",").map { |value| Integer(value.strip) }
       end
-      if ENV.key?("RUBY_QUEUE_CAPACITY")
-        options[:queue_capacity] = Integer(ENV.fetch("RUBY_QUEUE_CAPACITY"))
+      if ENV.key?("RUBY_SOCKET_QUEUE_CAPACITY")
+        options[:socket_queue_capacity] = Integer(ENV.fetch("RUBY_SOCKET_QUEUE_CAPACITY"))
       end
-      options[:scheduler_policy] = ENV["RUBY_SCHEDULER_POLICY"] if ENV.key?("RUBY_SCHEDULER_POLICY")
       options[:request_timeout] = Integer(ENV.fetch("RUBY_REQUEST_TIMEOUT")) if ENV.key?("RUBY_REQUEST_TIMEOUT")
       if ENV.key?("RUBY_REQUEST_HEAD_TIMEOUT")
         options[:request_head_timeout] = Integer(ENV.fetch("RUBY_REQUEST_HEAD_TIMEOUT"))
@@ -88,7 +87,7 @@ module VajraE2EStartupHelpers
     RUBY
   end
 
-  def programmatic_shutdown(max_attempts: 3, stop_before_start: false)
+  def programmatic_shutdown(max_attempts: 3, stop_before_start: false, env: {})
     script = <<~RUBY
       require "socket"
       require "timeout"
@@ -100,15 +99,10 @@ module VajraE2EStartupHelpers
       Thread.report_on_exception = false
 
       def server_ready?(host, port)
-        Timeout.timeout(0.1) do
-          socket = TCPSocket.new(host, port)
-          socket.write("GET / HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n")
-          response = socket.readpartial(1024)
-          response.include?("HTTP/1.1 200 OK")
-        ensure
-          socket&.close
-        end
-      rescue Timeout::Error, Errno::ECONNREFUSED, Errno::EHOSTUNREACH, Errno::ECONNRESET, EOFError
+        socket = TCPSocket.new(host, port)
+        socket.close
+        true
+      rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH, Errno::EADDRNOTAVAIL
         false
       end
 
@@ -140,7 +134,7 @@ module VajraE2EStartupHelpers
         server&.close
       end
       result = managed_popen2e(
-        vajra_env(port: selected_port), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT
+        vajra_env(port: selected_port).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT
       ) do |_stdin, output, wait_thread|
         status = Timeout.timeout(15) { wait_thread.value }
         { exitstatus: status.exitstatus, output: output.read, port: selected_port }

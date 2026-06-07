@@ -1,17 +1,17 @@
 ---
 title: Troubleshooting
-nav_order: 6
+nav_order: 7
 permalink: /troubleshooting/
 ---
 
 # Troubleshooting
 
-Use this page to triage package setup, extension build drift, executable boot
-failures, docs-site problems, and small repository-shape regressions.
+Use this page to triage package setup, native extension builds, executable boot
+failures, docs-site problems, and repository checks.
 
 The fastest way to use this page is to identify the symptom first, then jump to
 the boundary that owns it: package setup, native build, executable boot, docs
-build, or repository validation.
+build, or repository checks.
 
 ## Common Starting Points
 
@@ -19,7 +19,7 @@ build, or repository validation.
 - if the executable exits before binding the port, start with package setup and
   local runtime boot
 - if docs changes do not render, start with the Jekyll workflow under `docs/`
-- if repository checks drift, start with `scripts/run-all`
+- if repository checks fail, start with `scripts/run-all`
 
 ## Native Extension Does Not Load
 
@@ -43,7 +43,7 @@ If local startup fails because the listener cannot bind:
 
 ## Executable Exits Before Serving Requests
 
-Use the package-local validation flow:
+Use the package-local check flow:
 
 ```bash
 cd gems/vajra
@@ -51,8 +51,7 @@ bin/setup
 bin/rspec-unit
 ```
 
-That path validates both the extension load boundary and the committed startup
-smoke behavior.
+That path checks both the extension load boundary and startup smoke behavior.
 
 ## Application Does Not Boot
 
@@ -77,8 +76,8 @@ confirm that:
 - the app is not forcing another Rack server through conflicting environment
   variables or server flags
 
-Rails applications using Vajra do not need `puma` just to satisfy the server
-command.
+Rails applications using Vajra do not need another Rack server just to satisfy
+the server command.
 
 ## Lifecycle Log Looks Like The Master Is Serving Requests
 
@@ -98,6 +97,39 @@ It means:
 
 - the native runtime owns the listener and entered serving state
 - the Ruby worker still owns application request execution
+
+## OpenTelemetry Output Is Empty
+
+Tracing is soft-optional. If `trace_enabled` is true but no spans are exported:
+
+- install the OpenTelemetry SDK and OTLP exporter gems in the application bundle
+- set `trace_otel_owner true` only when Vajra should create the global provider
+- check `OTEL_EXPORTER_OTLP_ENDPOINT` or `VAJRA_TRACE_ENDPOINT`
+- set `OTEL_TRACES_EXPORTER=otlp`; `none` disables trace exporting
+- confirm the stats endpoint reports tracing as enabled and available
+- confirm the collector accepts OTLP/HTTP on the configured endpoint
+
+When an application already owns OpenTelemetry setup, leave
+`trace_otel_owner` disabled and configure the provider in the application.
+
+If the collector is reachable but still empty, check the collector pipeline has
+an OTLP receiver and a traces pipeline. For local collector testing, use
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318`.
+
+## Access Logs Do Not Rotate
+
+Vajra reopens configured access and error log files on `SIGUSR1`:
+
+```bash
+kill -USR1 <vajra-worker-pid>
+```
+
+`/dev/null` and `nil` access logs remain disabled. If a reopened file cannot be
+opened, Vajra keeps the previous sink and writes a diagnostic to stderr.
+
+If access or error logs do not open on startup, check that the parent directory
+exists and that the runtime user can write to it. Use an absolute path when the
+working directory differs between local execution, Rails, and process managers.
 
 ## Clean Checkout Fails
 
@@ -119,13 +151,12 @@ cd docs
 bundle exec jekyll build
 ```
 
-If the docs build fails, fix the problem in `docs/` before treating the change as
-complete. Repository and package docs agree on canonical paths, commands, and
-product naming.
+If the docs build fails, fix the problem in `docs/`. Repository and package docs
+use the same canonical paths, commands, and product naming.
 
-## Small Shape Drift
+## Repository Shape
 
-If a change leaves stale names, wrong paths, or missing support files:
+If a file contains stale names, wrong paths, or missing support files:
 
 - compare the touched folder against the repository conventions
 - keep `gems/vajra` as the only gem package

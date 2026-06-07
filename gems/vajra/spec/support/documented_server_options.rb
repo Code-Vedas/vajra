@@ -49,6 +49,7 @@ module DocumentedServerOptions
         config.http2_header_table_size 4096
         config.log_level "info"
         config.access_log "log/vajra-access.log"
+        config.access_log_format "json"
         config.error_log "log/vajra-error.log"
         config.structured_logs
         config.stats_path "/__vajra/stats"
@@ -56,6 +57,7 @@ module DocumentedServerOptions
         config.trace_enabled
         config.trace_endpoint "http://127.0.0.1:4318/v1/traces"
         config.trace_service_name "vajra-test"
+        config.trace_otel_owner
         config.pidfile "tmp/pids/vajra.pid"
         config.state_path "tmp/vajra.state"
         config.control_socket "tmp/vajra-control.sock"
@@ -83,6 +85,7 @@ module DocumentedServerOptions
         config.socket_queue_capacity 5000
         config.log_level "info"
         config.access_log "log/vajra-access.log"
+        config.access_log_format "json"
         config.error_log "log/vajra-error.log"
         config.structured_logs
         config.stats_path "/__vajra/stats"
@@ -90,6 +93,7 @@ module DocumentedServerOptions
         config.trace_enabled
         config.trace_endpoint "http://127.0.0.1:4318/v1/traces"
         config.trace_service_name "vajra-test"
+        config.trace_otel_owner
         config.max_request_head_bytes 2048
         config.app ->(_env) { [200, { "Content-Type" => "text/plain" }, ["OK"]] }
       end
@@ -99,6 +103,7 @@ module DocumentedServerOptions
   def start_options
     {
       access_log: 'log/vajra-access.log',
+      access_log_format: 'json',
       alpn_protocols: %w[h2 http/1.1],
       backlog: 1024,
       bind: 'tcp://127.0.0.1:4321',
@@ -136,6 +141,7 @@ module DocumentedServerOptions
       structured_logs: true,
       trace_enabled: true,
       trace_endpoint: 'http://127.0.0.1:4318/v1/traces',
+      trace_otel_owner: true,
       trace_service_name: 'vajra-test',
       threads: [5, 5],
       tls: true,
@@ -167,12 +173,14 @@ module DocumentedServerOptions
       socket_queue_capacity: 5000,
       log_level: 'info',
       access_log: 'log/vajra-access.log',
+      access_log_format: 'json',
       error_log: 'log/vajra-error.log',
       structured_logs: true,
       stats_path: '/__vajra/stats',
       metrics_endpoint: '/metrics',
       trace_enabled: true,
       trace_endpoint: 'http://127.0.0.1:4318/v1/traces',
+      trace_otel_owner: true,
       trace_service_name: 'vajra-test',
       max_request_head_bytes: 2048
     }

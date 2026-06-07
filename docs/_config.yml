@@ -10,7 +10,7 @@ description: >-
   operations.
 url: https://vajra.codevedas.com
 baseurl: ""
-logo: /assets/images/logo.svg
+logo: /assets/images/logo.png
 repository: Code-Vedas/vajra
 theme: just-the-docs
 markdown: kramdown

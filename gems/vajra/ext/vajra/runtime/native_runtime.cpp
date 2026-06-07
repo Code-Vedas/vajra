@@ -2987,7 +2987,7 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
       recovery_policy_ = RecoveryPolicy{kReplacementFailureLimit};
       debug_logging_.store(debug_logging, std::memory_order_release);
     }
-    configure_runtime_logging(config.structured_logs, config.access_log, config.error_log);
+    configure_runtime_logging(config.structured_logs, config.access_log, config.error_log, config.access_log_format);
     configure_runtime_tracing(config.trace_enabled, config.trace_endpoint, config.trace_service_name);
     const BootContractResult master_boot_result = BootContract::run(
         BootContractConfig{config.port, config.max_request_head_bytes, kMasterPreloadRuntimeRole});
@@ -3256,11 +3256,13 @@ void VajraNative::start(
     std::string access_log,
     std::string error_log,
     bool structured_logs,
+    std::string access_log_format,
     std::string stats_path,
     std::string metrics_endpoint,
     bool trace_enabled,
     std::string trace_endpoint,
-    std::string trace_service_name)
+    std::string trace_service_name,
+    bool trace_otel_owner)
 {
   Vajra::runtime::NativeRuntime::instance().start(Vajra::runtime::RuntimeConfig{
       std::move(host),
@@ -3280,11 +3282,13 @@ void VajraNative::start(
       std::move(access_log),
       std::move(error_log),
       structured_logs,
+      std::move(access_log_format),
       std::move(stats_path),
       std::move(metrics_endpoint),
       trace_enabled,
       std::move(trace_endpoint),
-      std::move(trace_service_name)});
+      std::move(trace_service_name),
+      trace_otel_owner});
 }
 
 void VajraNative::stop()

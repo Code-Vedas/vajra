@@ -81,6 +81,7 @@ namespace Vajra
 
     RuntimeState *current_runtime_state();
     WorkerRuntimeState *current_worker_runtime_state();
+    std::size_t current_worker_index();
 
     void set_runtime_listener_fd(int listener_fd);
     int runtime_listener_fd();

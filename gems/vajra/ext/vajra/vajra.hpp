@@ -36,11 +36,13 @@ namespace VajraNative
       std::string access_log = "",
       std::string error_log = "",
       bool structured_logs = false,
+      std::string access_log_format = "",
       std::string stats_path = "",
       std::string metrics_endpoint = "",
       bool trace_enabled = false,
       std::string trace_endpoint = "",
-      std::string trace_service_name = "");
+      std::string trace_service_name = "",
+      bool trace_otel_owner = false);
   void stop();
 }
 

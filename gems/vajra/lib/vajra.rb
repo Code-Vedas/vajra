@@ -88,11 +88,13 @@ module Vajra
       access_log
       error_log
       structured_logs
+      access_log_format
       stats_path
       metrics_endpoint
       trace_enabled
       trace_endpoint
       trace_service_name
+      trace_otel_owner
       pidfile
       state_path
       control_socket
@@ -117,11 +119,13 @@ module Vajra
       access_log
       error_log
       structured_logs
+      access_log_format
       stats_path
       metrics_endpoint
       trace_enabled
       trace_endpoint
       trace_service_name
+      trace_otel_owner
     ].freeze
     UNIMPLEMENTED_START_OPTION_KEYS = (DOCUMENTED_START_OPTION_KEYS - NATIVE_START_OPTION_KEYS).freeze
 
@@ -148,6 +152,7 @@ module Vajra
     end
 
     def stop
+      Vajra::Internal::Tracing.shutdown!
       __native_stop__
     end
 

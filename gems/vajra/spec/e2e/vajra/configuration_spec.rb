@@ -247,6 +247,183 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
     end
   end
 
+  def json_access_log_result
+    Dir.mktmpdir('vajra-access-log') do |root|
+      access_log_path = File.join(root, 'access.log')
+      script = <<~RUBY
+        require "vajra"
+
+        Vajra::Internal::RackExecution.install!(
+          lambda do |_rack_env|
+            [200, { "Content-Type" => "text/plain" }, ["OK"]]
+          end
+        )
+
+        Vajra.start(
+          workers: 1,
+          threads: [1, 1],
+          access_log: ENV.fetch("ACCESS_LOG_PATH"),
+          access_log_format: "json",
+          structured_logs: true
+        )
+      RUBY
+
+      managed_popen2e(
+        vajra_env(port: disposable_listener_port).merge('ACCESS_LOG_PATH' => access_log_path),
+        *inline_ruby_command(script),
+        chdir: VajraE2EHelpers::PACKAGE_ROOT
+      ) do |_stdin, output, wait_thread|
+        startup_output = []
+        selected_port = wait_for_banner(output, captured_lines: startup_output)
+
+        socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+        begin
+          socket.write(
+            "GET /observability HTTP/1.1\r\n" \
+            "Host: example.test\r\n" \
+            "User-Agent: vajra-e2e\r\n" \
+            "Referer: https://example.test/source\r\n" \
+            "X-Request-Id: request-123\r\n" \
+            "Traceparent: 00-11111111111111111111111111111111-2222222222222222-01\r\n" \
+            "Connection: close\r\n\r\n"
+          )
+          response = parse_http_response(
+            read_raw_http_response(
+              socket,
+              wait_thread:,
+              output:,
+              request_label: 'json_access_log_result'
+            )
+          )
+        ensure
+          socket.close unless socket.closed?
+        end
+
+        status = stop_process(wait_thread)
+        lines = File.exist?(access_log_path) ? File.readlines(access_log_path, chomp: true) : []
+        { exitstatus: status.exitstatus, response:, lines:, output: "#{startup_output.join}#{output.read}" }
+      ensure
+        cleanup_process(wait_thread, output)
+      end
+    end
+  end
+
+  def otel_observability_script
+    <<~RUBY
+      require "json"
+      require "vajra"
+
+      module Kernel
+        alias vajra_original_require require
+        def require(name)
+          return true if name == "opentelemetry/sdk"
+
+          vajra_original_require(name)
+        end
+      end
+
+      module OpenTelemetry
+        class << self
+          attr_accessor :tracer_provider
+        end
+
+        def self.propagation
+          @propagation ||= Class.new { def extract(carrier) = carrier }.new
+        end
+
+        module Trace
+          class Status
+            def self.ok = "ok"
+            def self.error(message) = ["error", message]
+          end
+        end
+      end
+
+      class FakeSpanContext
+        def hex_trace_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        def hex_span_id = "bbbbbbbbbbbbbbbb"
+      end
+
+      class FakeSpan
+        attr_reader :attributes
+        attr_accessor :status
+        def initialize = @attributes = {}
+        def context = FakeSpanContext.new
+        def set_attribute(name, value) = @attributes[name] = value
+        def record_exception(error) = @attributes["exception.message"] = error.message
+      end
+
+      class FakeTracer
+        def in_span(name, **options)
+          span = FakeSpan.new
+          yield span
+        ensure
+          File.open(ENV.fetch("SPAN_LOG_PATH"), "a") do |file|
+            file.puts(JSON.generate(name:, attributes: options.fetch(:attributes), status: span&.status))
+          end
+        end
+      end
+
+      OpenTelemetry.tracer_provider = Class.new { def tracer(_service_name) = FakeTracer.new }.new
+      Vajra::Internal::RackExecution.install!(lambda { |_rack_env| [200, { "Content-Type" => "text/plain" }, ["OK"]] })
+      Vajra.start(
+        workers: 1,
+        threads: [1, 1],
+        access_log: ENV.fetch("ACCESS_LOG_PATH"),
+        access_log_format: "json",
+        structured_logs: true,
+        trace_enabled: true,
+        trace_service_name: "vajra-e2e"
+      )
+    RUBY
+  end
+
+  def otel_observability_request(selected_port, wait_thread, output, request, label)
+    socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+    socket.write(request)
+    parse_http_response(read_raw_http_response(socket, wait_thread:, output:, request_label: label))
+  ensure
+    socket.close unless socket.nil? || socket.closed?
+  end
+
+  def otel_observability_result
+    Dir.mktmpdir('vajra-otel-observability') do |root|
+      access_log_path = File.join(root, 'access.log')
+      span_log_path = File.join(root, 'spans.jsonl')
+      otel_observability_result_from_paths(access_log_path, span_log_path)
+    end
+  end
+
+  def otel_observability_result_from_paths(access_log_path, span_log_path)
+    managed_popen2e(
+      vajra_env(port: disposable_listener_port).merge('ACCESS_LOG_PATH' => access_log_path, 'SPAN_LOG_PATH' => span_log_path),
+      *inline_ruby_command(otel_observability_script),
+      chdir: VajraE2EHelpers::PACKAGE_ROOT
+    ) do |_stdin, output, wait_thread|
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
+      normal_response = otel_observability_request(
+        selected_port,
+        wait_thread,
+        output,
+        "GET /active-span HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n",
+        'otel_observability_result:normal'
+      )
+      malformed_response = otel_observability_request(selected_port, wait_thread, output, "NOT_HTTP\r\n\r\n", 'otel_observability_result:malformed')
+      status = stop_process(wait_thread)
+      {
+        exitstatus: status.exitstatus,
+        normal_response:,
+        malformed_response:,
+        access_lines: File.exist?(access_log_path) ? File.readlines(access_log_path, chomp: true) : [],
+        span_lines: File.exist?(span_log_path) ? File.readlines(span_log_path, chomp: true) : [],
+        output: "#{startup_output.join}#{output.read}"
+      }
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
   def keep_alive_post_sequence_result(script:, request_bodies:)
     managed_popen2e(
       vajra_env(port: disposable_listener_port),
@@ -853,5 +1030,61 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
       'vajra_worker_idle_executions',
       'vajra_worker_accept_total'
     )
+  end
+
+  it 'emits structured access logs with request metadata and trace correlation' do
+    result = json_access_log_result
+
+    expect(result[:exitstatus]).to eq(0), result[:output]
+    expect(result[:response][:status_line]).to eq('HTTP/1.1 200 OK')
+    access_event = JSON.parse(result[:lines].find { |line| line.include?('"component":"access"') })
+    expect(access_event).to include(
+      'component' => 'access',
+      'method' => 'GET',
+      'target' => '/observability',
+      'status' => 200,
+      'bytes_written' => 2,
+      'remote_addr' => VajraE2EHelpers::LISTENER_HOST,
+      'protocol' => 'HTTP/1.1',
+      'host' => 'example.test',
+      'user_agent' => 'vajra-e2e',
+      'referer' => 'https://example.test/source',
+      'request_id' => 'request-123',
+      'connection_outcome' => 'close',
+      'trace_id' => '11111111111111111111111111111111',
+      'span_id' => '2222222222222222'
+    )
+    expect(access_event.fetch('duration_nanoseconds')).to be > 0
+    expect(access_event.fetch('worker_pid')).to be > 0
+    expect(access_event.fetch('worker_index')).to eq(0)
+  end
+
+  it 'correlates access logs with active OTel span ids and emits native error spans' do
+    result = otel_observability_result
+
+    expect(result[:exitstatus]).to eq(0), result[:output]
+    expect(result[:normal_response][:status_line]).to eq('HTTP/1.1 200 OK')
+    expect(result[:normal_response][:headers]).not_to include(
+      'x-vajra-internal-trace-id',
+      'x-vajra-internal-span-id'
+    )
+    expect(result[:malformed_response][:status_line]).to eq('HTTP/1.1 400 Bad Request')
+
+    access_event = JSON.parse(result[:access_lines].find { |line| line.include?('/active-span') })
+    expect(access_event).to include(
+      'trace_id' => 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      'span_id' => 'bbbbbbbbbbbbbbbb'
+    )
+
+    spans = result[:span_lines].map { |line| JSON.parse(line) }
+    native_error_span = spans.find do |span|
+      span.fetch('attributes')['vajra.request.outcome'] == 'request_parse_error'
+    end
+    expect(native_error_span).not_to be_nil
+    expect(native_error_span.fetch('attributes')).to include(
+      'http.response.status_code' => 400,
+      'vajra.response.sent' => true
+    )
+    expect(native_error_span.fetch('status').first).to eq('error')
   end
 end

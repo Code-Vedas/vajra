@@ -60,6 +60,7 @@ module Vajra
         tls_min_version
         log_level
         access_log
+        access_log_format
         error_log
         stats_path
         metrics_endpoint
@@ -77,6 +78,7 @@ module Vajra
         http2
         structured_logs
         trace_enabled
+        trace_otel_owner
       ].freeze
     }.freeze
     DOCUMENTED_SERVER_SETTINGS = SETTING_TYPE_GROUPS.values.flatten.freeze

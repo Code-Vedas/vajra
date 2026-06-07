@@ -24,6 +24,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <signal.h>
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
@@ -71,6 +72,7 @@ namespace
     bool trace_enabled = false;
     bool trace_available = false;
     bool access_log_disabled = false;
+    std::string access_log_format;
     std::string access_log_path;
     std::string error_log_path;
     std::string trace_endpoint;
@@ -93,9 +95,7 @@ namespace
     LogEventKind kind = LogEventKind::runtime;
     bool structured = false;
     std::string line;
-    std::string method;
-    std::string target;
-    int status_code = 0;
+    Vajra::runtime::AccessLogEvent access;
   };
 
   struct LogNode
@@ -131,8 +131,10 @@ namespace
   AsyncLoggerState async_logger;
   std::atomic_bool access_log_disabled{false};
   std::atomic_bool structured_logs_enabled{false};
+  std::atomic_bool reopen_requested{false};
 #ifdef VAJRA_RUNTIME_HAS_RUBY
   VALUE runtime_lifecycle_callback = Qnil;
+  VALUE runtime_request_observability_callback = Qnil;
 
   struct LifecycleCallbackContext
   {
@@ -148,6 +150,17 @@ namespace
     bool terminal_replacement_failure = false;
     bool replacement_needed = false;
     int exit_detail = 0;
+    std::string timestamp;
+  };
+
+  struct RequestObservabilityCallbackContext
+  {
+    VALUE callback = Qnil;
+    Vajra::runtime::AccessLogEvent event;
+    std::string outcome;
+    std::string failure_kind;
+    bool response_sent = false;
+    std::string error_message;
     std::string timestamp;
   };
 #endif
@@ -344,25 +357,242 @@ namespace
     should_close = false;
   }
 
+  std::string dash_if_empty(const std::string &value)
+  {
+    return value.empty() ? "-" : value;
+  }
+
+  std::string access_format()
+  {
+    std::lock_guard<std::mutex> lock(logging_mutex);
+    if (!logging_config.access_log_format.empty())
+    {
+      return logging_config.access_log_format;
+    }
+    return logging_config.structured_logs ? "json" : "text";
+  }
+
+  void signal_reopen_handler(int)
+  {
+    reopen_requested.store(true, std::memory_order_release);
+  }
+
+  void install_reopen_signal_handler()
+  {
+    struct sigaction action {};
+    action.sa_handler = signal_reopen_handler;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESTART;
+    (void)sigaction(SIGUSR1, &action, nullptr);
+  }
+
+  bool reopen_configured_logs_locked(std::string &warning_message)
+  {
+    int next_access_fd = STDOUT_FILENO;
+    bool next_close_access_fd = false;
+    int next_error_fd = STDERR_FILENO;
+    bool next_close_error_fd = false;
+
+    if (!logging_config.access_log_path.empty() && !logging_config.access_log_disabled)
+    {
+      next_access_fd = open_log_fd(logging_config.access_log_path);
+      if (next_access_fd >= 0)
+      {
+        next_close_access_fd = true;
+      }
+      else
+      {
+        warning_message = "unable to reopen access_log at " + escaped_log_value(logging_config.access_log_path) +
+                          "; keeping previous access log sink";
+        next_access_fd = logging_config.access_log_fd;
+      }
+    }
+
+    if (!logging_config.error_log_path.empty())
+    {
+      next_error_fd = open_log_fd(logging_config.error_log_path);
+      if (next_error_fd >= 0)
+      {
+        next_close_error_fd = true;
+      }
+      else
+      {
+        if (!warning_message.empty())
+        {
+          warning_message.append("; ");
+        }
+        warning_message.append("unable to reopen error_log at " + escaped_log_value(logging_config.error_log_path) +
+                               "; keeping previous error log sink");
+        next_error_fd = logging_config.error_log_fd;
+      }
+    }
+
+    if (next_close_access_fd)
+    {
+      close_configured_fd(logging_config.access_log_fd, logging_config.close_access_log_fd, STDOUT_FILENO);
+      logging_config.access_log_fd = next_access_fd;
+      logging_config.close_access_log_fd = true;
+    }
+    if (next_close_error_fd)
+    {
+      close_configured_fd(logging_config.error_log_fd, logging_config.close_error_log_fd, STDERR_FILENO);
+      logging_config.error_log_fd = next_error_fd;
+      logging_config.close_error_log_fd = true;
+    }
+    return next_close_access_fd || next_close_error_fd;
+  }
+
+  void service_reopen_signal_if_requested()
+  {
+    if (!reopen_requested.exchange(false, std::memory_order_acq_rel))
+    {
+      return;
+    }
+
+    std::string warning_message;
+    {
+      std::lock_guard<std::mutex> lock(logging_mutex);
+      if (reopen_configured_logs_locked(warning_message))
+      {
+        async_logger.access_log_fd = logging_config.access_log_fd;
+        async_logger.error_log_fd = logging_config.error_log_fd;
+        async_logger.runtime_log_fd = logging_config.error_log_path.empty() ? STDOUT_FILENO : logging_config.error_log_fd;
+      }
+    }
+    if (!warning_message.empty())
+    {
+      write_line_fd(STDERR_FILENO, "[Vajra][error] " + Vajra::runtime::utc_timestamp() + ' ' + warning_message);
+    }
+  }
+
+  std::string common_access_line(const Vajra::runtime::AccessLogEvent &event, bool combined)
+  {
+    std::ostringstream line;
+    line << dash_if_empty(event.remote_address)
+         << " - - [" << cached_utc_timestamp() << "] "
+         << escaped_log_value(event.method + " " + event.target + " " + dash_if_empty(event.protocol))
+         << ' ' << event.status_code
+         << ' ' << event.response_body_bytes;
+    if (combined)
+    {
+      line << ' ' << escaped_log_value(dash_if_empty(event.referer))
+           << ' ' << escaped_log_value(dash_if_empty(event.user_agent));
+    }
+    return line.str();
+  }
+
+  std::string token_value(const Vajra::runtime::AccessLogEvent &event, char token)
+  {
+    switch (token)
+    {
+      case 'm': return event.method;
+      case 'U': return event.target;
+      case 's': return std::to_string(event.status_code);
+      case 'b': return std::to_string(event.response_body_bytes);
+      case 'a': return event.remote_address;
+      case 'H': return event.protocol;
+      case 'h': return event.host;
+      case 'u': return event.user_agent;
+      case 'r': return event.referer;
+      case 'i': return event.request_id;
+      case 'D': return std::to_string(event.duration_nanoseconds);
+      case 'p': return std::to_string(event.worker_pid);
+      case 'w': return std::to_string(event.worker_index);
+      case 'c': return event.connection_outcome;
+      case 'T': return event.trace_id;
+      case 'S': return event.span_id;
+      default: return std::string(1, token);
+    }
+  }
+
+  std::string custom_access_line(const Vajra::runtime::AccessLogEvent &event, const std::string &format)
+  {
+    std::string line;
+    line.reserve(format.size() + 64);
+    for (std::size_t index = 0; index < format.size(); ++index)
+    {
+      if (format[index] == '%' && index + 1 < format.size())
+      {
+        line.append(token_value(event, format[++index]));
+      }
+      else
+      {
+        line.push_back(format[index]);
+      }
+    }
+    return line;
+  }
+
   std::string formatted_access_line(const LogEvent &event)
   {
-    if (event.structured)
+    const std::string format = access_format();
+    if (format == "json")
     {
       std::ostringstream line;
       line << "{\"component\":\"access\""
            << ",\"timestamp\":\"" << cached_utc_timestamp() << "\""
-           << ",\"method\":" << escaped_log_value(event.method)
-           << ",\"target\":" << escaped_log_value(event.target)
-           << ",\"status\":" << event.status_code
-           << '}';
+           << ",\"method\":" << escaped_log_value(event.access.method)
+           << ",\"target\":" << escaped_log_value(event.access.target)
+           << ",\"status\":" << event.access.status_code
+           << ",\"duration_nanoseconds\":" << event.access.duration_nanoseconds
+           << ",\"bytes_written\":" << event.access.response_body_bytes
+           << ",\"remote_addr\":" << escaped_log_value(event.access.remote_address)
+           << ",\"protocol\":" << escaped_log_value(event.access.protocol)
+           << ",\"host\":" << escaped_log_value(event.access.host)
+           << ",\"user_agent\":" << escaped_log_value(event.access.user_agent)
+           << ",\"referer\":" << escaped_log_value(event.access.referer)
+           << ",\"request_id\":" << escaped_log_value(event.access.request_id)
+           << ",\"worker_pid\":" << event.access.worker_pid
+           << ",\"worker_index\":" << event.access.worker_index
+           << ",\"connection_outcome\":" << escaped_log_value(event.access.connection_outcome);
+      if (!event.access.trace_id.empty())
+      {
+        line << ",\"trace_id\":" << escaped_log_value(event.access.trace_id);
+      }
+      if (!event.access.span_id.empty())
+      {
+        line << ",\"span_id\":" << escaped_log_value(event.access.span_id);
+      }
+      line << '}';
       return line.str();
+    }
+    if (format == "common")
+    {
+      return common_access_line(event.access, false);
+    }
+    if (format == "combined")
+    {
+      return common_access_line(event.access, true);
+    }
+    if (!format.empty() && format != "text")
+    {
+      return custom_access_line(event.access, format);
     }
 
     std::ostringstream line;
     line << "[Vajra][access] " << cached_utc_timestamp()
-         << " method=" << escaped_log_value(event.method)
-         << " target=" << escaped_log_value(event.target)
-         << " status=" << event.status_code;
+         << " method=" << escaped_log_value(event.access.method)
+         << " target=" << escaped_log_value(event.access.target)
+         << " status=" << event.access.status_code
+         << " duration_ns=" << event.access.duration_nanoseconds
+         << " bytes=" << event.access.response_body_bytes
+         << " remote_addr=" << escaped_log_value(event.access.remote_address)
+         << " protocol=" << escaped_log_value(event.access.protocol)
+         << " host=" << escaped_log_value(event.access.host)
+         << " user_agent=" << escaped_log_value(event.access.user_agent)
+         << " referer=" << escaped_log_value(event.access.referer)
+         << " request_id=" << escaped_log_value(event.access.request_id)
+         << " worker_pid=" << event.access.worker_pid
+         << " worker_index=" << event.access.worker_index
+         << " connection=" << escaped_log_value(event.access.connection_outcome);
+    if (!event.access.trace_id.empty())
+    {
+      line << " trace_id=" << escaped_log_value(event.access.trace_id);
+    }
+    if (!event.access.span_id.empty())
+    {
+      line << " span_id=" << escaped_log_value(event.access.span_id);
+    }
     return line.str();
   }
 
@@ -583,6 +813,40 @@ namespace
     return rb_funcall(callback_context->callback, rb_intern("call"), 1, event);
   }
 
+  void hash_set_string(VALUE hash, const char *name, const std::string &value)
+  {
+    rb_hash_aset(hash, ID2SYM(rb_intern(name)), rb_str_new(value.c_str(), static_cast<long>(value.size())));
+  }
+
+  VALUE invoke_runtime_request_observability_callback(VALUE payload)
+  {
+    auto *callback_context = reinterpret_cast<RequestObservabilityCallbackContext *>(payload);
+    const Vajra::runtime::AccessLogEvent &access = callback_context->event;
+    VALUE event = rb_hash_new();
+    hash_set_string(event, "method", access.method);
+    hash_set_string(event, "target", access.target);
+    rb_hash_aset(event, ID2SYM(rb_intern("status")), INT2NUM(access.status_code));
+    rb_hash_aset(event, ID2SYM(rb_intern("duration_nanoseconds")), LL2NUM(access.duration_nanoseconds));
+    rb_hash_aset(event, ID2SYM(rb_intern("bytes_written")), ULL2NUM(access.response_body_bytes));
+    hash_set_string(event, "remote_addr", access.remote_address);
+    hash_set_string(event, "protocol", access.protocol);
+    hash_set_string(event, "host", access.host);
+    hash_set_string(event, "user_agent", access.user_agent);
+    hash_set_string(event, "referer", access.referer);
+    hash_set_string(event, "request_id", access.request_id);
+    rb_hash_aset(event, ID2SYM(rb_intern("worker_pid")), INT2NUM(access.worker_pid));
+    rb_hash_aset(event, ID2SYM(rb_intern("worker_index")), INT2NUM(access.worker_index));
+    hash_set_string(event, "connection_outcome", access.connection_outcome);
+    hash_set_string(event, "trace_id", access.trace_id);
+    hash_set_string(event, "span_id", access.span_id);
+    hash_set_string(event, "outcome", callback_context->outcome);
+    hash_set_string(event, "failure_kind", callback_context->failure_kind);
+    rb_hash_aset(event, ID2SYM(rb_intern("response_sent")), callback_context->response_sent ? Qtrue : Qfalse);
+    hash_set_string(event, "error_message", callback_context->error_message);
+    hash_set_string(event, "timestamp", callback_context->timestamp);
+    return rb_funcall(callback_context->callback, rb_intern("call"), 1, event);
+  }
+
   void *emit_lifecycle_callback_with_gvl(void *data)
   {
     auto *context = reinterpret_cast<LifecycleCallbackContext *>(data);
@@ -593,6 +857,19 @@ namespace
 
     int state = 0;
     rb_protect(invoke_runtime_lifecycle_callback, reinterpret_cast<VALUE>(context), &state);
+    return nullptr;
+  }
+
+  void *emit_request_observability_callback_with_gvl(void *data)
+  {
+    auto *context = reinterpret_cast<RequestObservabilityCallbackContext *>(data);
+    if (NIL_P(context->callback))
+    {
+      return nullptr;
+    }
+
+    int state = 0;
+    rb_protect(invoke_runtime_request_observability_callback, reinterpret_cast<VALUE>(context), &state);
     return nullptr;
   }
 #endif
@@ -651,9 +928,46 @@ namespace
 #endif
   }
 
+  void emit_runtime_request_observability_callback(
+      const Vajra::runtime::AccessLogEvent &event,
+      const std::string &outcome,
+      const std::string &failure_kind,
+      bool response_sent,
+      const std::string &error_message)
+  {
+#ifdef VAJRA_RUNTIME_HAS_RUBY
+    VALUE callback = Qnil;
+    {
+      const std::lock_guard<std::mutex> lock(logging_mutex);
+      callback = runtime_request_observability_callback;
+    }
+    if (NIL_P(callback))
+    {
+      return;
+    }
+
+    RequestObservabilityCallbackContext context;
+    context.callback = callback;
+    context.event = event;
+    context.outcome = outcome;
+    context.failure_kind = failure_kind;
+    context.response_sent = response_sent;
+    context.error_message = error_message;
+    context.timestamp = Vajra::runtime::utc_timestamp();
+    rb_thread_call_with_gvl(emit_request_observability_callback_with_gvl, &context);
+#else
+    (void)event;
+    (void)outcome;
+    (void)failure_kind;
+    (void)response_sent;
+    (void)error_message;
+#endif
+  }
+
   void write_runtime_line(const std::string &line)
   {
-    if (enqueue_log_event(LogEvent{LogEventKind::runtime, false, line, "", "", 0}))
+    service_reopen_signal_if_requested();
+    if (enqueue_log_event(LogEvent{LogEventKind::runtime, false, line, {}}))
     {
       return;
     }
@@ -668,7 +982,8 @@ namespace
 
   void write_error_line(const std::string &line)
   {
-    if (enqueue_log_event(LogEvent{LogEventKind::error, false, line, "", "", 0}))
+    service_reopen_signal_if_requested();
+    if (enqueue_log_event(LogEvent{LogEventKind::error, false, line, {}}))
     {
       return;
     }
@@ -683,7 +998,8 @@ namespace
 
   void write_access_line(const std::string &line)
   {
-    if (enqueue_log_event(LogEvent{LogEventKind::access, structured_logging_enabled(), line, "", "", 0}))
+    service_reopen_signal_if_requested();
+    if (enqueue_log_event(LogEvent{LogEventKind::access, structured_logging_enabled(), line, {}}))
     {
       return;
     }
@@ -704,16 +1020,19 @@ namespace
 void Vajra::runtime::configure_runtime_logging(
     bool structured_logs,
     const std::string &access_log,
-    const std::string &error_log)
+    const std::string &error_log,
+    const std::string &access_log_format)
 {
   std::string warning_message;
   stop_runtime_logging_worker();
+  install_reopen_signal_handler();
   std::lock_guard<std::mutex> lock(logging_mutex);
   close_configured_fd(logging_config.access_log_fd, logging_config.close_access_log_fd, STDOUT_FILENO);
   close_configured_fd(logging_config.error_log_fd, logging_config.close_error_log_fd, STDERR_FILENO);
   logging_config.structured_logs = structured_logs;
   logging_config.access_log_path = access_log;
   logging_config.error_log_path = error_log;
+  logging_config.access_log_format = access_log_format;
   logging_config.access_log_disabled = access_log.empty() || access_log == "/dev/null";
   access_log_disabled.store(logging_config.access_log_disabled, std::memory_order_release);
   structured_logs_enabled.store(structured_logs, std::memory_order_release);
@@ -886,6 +1205,22 @@ void Vajra::runtime::set_runtime_lifecycle_callback(void *callback)
   }
   const std::lock_guard<std::mutex> lock(logging_mutex);
   runtime_lifecycle_callback = reinterpret_cast<VALUE>(callback);
+#else
+  (void)callback;
+#endif
+}
+
+void Vajra::runtime::set_runtime_request_observability_callback(void *callback)
+{
+#ifdef VAJRA_RUNTIME_HAS_RUBY
+  static bool callback_rooted = false;
+  if (!callback_rooted)
+  {
+    rb_global_variable(&runtime_request_observability_callback);
+    callback_rooted = true;
+  }
+  const std::lock_guard<std::mutex> lock(logging_mutex);
+  runtime_request_observability_callback = reinterpret_cast<VALUE>(callback);
 #else
   (void)callback;
 #endif
@@ -1069,8 +1404,9 @@ void Vajra::runtime::log_runtime_error(const std::string &message)
   flush_runtime_streams();
 }
 
-void Vajra::runtime::log_access_event(const std::string &method, const std::string &target, int status_code)
+void Vajra::runtime::log_access_event(const AccessLogEvent &event)
 {
+  service_reopen_signal_if_requested();
   if (access_log_disabled.load(std::memory_order_acquire))
   {
     return;
@@ -1080,34 +1416,24 @@ void Vajra::runtime::log_access_event(const std::string &method, const std::stri
           LogEventKind::access,
           structured_logs_enabled.load(std::memory_order_acquire),
           "",
-          method,
-          target,
-          status_code}))
+          event}))
   {
     return;
   }
 
-  if (structured_logging_enabled())
-  {
-    std::ostringstream line;
-    line << "{\"component\":\"access\""
-         << ",\"timestamp\":\"" << utc_timestamp() << "\""
-         << ",\"method\":" << escaped_log_value(method)
-         << ",\"target\":" << escaped_log_value(target)
-         << ",\"status\":" << status_code
-         << '}';
-    write_access_line(line.str());
-    flush_runtime_streams();
-    return;
-  }
-
-  std::ostringstream line;
-  line << "[Vajra][access] " << utc_timestamp()
-       << " method=" << escaped_log_value(method)
-       << " target=" << escaped_log_value(target)
-       << " status=" << status_code;
-  write_access_line(line.str());
+  LogEvent log_event{LogEventKind::access, structured_logging_enabled(), "", event};
+  write_access_line(formatted_access_line(log_event));
   flush_runtime_streams();
+}
+
+void Vajra::runtime::emit_runtime_request_observability_event(
+    const AccessLogEvent &event,
+    const std::string &outcome,
+    const std::string &failure_kind,
+    bool response_sent,
+    const std::string &error_message)
+{
+  emit_runtime_request_observability_callback(event, outcome, failure_kind, response_sent, error_message);
 }
 
 void Vajra::runtime::log_runtime_shutdown_begin()

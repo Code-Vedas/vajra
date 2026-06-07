@@ -99,42 +99,6 @@ Vajra.configure do |config|
   # Limit the global pending request queue.
   config.socket_queue_capacity 100_000
 
-  # Enable TLS for the listener.
-  config.tls false
-
-  # Set the TLS certificate chain path.
-  config.tls_certificate "config/certs/server.crt"
-
-  # Set the TLS private key path.
-  config.tls_private_key "config/certs/server.key"
-
-  # Set the TLS client CA bundle path.
-  config.tls_ca_certificate "config/certs/ca.crt"
-
-  # Set TLS peer verification behavior.
-  config.tls_verify_mode "none"
-
-  # Set the minimum TLS version.
-  config.tls_min_version "TLSv1_2"
-
-  # Set advertised ALPN protocols.
-  config.alpn_protocols %w[http/1.1]
-
-  # Enable HTTP/2 when supported by the runtime.
-  config.http2 false
-
-  # Set HTTP/2 concurrent stream capacity.
-  config.http2_max_concurrent_streams 128
-
-  # Set HTTP/2 stream flow-control window size.
-  config.http2_initial_window_size 65_535
-
-  # Set HTTP/2 maximum frame size.
-  config.http2_max_frame_size 16_384
-
-  # Set HTTP/2 HPACK dynamic table size.
-  config.http2_header_table_size 4096
-
   # Set lifecycle and runtime log level.
   config.log_level "info"
 
@@ -144,11 +108,26 @@ Vajra.configure do |config|
   # Write one access-log line per request to a file.
   config.access_log "log/vajra-access.log"
 
+  # Select access log format: text, json, common, combined, or a token string.
+  config.access_log_format "json"
+
   # Write error logs to a file.
   config.error_log "log/vajra-error.log"
 
   # Emit structured runtime logs.
   config.structured_logs false
+
+  # Enable OpenTelemetry request tracing.
+  config.trace_enabled false
+
+  # Send OTLP traces to a collector when Vajra owns OTel setup.
+  config.trace_endpoint "http://127.0.0.1:4318/v1/traces"
+
+  # Set the OpenTelemetry service name.
+  config.trace_service_name "vajra"
+
+  # Let Vajra create and shut down the global OTel provider.
+  config.trace_otel_owner false
 
   # Expose an in-process stats endpoint.
   config.stats_path "/__vajra/stats"
@@ -192,7 +171,30 @@ These environment variables override the matching runtime settings:
 | `VAJRA_SOCKET_QUEUE_CAPACITY` | `socket_queue_capacity` |
 | `VAJRA_LOG_LEVEL` | `log_level` |
 | `VAJRA_ACCESS_LOG` | `access_log` |
+| `VAJRA_ACCESS_LOG_FORMAT` | `access_log_format` |
+| `VAJRA_ERROR_LOG` | `error_log` |
+| `VAJRA_STRUCTURED_LOGS` | `structured_logs` |
+| `VAJRA_STATS_PATH` | `stats_path` |
+| `VAJRA_METRICS_ENDPOINT` | `metrics_endpoint` |
+| `VAJRA_TRACE_ENABLED` | `trace_enabled` |
+| `VAJRA_TRACE_ENDPOINT` | `trace_endpoint` |
+| `VAJRA_TRACE_SERVICE_NAME` | `trace_service_name` |
+| `VAJRA_TRACE_OTEL_OWNER` | `trace_otel_owner` |
 
 `access_log` is disabled by default. Prefer `config.access_log nil` when access
 logs are intentionally disabled. Use a file path when Vajra should write one
 access-log line per request.
+
+OpenTelemetry configuration follows this precedence:
+
+1. explicit Vajra config
+2. `VAJRA_*` environment variables
+3. standard `OTEL_*` environment variables
+4. Vajra defaults
+
+Vajra reads `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`,
+`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_TRACES_EXPORTER`,
+`OTEL_METRICS_EXPORTER`, `OTEL_PROPAGATORS`, `OTEL_TRACES_SAMPLER`, and
+`OTEL_TRACES_SAMPLER_ARG`. Vajra does not replace an application's global
+OpenTelemetry provider unless `trace_otel_owner` or `VAJRA_TRACE_OTEL_OWNER` is
+enabled.

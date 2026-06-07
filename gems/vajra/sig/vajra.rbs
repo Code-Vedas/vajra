@@ -32,11 +32,13 @@ module Vajra
     ?access_log: String?,
     ?error_log: String?,
     ?structured_logs: bool?,
+    ?access_log_format: String?,
     ?stats_path: String?,
     ?metrics_endpoint: String?,
     ?trace_enabled: bool?,
     ?trace_endpoint: String?,
-    ?trace_service_name: String?
+    ?trace_service_name: String?,
+    ?trace_otel_owner: bool?
   ) -> nil
   def self.stop: () -> nil
 end

@@ -17,7 +17,7 @@ boundary and explicit operational behavior.
 ## Framework Support
 
 Vajra plays through the standard Rack contract, so the same server runtime can
-host the common Ruby web framework shapes tested by this project.
+host common Ruby web framework shapes.
 
 | Framework | How Vajra Fits |
 | --- | --- |
@@ -32,8 +32,9 @@ host the common Ruby web framework shapes tested by this project.
 1. [Installation](/installation/)
 2. [Configuration](/configuration/)
 3. [Architecture](/architecture/)
-4. [Development](/development/)
-5. [Troubleshooting](/troubleshooting/)
+4. [Observability](/observability/)
+5. [Development](/development/)
+6. [Troubleshooting](/troubleshooting/)
 
 ## Quick Start
 

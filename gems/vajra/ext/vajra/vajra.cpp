@@ -47,11 +47,13 @@ namespace
           config.access_log,
           config.error_log,
           config.structured_logs,
+          config.access_log_format,
           config.stats_path,
           config.metrics_endpoint,
           config.trace_enabled,
           config.trace_endpoint,
-          config.trace_service_name);
+          config.trace_service_name,
+          config.trace_otel_owner);
     }
     catch (const std::exception &error)
     {
@@ -101,6 +103,13 @@ namespace
   {
     (void)self;
     Vajra::runtime::set_runtime_lifecycle_callback(reinterpret_cast<void *>(callback));
+    return callback;
+  }
+
+  VALUE rb_tracing_native_set_request_observability_callback(VALUE self, VALUE callback)
+  {
+    (void)self;
+    Vajra::runtime::set_runtime_request_observability_callback(reinterpret_cast<void *>(callback));
     return callback;
   }
 
@@ -154,6 +163,11 @@ extern "C" void Init_vajra()
       mTracing,
       "__native_set_lifecycle_callback__",
       RUBY_METHOD_FUNC(rb_tracing_native_set_lifecycle_callback),
+      1);
+  rb_define_singleton_method(
+      mTracing,
+      "__native_set_request_observability_callback__",
+      RUBY_METHOD_FUNC(rb_tracing_native_set_request_observability_callback),
       1);
   rb_define_singleton_method(
       mTracing,

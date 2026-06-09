@@ -562,9 +562,7 @@ module Vajra
         require 'opentelemetry/sdk'
         native_request_exporter = configured_native_request_exporter(config)
         provider = nil
-        unless sampler_always_off?(config) || span_export_disabled?(config)
-          provider = native_request_exporter ? configured_tracer_provider_without_exporter(config) : configured_tracer_provider(config)
-        end
+        provider = configured_tracer_provider(config) if tracer_provider_enabled?(config)
         tracer = provider&.tracer(config.service_name)
         meter = configured_meter(config)
         { provider:, tracer:, meter:, native_request_exporter: }
@@ -597,6 +595,11 @@ module Vajra
         config.sampler.to_s == 'always_off'
       end
       private_class_method :sampler_always_off?
+
+      def tracer_provider_enabled?(config)
+        !sampler_always_off?(config) && !span_export_disabled?(config)
+      end
+      private_class_method :tracer_provider_enabled?
 
       def native_sample_ratio(config)
         case config.sampler.to_s
@@ -637,16 +640,6 @@ module Vajra
       end
       private_class_method :configured_tracer_provider
 
-      def configured_tracer_provider_without_exporter(config)
-        existing_provider = OpenTelemetry.tracer_provider if OpenTelemetry.respond_to?(:tracer_provider)
-        return existing_provider unless config.otel_owner
-
-        provider = OpenTelemetry::SDK::Trace::TracerProvider.new
-        OpenTelemetry.tracer_provider = provider if OpenTelemetry.respond_to?(:tracer_provider=)
-        provider
-      end
-      private_class_method :configured_tracer_provider_without_exporter
-
       def install_exporter_processor(provider, config)
         require 'opentelemetry/exporter/otlp'
         exporter = OpenTelemetry::Exporter::OTLP::Exporter.new(
@@ -680,8 +673,8 @@ module Vajra
 
       def batch_span_processor_options
         {
-          max_queue_size: integer_env_value('OTEL_BSP_MAX_QUEUE_SIZE', 262_144),
-          max_export_batch_size: integer_env_value('OTEL_BSP_MAX_EXPORT_BATCH_SIZE', 65_536),
+          max_queue_size: integer_env_value('OTEL_BSP_MAX_QUEUE_SIZE', 2_048),
+          max_export_batch_size: integer_env_value('OTEL_BSP_MAX_EXPORT_BATCH_SIZE', 512),
           schedule_delay: numeric_env_value('OTEL_BSP_SCHEDULE_DELAY', 5_000),
           exporter_timeout: numeric_env_value('OTEL_BSP_EXPORT_TIMEOUT', 30_000)
         }

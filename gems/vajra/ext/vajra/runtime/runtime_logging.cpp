@@ -1634,17 +1634,41 @@ namespace
       return;
     }
 
-    Vajra::runtime::RequestObservabilityEvent queued;
-    queued.access = event;
-    queued.outcome = outcome;
-    queued.failure_kind = failure_kind;
-    queued.response_sent = response_sent;
-    queued.error_message = error_message;
-    queued.timestamp = Vajra::runtime::utc_timestamp();
-
     const std::lock_guard<std::mutex> lock(request_observability_mutex);
-    request_observability_events.push_back(std::move(queued));
-    request_span_events.push_back(request_span_event_from_observability(request_observability_events.back()));
+    if (request_observability_enabled.load(std::memory_order_acquire))
+    {
+      Vajra::runtime::RequestObservabilityEvent queued;
+      queued.access = event;
+      queued.outcome = outcome;
+      queued.failure_kind = failure_kind;
+      queued.response_sent = response_sent;
+      queued.error_message = error_message;
+      queued.timestamp = Vajra::runtime::utc_timestamp();
+      request_observability_events.push_back(std::move(queued));
+      if (native_otlp_export_enabled.load(std::memory_order_acquire))
+      {
+        request_span_events.push_back(request_span_event_from_observability(request_observability_events.back()));
+      }
+    }
+    else
+    {
+      request_span_events.push_back(Vajra::runtime::RequestSpanEvent{
+          event.method,
+          event.target,
+          event.status_code,
+          event.duration_nanoseconds,
+          event.protocol,
+          event.host,
+          outcome,
+          failure_kind,
+          response_sent,
+          event.connection_outcome,
+          event.worker_index,
+          event.worker_pid,
+          event.trace_id,
+          event.span_id,
+          error_message});
+    }
     if (request_span_events.size() >= kNativeOtlpBatchSize)
     {
       request_span_condition.notify_one();

@@ -820,8 +820,8 @@ RSpec.describe Vajra::Internal::Tracing do
       compression: 'none'
     )
     expect(OpenTelemetry::SDK::Trace::Export::BatchSpanProcessor.last_options).to include(
-      max_queue_size: 262_144,
-      max_export_batch_size: 65_536,
+      max_queue_size: 2_048,
+      max_export_batch_size: 512,
       schedule_delay: 5_000.0,
       exporter_timeout: 30_000.0
     )
@@ -897,7 +897,7 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(described_class).to have_received(:warn).with(include('OpenTelemetry tracing requested'))
   end
 
-  it 'uses an owned provider without installing an SDK exporter when direct native OTLP export is active' do
+  it 'keeps owned SDK export available when direct native OTLP request export is active' do
     provider = Class.new do
       attr_reader :processors
 
@@ -914,13 +914,9 @@ RSpec.describe Vajra::Internal::Tracing do
         @processors << processor
       end
     end.new(tracer)
-    stub_native_otlp_classes
-    trace_sdk_module = Module.new
-    trace_sdk_module.const_set(:TracerProvider, Class.new do
-      define_singleton_method(:new) { provider }
-    end)
-    OpenTelemetry::SDK.const_set(:Trace, trace_sdk_module)
-    OpenTelemetry.singleton_class.attr_accessor :tracer_provider
+    exporter = Object.new
+    processor = Object.new
+    stub_open_telemetry_classes(provider:, exporter:, processor:)
     allow(described_class).to receive(:require).with('opentelemetry/sdk').and_return(true)
     allow(described_class).to receive(:require).with('opentelemetry/exporter/otlp').and_return(true)
     config = described_class::TraceConfig.new(
@@ -938,46 +934,7 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(telemetry.fetch(:provider)).to eq(provider)
     expect(telemetry.fetch(:tracer)).to eq(tracer)
     expect(telemetry.fetch(:native_request_exporter)).to be_a(described_class::NativeRequestOtlpExporter)
-    expect(provider.processors).to be_empty
-  end
-
-  it 'preserves an app-owned provider when direct-export provider setup is not owned' do
-    existing_provider = Object.new
-    stub_native_otlp_classes
-    OpenTelemetry.singleton_class.attr_accessor :tracer_provider
-    OpenTelemetry.tracer_provider = existing_provider
-    config = described_class::TraceConfig.new(
-      enabled: true,
-      endpoint: 'http://127.0.0.1:4318/v1/traces',
-      service_name: 'vajra-test',
-      otel_owner: false,
-      traces_exporter: 'otlp',
-      metrics_exporter: 'none',
-      sampler: ''
-    )
-
-    expect(described_class.send(:configured_tracer_provider_without_exporter, config)).to eq(existing_provider)
-  end
-
-  it 'builds a direct-export provider when global provider APIs are absent' do
-    provider = Object.new
-    stub_native_otlp_classes
-    trace_sdk_module = Module.new
-    trace_sdk_module.const_set(:TracerProvider, Class.new do
-      define_singleton_method(:new) { provider }
-    end)
-    OpenTelemetry::SDK.const_set(:Trace, trace_sdk_module)
-    config = described_class::TraceConfig.new(
-      enabled: true,
-      endpoint: 'http://127.0.0.1:4318/v1/traces',
-      service_name: 'vajra-test',
-      otel_owner: true,
-      traces_exporter: 'otlp',
-      metrics_exporter: 'none',
-      sampler: ''
-    )
-
-    expect(described_class.send(:configured_tracer_provider_without_exporter, config)).to eq(provider)
+    expect(provider.processors).to eq([processor])
   end
 
   it 'exports native request span data directly without SDK span objects' do
@@ -1157,12 +1114,13 @@ RSpec.describe Vajra::Internal::Tracing do
     )
   end
 
-  it 'falls back to high-throughput batch processor defaults for invalid standard env values' do
+  it 'falls back to bounded batch processor defaults for invalid standard env values' do
     ENV['OTEL_BSP_MAX_QUEUE_SIZE'] = 'bad'
     ENV['OTEL_BSP_SCHEDULE_DELAY'] = 'bad'
 
     expect(described_class.send(:batch_span_processor_options)).to include(
-      max_queue_size: 262_144,
+      max_queue_size: 2_048,
+      max_export_batch_size: 512,
       schedule_delay: 5_000.0
     )
   end
@@ -2153,6 +2111,7 @@ RSpec.describe Vajra::Internal::Tracing do
 
     expect(telemetry).to include(provider: nil, tracer: nil, meter: nil)
     expect(described_class).not_to have_received(:configured_tracer_provider)
+    expect(described_class.send(:tracer_provider_enabled?, config)).to be(false)
   end
 
   it 'skips tracer provider construction when Vajra-owned exporting is disabled' do
@@ -2174,6 +2133,21 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(telemetry).to include(provider: nil, tracer: nil, meter: nil)
     expect(described_class).not_to have_received(:configured_tracer_provider)
     expect(described_class.send(:span_export_disabled?, config)).to be(true)
+    expect(described_class.send(:tracer_provider_enabled?, config)).to be(false)
+  end
+
+  it 'enables tracer provider construction when sampling and exporting are active' do
+    config = described_class::TraceConfig.new(
+      enabled: true,
+      endpoint: 'http://127.0.0.1:4318/v1/traces',
+      service_name: 'vajra-test',
+      otel_owner: true,
+      traces_exporter: 'otlp',
+      metrics_exporter: 'none',
+      sampler: ''
+    )
+
+    expect(described_class.send(:tracer_provider_enabled?, config)).to be(true)
   end
 
   it 'ignores propagation extraction API failures' do

@@ -326,9 +326,9 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
     bool first_request) const
 {
   HeadReadResult read_result;
+  const auto head_started_at = std::chrono::steady_clock::now();
   try
   {
-    const auto head_started_at = std::chrono::steady_clock::now();
     read_result = request_head_reader_.read(
         client_fd,
         std::move(buffered_bytes),
@@ -341,9 +341,9 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
   catch (const HeadError &error)
   {
     const auto response = response_writer_.request_head_failure_response(error.kind());
-    reject_request_head(client_fd, error);
+    reject_request_head(client_fd, error, response);
     emit_native_request_observability(
-        access_event_for_unparsed_head(socket_context, response.status.code, response.body.size(), std::chrono::steady_clock::now()),
+        access_event_for_unparsed_head(socket_context, response.status.code, response.body.size(), head_started_at),
         "request_head_error",
         head_failure_kind_token(error.kind()),
         true,
@@ -380,7 +380,7 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
   catch (const HeadError &error)
   {
     const auto response = response_writer_.request_head_failure_response(error.kind());
-    reject_request_head(client_fd, error);
+    reject_request_head(client_fd, error, response);
     emit_native_request_observability(
         access_event_for_unparsed_head(socket_context, response.status.code, response.body.size(), request_started_at),
         "request_parse_error",
@@ -490,7 +490,7 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
   catch (const HeadError &error)
   {
     const auto rejection_response = response_writer_.request_head_failure_response(error.kind());
-    reject_request_head(client_fd, error);
+    reject_request_head(client_fd, error, rejection_response);
     const auto event = access_event_for(
         request_context,
         rejection_response.status.code,
@@ -616,8 +616,16 @@ Vajra::response::Response Vajra::request::RequestProcessor::response_for(
 
 void Vajra::request::RequestProcessor::reject_request_head(int client_fd, const HeadError &error) const
 {
+  reject_request_head(client_fd, error, response_writer_.request_head_failure_response(error.kind()));
+}
+
+void Vajra::request::RequestProcessor::reject_request_head(
+    int client_fd,
+    const HeadError &error,
+    const Vajra::response::Response &response) const
+{
   response_writer_.log_request_head_error(error);
-  (void)response_writer_.send(client_fd, response_writer_.request_head_failure_response(error.kind()));
+  (void)response_writer_.send(client_fd, response);
 }
 
 void Vajra::request::RequestProcessor::reject_request_execution(int client_fd, const std::exception &error) const

@@ -753,6 +753,7 @@ module Performance
     def run_observability(run_root, options)
       otlp_drain = start_otlp_drain
       DEFAULT_OBSERVABILITY_MODES.filter_map do |mode_name|
+        handle = nil
         mode = observability_modes(otlp_endpoint: otlp_drain.url).fetch(mode_name)
         mode_root = File.join(run_root, OBSERVABILITY_FIXTURE, 'observability', mode.name)
         write_fixture(OBSERVABILITY_FIXTURE, mode_root, observability_mode: mode)

@@ -1864,7 +1864,7 @@ RSpec.describe Vajra::Internal::Tracing do
         false
       end
 
-      def join(_timeout)
+      def join
         @joined = true
       end
     end.new
@@ -1887,7 +1887,7 @@ RSpec.describe Vajra::Internal::Tracing do
         @woken = true
       end
 
-      def join(_timeout)
+      def join
         @joined = true
       end
     end.new

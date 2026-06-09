@@ -863,42 +863,31 @@ namespace
 
   LogNode *acquire_log_node()
   {
-    LogNode *head = async_logger.free_head.load(std::memory_order_acquire);
-    while (head != nullptr)
+    for (;;)
     {
-      LogNode *next = head->next.load(std::memory_order_relaxed);
-      if (async_logger.free_head.compare_exchange_weak(
-              head,
-              next,
-              std::memory_order_acq_rel,
-              std::memory_order_acquire))
+      LogNode *head = async_logger.free_head.load(std::memory_order_acquire);
+      while (head != nullptr)
       {
-        head->next.store(nullptr, std::memory_order_relaxed);
-        return head;
+        LogNode *next = head->next.load(std::memory_order_relaxed);
+        if (async_logger.free_head.compare_exchange_weak(
+                head,
+                next,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire))
+        {
+          head->next.store(nullptr, std::memory_order_relaxed);
+          return head;
+        }
       }
-    }
 
-    std::lock_guard<std::mutex> lock(async_logger.pool_mutex);
-    head = async_logger.free_head.load(std::memory_order_acquire);
-    if (head == nullptr)
-    {
-      add_log_node_block_locked(async_logger.next_block_size);
-    }
-    head = async_logger.free_head.load(std::memory_order_acquire);
-    while (head != nullptr)
-    {
-      LogNode *next = head->next.load(std::memory_order_relaxed);
-      if (async_logger.free_head.compare_exchange_weak(
-              head,
-              next,
-              std::memory_order_acq_rel,
-              std::memory_order_acquire))
       {
-        head->next.store(nullptr, std::memory_order_relaxed);
-        return head;
+        std::lock_guard<std::mutex> lock(async_logger.pool_mutex);
+        if (async_logger.free_head.load(std::memory_order_acquire) == nullptr)
+        {
+          add_log_node_block_locked(async_logger.next_block_size);
+        }
       }
     }
-    return nullptr;
   }
 
   void write_log_event(const LogEvent &event)
@@ -1055,6 +1044,10 @@ namespace
       return false;
     }
     LogNode *node = acquire_log_node();
+    if (node == nullptr)
+    {
+      return false;
+    }
     node->event = std::move(event);
     const bool should_notify = async_logger.pending.fetch_add(1, std::memory_order_acq_rel) == 0;
     LogNode *previous = async_logger.tail.exchange(node, std::memory_order_acq_rel);
@@ -1887,6 +1880,12 @@ void Vajra::runtime::start_runtime_logging_worker()
   }
 
   LogNode *stub = acquire_log_node();
+  if (stub == nullptr)
+  {
+    async_logger.running.store(false, std::memory_order_release);
+    async_logger.owner_pid.store(-1, std::memory_order_release);
+    return;
+  }
   async_logger.head = stub;
   async_logger.tail.store(stub, std::memory_order_release);
   async_logger.pending.store(0, std::memory_order_release);

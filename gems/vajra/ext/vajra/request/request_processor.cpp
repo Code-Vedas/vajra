@@ -35,6 +35,19 @@ namespace
     return Vajra::request::ascii_case_insensitive_equal(header.name, expected_name);
   }
 
+  const char *head_failure_kind_token(Vajra::request::HeadFailureKind kind)
+  {
+    switch (kind)
+    {
+      case Vajra::request::HeadFailureKind::bad_request:
+        return "bad_request";
+      case Vajra::request::HeadFailureKind::header_too_large:
+        return "header_too_large";
+    }
+
+    return "bad_request";
+  }
+
   struct ObservedRequestHeaders
   {
     std::string host;
@@ -332,7 +345,7 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
     emit_native_request_observability(
         access_event_for_unparsed_head(socket_context, response.status.code, response.body.size(), std::chrono::steady_clock::now()),
         "request_head_error",
-        error.what(),
+        head_failure_kind_token(error.kind()),
         true,
         error.what());
     return RequestProcessingResult{RequestProcessingOutcome::close, "", first_request};
@@ -371,7 +384,7 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
     emit_native_request_observability(
         access_event_for_unparsed_head(socket_context, response.status.code, response.body.size(), request_started_at),
         "request_parse_error",
-        error.what(),
+        head_failure_kind_token(error.kind()),
         true,
         error.what());
     return RequestProcessingResult{RequestProcessingOutcome::close, "", first_request};
@@ -484,7 +497,12 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
         rejection_response.body.size(),
         request_started_at,
         "close");
-    emit_native_request_observability(event, "request_head_error", error.what(), true, error.what());
+    emit_native_request_observability(
+        event,
+        "request_head_error",
+        head_failure_kind_token(error.kind()),
+        true,
+        error.what());
     Vajra::runtime::log_access_event(access_event_for(
         request_context,
         rejection_response.status.code,

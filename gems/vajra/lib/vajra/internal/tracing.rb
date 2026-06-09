@@ -1177,7 +1177,7 @@ module Vajra
         end
         if thread
           thread.wakeup if thread.alive?
-          thread.join(1) unless thread == Thread.current
+          thread.join unless thread == Thread.current
         end
         drain_request_observability_batch until drain_request_observability_batch.zero?
         TRACE_MUTEX.synchronize do

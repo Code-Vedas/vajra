@@ -10,46 +10,12 @@ require 'spec_helper'
 RSpec.describe Vajra::Internal::Tracing do
   let(:tracer) { Object.new }
 
-  def stub_open_telemetry_classes(provider:, exporter: nil, processor: nil, batch_processor: true) # rubocop:disable Metrics/AbcSize
+  def stub_open_telemetry_classes(provider:)
     open_telemetry_module = Module.new
     open_telemetry_module.singleton_class.attr_accessor :tracer_provider
     open_telemetry_module.tracer_provider = provider
     sdk_module = Module.new
-    trace_module = Module.new
-    export_module = Module.new
-    exporter_module = Module.new
-    otlp_module = Module.new
-
-    tracer_provider_class = Class.new do
-      define_singleton_method(:new) { provider }
-    end
-    simple_span_processor_class = Class.new do
-      define_singleton_method(:new) { |arg, **_options| processor || arg }
-    end
-    batch_span_processor_class = Class.new do
-      singleton_class.attr_accessor :last_options
-      define_singleton_method(:new) do |arg, **options|
-        self.last_options = options
-        processor || arg
-      end
-    end
-    otlp_exporter_class = Class.new do
-      singleton_class.attr_accessor :last_options
-      define_singleton_method(:new) do |**options|
-        self.last_options = options
-        exporter || options
-      end
-    end
-
-    export_module.const_set(:SimpleSpanProcessor, simple_span_processor_class)
-    export_module.const_set(:BatchSpanProcessor, batch_span_processor_class) if batch_processor
-    trace_module.const_set(:TracerProvider, tracer_provider_class)
-    trace_module.const_set(:Export, export_module)
-    sdk_module.const_set(:Trace, trace_module)
-    otlp_module.const_set(:Exporter, otlp_exporter_class)
-    exporter_module.const_set(:OTLP, otlp_module)
     open_telemetry_module.const_set(:SDK, sdk_module)
-    open_telemetry_module.const_set(:Exporter, exporter_module)
 
     stub_const('OpenTelemetry', open_telemetry_module)
   end
@@ -109,56 +75,6 @@ RSpec.describe Vajra::Internal::Tracing do
     stub_const('OpenTelemetry::Trace', trace_module)
   end
 
-  def stub_native_otlp_classes # rubocop:disable Metrics/AbcSize
-    open_telemetry_module = Module.new
-    sdk_module = Module.new
-    resources_module = Module.new
-    trace_module = Module.new
-    exporter_module = Module.new
-    otlp_module = Module.new
-
-    resource_class = Class.new do
-      define_singleton_method(:create) { |attributes| attributes }
-    end
-    instrumentation_scope_class = Struct.new(:name, :version)
-    status_class = Class.new do
-      define_singleton_method(:ok) { :ok }
-      define_singleton_method(:error) { |message| [:error, message] }
-    end
-    trace_module.const_set(:INVALID_SPAN_ID, "\0" * 8)
-    trace_module.const_set(:Status, status_class)
-    trace_module.define_singleton_method(:generate_trace_id) { ['33' * 16].pack('H*') }
-    trace_module.define_singleton_method(:generate_span_id) { ['44' * 8].pack('H*') }
-
-    exporter_class = Class.new do
-      singleton_class.attr_accessor :exports, :last_options, :shutdown_timeout
-      self.exports = []
-
-      define_singleton_method(:new) do |**options|
-        self.last_options = options
-        super()
-      end
-
-      def export(spans, timeout:)
-        self.class.exports << [spans, timeout]
-      end
-
-      def shutdown(timeout:)
-        self.class.shutdown_timeout = timeout
-      end
-    end
-
-    resources_module.const_set(:Resource, resource_class)
-    sdk_module.const_set(:Resources, resources_module)
-    sdk_module.const_set(:InstrumentationScope, instrumentation_scope_class)
-    otlp_module.const_set(:Exporter, exporter_class)
-    exporter_module.const_set(:OTLP, otlp_module)
-    open_telemetry_module.const_set(:SDK, sdk_module)
-    open_telemetry_module.const_set(:Trace, trace_module)
-    open_telemetry_module.const_set(:Exporter, exporter_module)
-    stub_const('OpenTelemetry', open_telemetry_module)
-  end
-
   before do
     described_class.send(:stop_request_observability_drain_thread)
     described_class::TRACE_MUTEX.synchronize do
@@ -202,12 +118,6 @@ RSpec.describe Vajra::Internal::Tracing do
     ENV.delete('OTEL_RESOURCE_ATTRIBUTES')
     ENV.delete('OTEL_TRACES_SAMPLER')
     ENV.delete('OTEL_TRACES_SAMPLER_ARG')
-    ENV.delete('OTEL_EXPORTER_OTLP_COMPRESSION')
-    ENV.delete('OTEL_EXPORTER_OTLP_TRACES_COMPRESSION')
-    ENV.delete('OTEL_BSP_MAX_QUEUE_SIZE')
-    ENV.delete('OTEL_BSP_MAX_EXPORT_BATCH_SIZE')
-    ENV.delete('OTEL_BSP_SCHEDULE_DELAY')
-    ENV.delete('OTEL_BSP_EXPORT_TIMEOUT')
   end
 
   it 'disables tracing cleanly when trace_enabled is false' do
@@ -1038,7 +948,7 @@ RSpec.describe Vajra::Internal::Tracing do
     described_class.send(:record_span_response_status, span, 201)
     described_class.send(:mark_span_success, span)
     error = RuntimeError.new('boom')
-    described_class.send(:record_span_exception, error)
+    described_class.send(:record_span_exception, span, error)
 
     expect(span.attributes).to include('http.response.status_code' => 201)
     expect(span.status).to eq([:error, 'boom'])
@@ -1141,36 +1051,34 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(span.status).to eq(:ok)
   end
 
-  it 'emits native request spans from compact native span events' do
+  it 'emits native request spans from drained native request events' do
     span = native_error_span
     stub_error_status
     described_class.send(:write_trace_state, enabled: true, available: true, tracer:, meter: nil, provider: nil)
     allow(tracer).to receive(:in_span).and_yield(span)
 
     described_class.emit_native_request_span(
-      [
-        'GET',
-        '/compact?ignored=true',
-        500,
-        10_000_000,
-        'HTTP/1.1',
-        'example.test',
-        'execution_error',
-        'execution_error',
-        true,
-        'close',
-        0,
-        123,
-        '',
-        '',
-        'boom'
-      ]
+      method: 'GET',
+      target: '/native?ignored=true',
+      status: 500,
+      duration_nanoseconds: 10_000_000,
+      protocol: 'HTTP/1.1',
+      host: 'example.test',
+      outcome: 'execution_error',
+      failure_kind: 'execution_error',
+      response_sent: true,
+      connection_outcome: 'close',
+      worker_index: 0,
+      worker_pid: 123,
+      trace_id: '',
+      span_id: '',
+      error_message: 'boom'
     )
 
     expect(tracer).to have_received(:in_span).with(
       'GET',
       attributes: hash_including(
-        'url.path' => '/compact',
+        'url.path' => '/native',
         'http.response.status_code' => 500,
         'vajra.request.outcome' => 'execution_error'
       )
@@ -1409,7 +1317,8 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(described_class.send(:response_status_from, Object.new)).to be_nil
     expect(described_class.send(:current_span)).to be_nil
     described_class.send(:mark_span_success, span)
-    described_class.send(:record_span_exception, RuntimeError.new('boom'))
+    described_class.send(:record_span_exception, span, RuntimeError.new('boom'))
+    described_class.send(:record_span_exception, nil, RuntimeError.new('missing span'))
 
     expect(span.status).to be_nil
   end
@@ -1426,7 +1335,8 @@ RSpec.describe Vajra::Internal::Tracing do
     trace_module.singleton_class.define_method(:current_span) { span }
     stub_const('OpenTelemetry::Trace', trace_module)
 
-    described_class.send(:record_span_exception, RuntimeError.new('status only'))
+    expect(described_class.send(:current_span)).to eq(span)
+    described_class.send(:record_span_exception, span, RuntimeError.new('status only'))
 
     expect(span.status).to eq([:error, 'status only'])
   end
@@ -1565,11 +1475,8 @@ RSpec.describe Vajra::Internal::Tracing do
         @exception = error
       end
     end.new
-    trace_module = Module.new
-    trace_module.singleton_class.define_method(:current_span) { span }
-    stub_const('OpenTelemetry::Trace', trace_module)
     described_class.send(:write_trace_state, enabled: true, available: true, tracer: tracer, meter: nil, provider: nil)
-    allow(tracer).to receive(:in_span).and_yield(nil)
+    allow(tracer).to receive(:in_span).and_yield(span)
 
     expect do
       described_class.with_request_span('REQUEST_METHOD' => 'GET') { raise 'boom' }

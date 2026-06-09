@@ -175,6 +175,7 @@ namespace
   struct NativeOtlpEndpoint
   {
     std::string host;
+    std::string host_header;
     std::string port;
     std::string path;
   };
@@ -445,6 +446,44 @@ namespace
         return false;
       }
       written += static_cast<std::size_t>(result);
+    }
+    return true;
+  }
+
+  void prepare_socket_write(int fd)
+  {
+#ifdef SO_NOSIGPIPE
+    int opt = 1;
+    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
+#else
+    (void)fd;
+#endif
+  }
+
+  bool send_all(int fd, const char *data, std::size_t length)
+  {
+#ifdef MSG_NOSIGNAL
+    constexpr int send_flags = MSG_NOSIGNAL;
+#else
+    constexpr int send_flags = 0;
+#endif
+    std::size_t sent_total = 0;
+    while (sent_total < length)
+    {
+      const ssize_t result = ::send(fd, data + sent_total, length - sent_total, send_flags);
+      if (result < 0)
+      {
+        if (errno == EINTR)
+        {
+          continue;
+        }
+        return false;
+      }
+      if (result == 0)
+      {
+        return false;
+      }
+      sent_total += static_cast<std::size_t>(result);
     }
     return true;
   }
@@ -1208,9 +1247,39 @@ namespace
       return std::nullopt;
     }
     NativeOtlpEndpoint parsed;
-    const std::size_t colon = authority.rfind(':');
-    parsed.host = colon == std::string::npos ? authority : authority.substr(0, colon);
-    parsed.port = colon == std::string::npos ? "80" : authority.substr(colon + 1);
+    parsed.host_header = authority;
+    if (authority.front() == '[')
+    {
+      const std::size_t bracket = authority.find(']');
+      if (bracket == std::string::npos || bracket == 1)
+      {
+        return std::nullopt;
+      }
+      parsed.host = authority.substr(1, bracket - 1);
+      if (bracket + 1 == authority.size())
+      {
+        parsed.port = "80";
+      }
+      else if (authority[bracket + 1] == ':' && bracket + 2 < authority.size())
+      {
+        parsed.port = authority.substr(bracket + 2);
+      }
+      else
+      {
+        return std::nullopt;
+      }
+    }
+    else
+    {
+      const std::size_t first_colon = authority.find(':');
+      const std::size_t last_colon = authority.rfind(':');
+      if (first_colon != last_colon)
+      {
+        return std::nullopt;
+      }
+      parsed.host = first_colon == std::string::npos ? authority : authority.substr(0, first_colon);
+      parsed.port = first_colon == std::string::npos ? "80" : authority.substr(first_colon + 1);
+    }
     parsed.path = slash == std::string::npos ? "/" : rest.substr(slash);
     if (parsed.host.empty() || parsed.port.empty())
     {
@@ -1520,14 +1589,15 @@ namespace
     {
       return false;
     }
+    prepare_socket_write(fd);
     std::ostringstream request;
     request << "POST " << endpoint.path << " HTTP/1.1\r\n"
-            << "Host: " << endpoint.host << "\r\n"
+            << "Host: " << endpoint.host_header << "\r\n"
             << "Content-Type: application/json\r\n"
             << "Content-Length: " << body.size() << "\r\n"
             << "Connection: close\r\n\r\n";
     const std::string head = request.str();
-    const bool ok = write_all(fd, head.data(), head.size()) && write_all(fd, body.data(), body.size());
+    const bool ok = send_all(fd, head.data(), head.size()) && send_all(fd, body.data(), body.size());
     close(fd);
     return ok;
   }

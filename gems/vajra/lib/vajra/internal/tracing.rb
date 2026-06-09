@@ -63,35 +63,6 @@ module Vajra
       REQUEST_OBSERVABILITY_POLL_SECONDS = 0.01
       REQUEST_OBSERVABILITY_YIELD_SECONDS = 0.001
 
-      # Positional native request span event wrapper used to avoid per-event Hash allocation.
-      class NativeEvent
-        INDEXES = {
-          method: 0,
-          target: 1,
-          status: 2,
-          duration_nanoseconds: 3,
-          protocol: 4,
-          host: 5,
-          outcome: 6,
-          failure_kind: 7,
-          response_sent: 8,
-          connection_outcome: 9,
-          worker_index: 10,
-          worker_pid: 11,
-          trace_id: 12,
-          span_id: 13,
-          error_message: 14
-        }.freeze
-
-        def initialize(values)
-          @values = values
-        end
-
-        def [](key)
-          @values[INDEXES.fetch(key)]
-        end
-      end
-
       def install_from_start_options!(options)
         config = resolve_config(options)
         endpoint = config.endpoint
@@ -201,16 +172,15 @@ module Vajra
         response_status = nil
         begin
           in_span(tracer, span_name, options, context) do |span|
-            yield.tap do |result|
-              response_status = response_status_from(result)
-              record_span_response_status(span, response_status)
-              mark_span_success(span)
-              attach_trace_context(result, span)
-            end
+            result = yield
+            response_status = response_status_from(result)
+            record_span_response_status(span, response_status)
+            mark_span_success(span)
+            attach_trace_context(result, span)
+          rescue StandardError => e
+            record_span_exception(span, e)
+            raise
           end
-        rescue StandardError => e
-          record_span_exception(e)
-          raise
         ensure
           duration = monotonic_seconds - started_at
           metric_attributes = response_status ? attributes.merge('http.response.status_code' => response_status) : attributes
@@ -244,7 +214,6 @@ module Vajra
       end
 
       def emit_native_request_span(event)
-        event = native_event(event)
         tracer = TRACE_MUTEX.synchronize { TRACE_STATE.tracer }
         return record_native_request_metrics_only(event) unless span_attemptable?(tracer, event)
 
@@ -570,8 +539,7 @@ module Vajra
       end
       private_class_method :response_status_from
 
-      def record_span_exception(error)
-        span = current_span
+      def record_span_exception(span, error)
         return unless span
 
         span.record_exception(error) if span.respond_to?(:record_exception)
@@ -722,13 +690,6 @@ module Vajra
         end
       end
       private_class_method :write_trace_state
-
-      def native_event(event)
-        return event unless event.is_a?(Array)
-
-        NativeEvent.new(event)
-      end
-      private_class_method :native_event
 
       def native_request_attributes(event)
         protocol_name, protocol_version = protocol_attributes('SERVER_PROTOCOL' => event[:protocol])

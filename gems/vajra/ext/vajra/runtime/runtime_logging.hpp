@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <string>
 #include <sys/types.h>
+#include <vector>
 
 namespace Vajra
 {
@@ -28,16 +29,36 @@ namespace Vajra
     void configure_runtime_tracing(
         bool trace_enabled,
         const std::string &trace_endpoint,
-        const std::string &trace_service_name);
+        const std::string &trace_service_name,
+        bool active_context_required = false);
+    void start_runtime_tracing_worker();
+    void stop_runtime_tracing_worker();
+    void set_runtime_trace_sample_ratio(double sample_ratio);
     void set_runtime_tracing_available(bool available);
     bool runtime_tracing_enabled();
     bool runtime_tracing_available();
+    bool runtime_tracing_active_context_required();
+    bool runtime_trace_sampled(const std::string &traceparent);
     std::string runtime_tracing_endpoint();
     std::string runtime_tracing_service_name();
+    struct AccessLogFieldNeeds
+    {
+      bool host = false;
+      bool user_agent = false;
+      bool referer = false;
+      bool request_id = false;
+      bool trace_context = false;
+    };
+    AccessLogFieldNeeds access_log_field_needs();
     void start_runtime_logging_worker();
     void stop_runtime_logging_worker();
+#ifdef VAJRA_RUNTIME_TESTING
+    std::size_t runtime_logging_node_block_count();
+#endif
     void set_runtime_lifecycle_callback(void *callback);
     void set_runtime_request_observability_callback(void *callback);
+    bool runtime_request_observability_enabled();
+    bool runtime_request_span_observability_enabled();
     void flush_runtime_logs();
     void log_runtime_banner_start(
         const std::string &host,
@@ -84,12 +105,45 @@ namespace Vajra
       std::string span_id;
     };
     void log_access_event(const AccessLogEvent &event);
+    struct RequestObservabilityEvent
+    {
+      AccessLogEvent access;
+      std::string outcome;
+      std::string failure_kind;
+      bool response_sent = false;
+      std::string error_message;
+      std::string timestamp;
+    };
+    struct RequestSpanEvent
+    {
+      std::string method;
+      std::string target;
+      int status_code = 0;
+      std::int64_t duration_nanoseconds = 0;
+      std::string protocol;
+      std::string host;
+      std::string outcome;
+      std::string failure_kind;
+      bool response_sent = false;
+      std::string connection_outcome;
+      int worker_index = -1;
+      pid_t worker_pid = -1;
+      std::string trace_id;
+      std::string span_id;
+      std::string error_message;
+    };
+    std::vector<RequestObservabilityEvent> drain_runtime_request_observability_events(std::size_t limit);
+    std::vector<RequestSpanEvent> drain_runtime_request_span_events(std::size_t limit);
+    std::uint64_t runtime_native_request_observability_events_total();
+    std::uint64_t runtime_native_request_observability_errors_total();
+    std::uint64_t runtime_native_request_admission_rejections_total();
     void emit_runtime_request_observability_event(
         const AccessLogEvent &event,
         const std::string &outcome,
         const std::string &failure_kind,
         bool response_sent,
         const std::string &error_message);
+    void emit_runtime_request_span_event(const RequestSpanEvent &event);
     void log_runtime_shutdown_begin();
     void log_runtime_stop_completed();
     void log_runtime_shutdown_complete();

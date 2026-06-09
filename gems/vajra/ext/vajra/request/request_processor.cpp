@@ -35,16 +35,44 @@ namespace
     return Vajra::request::ascii_case_insensitive_equal(header.name, expected_name);
   }
 
-  std::string header_value(const Vajra::request::ParsedRequest &request, const std::string &name)
+  struct ObservedRequestHeaders
   {
+    std::string host;
+    std::string user_agent;
+    std::string referer;
+    std::string request_id;
+    std::string traceparent;
+  };
+
+  ObservedRequestHeaders observed_request_headers(
+      const Vajra::request::ParsedRequest &request,
+      const Vajra::runtime::AccessLogFieldNeeds &needs)
+  {
+    ObservedRequestHeaders observed;
     for (const auto &header : request.headers)
     {
-      if (header_named(header, name))
+      if (needs.host && header_named(header, "host"))
       {
-        return header.value;
+        observed.host = header.value;
+      }
+      else if (needs.user_agent && header_named(header, "user-agent"))
+      {
+        observed.user_agent = header.value;
+      }
+      else if (needs.referer && header_named(header, "referer"))
+      {
+        observed.referer = header.value;
+      }
+      else if (needs.request_id && header_named(header, "x-request-id"))
+      {
+        observed.request_id = header.value;
+      }
+      else if (needs.trace_context && header_named(header, "traceparent"))
+      {
+        observed.traceparent = header.value;
       }
     }
-    return "";
+    return observed;
   }
 
   std::string traceparent_part(const std::string &traceparent, int part)
@@ -104,7 +132,8 @@ namespace
       const std::string &trace_id = "",
       const std::string &span_id = "")
   {
-    const std::string traceparent = header_value(request_context.request, "traceparent");
+    const Vajra::runtime::AccessLogFieldNeeds needs = Vajra::runtime::access_log_field_needs();
+    const ObservedRequestHeaders headers = observed_request_headers(request_context.request, needs);
     const std::size_t worker_index = Vajra::runtime::current_worker_index();
     return Vajra::runtime::AccessLogEvent{
         request_context.request.request_line.method,
@@ -114,15 +143,15 @@ namespace
         response_body_bytes,
         request_context.socket.remote_address,
         request_context.request.request_line.version,
-        header_value(request_context.request, "host"),
-        header_value(request_context.request, "user-agent"),
-        header_value(request_context.request, "referer"),
-        header_value(request_context.request, "x-request-id"),
+        headers.host,
+        headers.user_agent,
+        headers.referer,
+        headers.request_id,
         getpid(),
         static_cast<int>(worker_index),
         connection_outcome,
-        trace_id.empty() ? traceparent_part(traceparent, 1) : trace_id,
-        span_id.empty() ? traceparent_part(traceparent, 2) : span_id};
+        trace_id.empty() && needs.trace_context ? traceparent_part(headers.traceparent, 1) : trace_id,
+        span_id.empty() && needs.trace_context ? traceparent_part(headers.traceparent, 2) : span_id};
   }
 
   Vajra::runtime::AccessLogEvent access_event_for_unparsed_head(

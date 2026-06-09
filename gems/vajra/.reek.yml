@@ -2,22 +2,31 @@ detectors:
   ControlParameter:
     exclude:
       - Vajra::CLI::Launcher#app
-  UncommunicativeVariableName:
-    accept:
-      - e
-      - _
-  TooManyStatements:
-    enabled: true
-    max_statements: 25
-  TooManyConstants:
-    enabled: true
-    max_constants: 10
-  UtilityFunction:
-    enabled: false
-  NilCheck:
-    enabled: true
+      - Vajra::Internal::Tracing::NativeRequestOtlpExporter
+  DataClump:
     exclude:
+      - Vajra::Internal::Tracing::NativeRequestOtlpExporter
+  DuplicateMethodCall:
+    exclude:
+      - Vajra::Internal::Tracing::NativeRequestOtlpExporter
+      - Vajra::Internal::Tracing#install_metric_instruments
+      - Vajra::Internal::Tracing#in_span
+      - Vajra::Internal::Tracing#stop_request_observability_drain_thread
+  FeatureEnvy:
+    exclude:
+      - Vajra::Internal::Tracing::NativeRequestOtlpExporter
+  LongParameterList:
+    exclude:
+      - Vajra::Internal::Tracing::NativeRequestOtlpExporter
+      - Vajra::Internal::Tracing#in_span
+      - Vajra::Internal::Tracing#resolve_string
+      - Vajra::Internal::Tracing#write_trace_state
+  NilCheck:
+    exclude:
+      - Vajra::Internal::Tracing::NativeRequestOtlpExporter
       - Vajra::CLI::Launcher#normalize_setting_values
+      - Vajra::Internal::Tracing#configured_meter
+      - Vajra::Internal::Tracing#in_span
       - Vajra::Internal::Tracing#with_request_span
       - Vajra::Internal::Tracing#empty_to_nil
       - Vajra::Internal::Tracing#env_value
@@ -25,6 +34,24 @@ detectors:
       - Vajra::Internal::Tracing#resolve_boolean
       - Vajra::Internal::Tracing#resolve_config
       - Vajra::Internal::Tracing#trace_context_value
+  RepeatedConditional:
+    exclude:
+      - Vajra::Internal::Tracing::NativeRequestOtlpExporter
+  UncommunicativeVariableName:
+    accept:
+      - e
+      - _
+  TooManyStatements:
+    enabled: true
+    max_statements: 25
+  TooManyMethods:
+    exclude:
+      - Vajra::Internal::Tracing::NativeRequestOtlpExporter
+  TooManyConstants:
+    enabled: true
+    max_constants: 10
+  UtilityFunction:
+    enabled: false
   ManualDispatch:
     exclude:
       - Vajra::Internal::Tracing#attach_trace_context
@@ -32,23 +59,20 @@ detectors:
       - Vajra::Internal::Tracing#configured_meter
       - Vajra::Internal::Tracing#configured_tracer_provider
       - Vajra::Internal::Tracing#current_span
+      - Vajra::Internal::Tracing#drain_request_observability_batch
       - Vajra::Internal::Tracing#extract_context
       - Vajra::Internal::Tracing#install_request_observability_callback
+      - Vajra::Internal::Tracing#in_span
       - Vajra::Internal::Tracing#mark_span_success
       - Vajra::Internal::Tracing#record_span_exception
       - Vajra::Internal::Tracing#record_span_error
       - Vajra::Internal::Tracing#record_span_response_status
       - Vajra::Internal::Tracing#response_status_from
       - Vajra::Internal::Tracing#shutdown!
+      - Vajra::Internal::Tracing#span_attemptable?
       - Vajra::Internal::Tracing#span_context_for
+      - Vajra::Internal::Tracing#start_request_observability_drain_thread
       - Vajra::Internal::Tracing#trace_context_value
-  LongParameterList:
-    exclude:
-      - Vajra::Internal::Tracing#resolve_string
-      - Vajra::Internal::Tracing#write_trace_state
-  DuplicateMethodCall:
-    exclude:
-      - Vajra::Internal::Tracing#install_metric_instruments
 exclude_paths:
   - performance/**/*
   - spec/**/*

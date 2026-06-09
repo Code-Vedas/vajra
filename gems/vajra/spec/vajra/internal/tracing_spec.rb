@@ -24,13 +24,21 @@ RSpec.describe Vajra::Internal::Tracing do
       define_singleton_method(:new) { provider }
     end
     simple_span_processor_class = Class.new do
-      define_singleton_method(:new) { |arg| processor || arg }
+      define_singleton_method(:new) { |arg, **_options| processor || arg }
     end
     batch_span_processor_class = Class.new do
-      define_singleton_method(:new) { |arg| processor || arg }
+      singleton_class.attr_accessor :last_options
+      define_singleton_method(:new) do |arg, **options|
+        self.last_options = options
+        processor || arg
+      end
     end
     otlp_exporter_class = Class.new do
-      define_singleton_method(:new) { |endpoint:| exporter || endpoint }
+      singleton_class.attr_accessor :last_options
+      define_singleton_method(:new) do |**options|
+        self.last_options = options
+        exporter || options
+      end
     end
 
     export_module.const_set(:SimpleSpanProcessor, simple_span_processor_class)
@@ -88,7 +96,71 @@ RSpec.describe Vajra::Internal::Tracing do
     stub_const('OpenTelemetry::Trace', trace_module)
   end
 
+  def stub_trace_with_span(ok_status: nil, error_status: nil)
+    trace_module = Module.new
+    trace_module.define_singleton_method(:with_span) { |span, &block| block.call(span, :context) }
+    if ok_status || error_status
+      status_class = Class.new do
+        define_singleton_method(:ok) { ok_status } if ok_status
+        define_singleton_method(:error) { |message| [error_status, message] } if error_status
+      end
+      trace_module.const_set(:Status, status_class)
+    end
+    stub_const('OpenTelemetry::Trace', trace_module)
+  end
+
+  def stub_native_otlp_classes # rubocop:disable Metrics/AbcSize
+    open_telemetry_module = Module.new
+    sdk_module = Module.new
+    resources_module = Module.new
+    trace_module = Module.new
+    exporter_module = Module.new
+    otlp_module = Module.new
+
+    resource_class = Class.new do
+      define_singleton_method(:create) { |attributes| attributes }
+    end
+    instrumentation_scope_class = Struct.new(:name, :version)
+    status_class = Class.new do
+      define_singleton_method(:ok) { :ok }
+      define_singleton_method(:error) { |message| [:error, message] }
+    end
+    trace_module.const_set(:INVALID_SPAN_ID, "\0" * 8)
+    trace_module.const_set(:Status, status_class)
+    trace_module.define_singleton_method(:generate_trace_id) { ['33' * 16].pack('H*') }
+    trace_module.define_singleton_method(:generate_span_id) { ['44' * 8].pack('H*') }
+
+    exporter_class = Class.new do
+      singleton_class.attr_accessor :exports, :last_options, :shutdown_timeout
+      self.exports = []
+
+      define_singleton_method(:new) do |**options|
+        self.last_options = options
+        super()
+      end
+
+      def export(spans, timeout:)
+        self.class.exports << [spans, timeout]
+      end
+
+      def shutdown(timeout:)
+        self.class.shutdown_timeout = timeout
+      end
+    end
+
+    resources_module.const_set(:Resource, resource_class)
+    sdk_module.const_set(:Resources, resources_module)
+    sdk_module.const_set(:InstrumentationScope, instrumentation_scope_class)
+    otlp_module.const_set(:Exporter, exporter_class)
+    exporter_module.const_set(:OTLP, otlp_module)
+    open_telemetry_module.const_set(:SDK, sdk_module)
+    open_telemetry_module.const_set(:Trace, trace_module)
+    open_telemetry_module.const_set(:Exporter, exporter_module)
+    stub_const('OpenTelemetry', open_telemetry_module)
+  end
+
   before do
+    described_class.send(:stop_request_observability_drain_thread)
     described_class::TRACE_MUTEX.synchronize do
       described_class::TRACE_STATE.enabled = false
       described_class::TRACE_STATE.available = false
@@ -100,17 +172,25 @@ RSpec.describe Vajra::Internal::Tracing do
       described_class::TRACE_STATE.request_duration = nil
       described_class::TRACE_STATE.active_requests = nil
       described_class::TRACE_STATE.metric_instruments = {}
+      described_class::TRACE_STATE.request_observability_thread = nil
+      described_class::TRACE_STATE.request_observability_stop = false
+      described_class::TRACE_STATE.native_request_exporter = nil
     end
     allow(described_class).to receive(:require).and_call_original
     allow(Kernel).to receive(:require).and_call_original
     allow(described_class).to receive(:__native_set_tracing_status__)
     allow(described_class).to receive(:__native_set_lifecycle_callback__)
     allow(described_class).to receive(:__native_set_request_observability_callback__)
+    allow(described_class).to receive_messages(
+      __native_drain_request_observability_events__: [],
+      __native_drain_request_span_events__: []
+    )
     allow(described_class).to receive(:warn)
   end
 
   after do
-    described_class.send(:write_trace_state, enabled: false, available: false, tracer: nil, meter: nil, provider: nil)
+    described_class.send(:stop_request_observability_drain_thread)
+    described_class.send(:write_trace_state, enabled: false, available: false, tracer: nil, meter: nil, provider: nil, native_request_exporter: nil)
     described_class::TRACE_MUTEX.synchronize do
       described_class::TRACE_STATE.warning_emitted = false
     end
@@ -126,6 +206,12 @@ RSpec.describe Vajra::Internal::Tracing do
     ENV.delete('OTEL_RESOURCE_ATTRIBUTES')
     ENV.delete('OTEL_TRACES_SAMPLER')
     ENV.delete('OTEL_TRACES_SAMPLER_ARG')
+    ENV.delete('OTEL_EXPORTER_OTLP_COMPRESSION')
+    ENV.delete('OTEL_EXPORTER_OTLP_TRACES_COMPRESSION')
+    ENV.delete('OTEL_BSP_MAX_QUEUE_SIZE')
+    ENV.delete('OTEL_BSP_MAX_EXPORT_BATCH_SIZE')
+    ENV.delete('OTEL_BSP_SCHEDULE_DELAY')
+    ENV.delete('OTEL_BSP_EXPORT_TIMEOUT')
   end
 
   it 'disables tracing cleanly when trace_enabled is false' do
@@ -138,9 +224,22 @@ RSpec.describe Vajra::Internal::Tracing do
     ).to be(false)
 
     expect(described_class).to have_received(:__native_set_tracing_status__)
-      .with(false, false, '/ignored', 'vajra-test')
+      .with(false, false, '/ignored', 'vajra-test', false, 1.0)
     expect(described_class).to have_received(:__native_set_lifecycle_callback__).with(nil)
     expect(described_class).to have_received(:__native_set_request_observability_callback__).with(nil)
+  end
+
+  it 'keeps OpenTelemetry fully opt-in by default' do
+    allow(described_class).to receive(:build_telemetry).and_return(provider: Object.new, tracer: tracer, meter: Object.new)
+
+    expect(described_class.install_from_start_options!({})).to be(false)
+
+    expect(described_class).not_to have_received(:build_telemetry)
+    expect(described_class).to have_received(:__native_set_tracing_status__).with(false, false, '', 'vajra', false, 1.0)
+    expect(described_class).to have_received(:__native_set_lifecycle_callback__).with(nil)
+    expect(described_class).to have_received(:__native_set_request_observability_callback__).with(nil)
+    state = described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.to_h }
+    expect(state).to include(tracer: nil, meter: nil, available: false)
   end
 
   it 'warns and stays boot-safe when OpenTelemetry gems are unavailable' do
@@ -155,7 +254,7 @@ RSpec.describe Vajra::Internal::Tracing do
     ).to be(false)
 
     expect(described_class).to have_received(:__native_set_tracing_status__)
-      .with(true, false, 'http://127.0.0.1:4318/v1/traces', 'vajra-test')
+      .with(true, false, 'http://127.0.0.1:4318/v1/traces', 'vajra-test', false, 1.0)
     expect(described_class).to have_received(:warn).with(include('OpenTelemetry tracing requested'))
   end
 
@@ -171,10 +270,58 @@ RSpec.describe Vajra::Internal::Tracing do
     ).to be(true)
 
     expect(described_class).to have_received(:__native_set_tracing_status__)
-      .with(true, true, 'http://127.0.0.1:4318/v1/traces', 'vajra-test')
+      .with(true, true, 'http://127.0.0.1:4318/v1/traces', 'vajra-test', true, 1.0)
     expect(described_class).to have_received(:__native_set_lifecycle_callback__).with(described_class.method(:emit_lifecycle_span))
     expect(described_class).to have_received(:__native_set_request_observability_callback__)
       .with(described_class.method(:emit_native_request_span))
+  end
+
+  it 'keeps active Rack context synchronous only for app-owned telemetry' do
+    allow(described_class).to receive(:build_telemetry).and_return(provider: Object.new, tracer: tracer, meter: nil)
+
+    expect(
+      described_class.install_from_start_options!(
+        trace_enabled: true,
+        trace_endpoint: 'http://127.0.0.1:4318/v1/traces',
+        trace_service_name: 'vajra-test',
+        trace_otel_owner: true
+      )
+    ).to be(true)
+
+    expect(described_class).to have_received(:__native_set_tracing_status__)
+      .with(true, true, 'http://127.0.0.1:4318/v1/traces', 'vajra-test', false, 1.0)
+  end
+
+  it 'installs native callbacks for metrics-only telemetry without reporting tracing as available' do
+    allow(described_class).to receive(:build_telemetry).and_return(provider: nil, tracer: nil, meter: Object.new)
+    allow(described_class).to receive(:install_metric_instruments)
+
+    expect(described_class.install_from_start_options!(trace_enabled: true, trace_service_name: 'vajra-test')).to be(false)
+
+    expect(described_class).to have_received(:__native_set_tracing_status__).with(true, false, '', 'vajra-test', false, 1.0)
+    expect(described_class).to have_received(:__native_set_lifecycle_callback__).with(described_class.method(:emit_lifecycle_span))
+    expect(described_class).to have_received(:__native_set_request_observability_callback__)
+      .with(described_class.method(:emit_native_request_span))
+  end
+
+  it 'does not install Ruby request draining when native OTLP owns request export' do
+    exporter = Object.new
+    allow(exporter).to receive(:shutdown)
+    allow(described_class).to receive(:build_telemetry)
+      .and_return(provider: Object.new, tracer: tracer, meter: Object.new, native_request_exporter: exporter)
+    allow(described_class).to receive(:install_metric_instruments)
+
+    expect(
+      described_class.install_from_start_options!(
+        trace_enabled: true,
+        trace_endpoint: 'http://127.0.0.1:4318/v1/traces',
+        trace_service_name: 'vajra-test',
+        trace_otel_owner: true
+      )
+    ).to be(true)
+
+    expect(described_class).to have_received(:__native_set_lifecycle_callback__).with(described_class.method(:emit_lifecycle_span))
+    expect(described_class).to have_received(:__native_set_request_observability_callback__).with(nil)
   end
 
   it 'yields directly when request tracing is unavailable' do
@@ -186,6 +333,114 @@ RSpec.describe Vajra::Internal::Tracing do
     end
 
     expect(seen).to be(true)
+  end
+
+  it 'records request metrics without creating spans when only metrics are available' do
+    request_counter = Class.new do
+      attr_reader :entries
+
+      def initialize
+        @entries = []
+      end
+
+      def add(value, attributes:)
+        @entries << [value, attributes]
+      end
+    end.new
+    request_duration = Class.new do
+      attr_reader :entries
+
+      def initialize
+        @entries = []
+      end
+
+      def record(value, attributes:)
+        @entries << [value, attributes]
+      end
+    end.new
+    described_class.send(:write_trace_state, enabled: true, available: false, tracer: nil, meter: Object.new, provider: nil)
+    described_class::TRACE_MUTEX.synchronize do
+      described_class::TRACE_STATE.request_counter = request_counter
+      described_class::TRACE_STATE.request_duration = request_duration
+    end
+
+    response = described_class.with_request_span('REQUEST_METHOD' => 'GET', 'SERVER_PROTOCOL' => 'HTTP/1.1') { [201, {}, ['OK']] }
+
+    expect(response).to eq([201, {}, ['OK']])
+    expect(request_counter.entries.last.last).to include('http.response.status_code' => 201)
+    expect(request_duration.entries.last.last).to include('http.response.status_code' => 201)
+  end
+
+  it 'records metrics-only requests without status attributes when no Rack status is returned' do
+    request_counter = native_metric_instrument
+    described_class.send(:write_trace_state, enabled: true, available: false, tracer: nil, meter: Object.new, provider: nil)
+    described_class::TRACE_MUTEX.synchronize do
+      described_class::TRACE_STATE.request_counter = request_counter
+    end
+
+    response = described_class.with_request_span('REQUEST_METHOD' => 'GET', 'SERVER_PROTOCOL' => 'HTTP/1.1') { :ok }
+
+    expect(response).to eq(:ok)
+    expect(request_counter.values.last.last).not_to include('http.response.status_code')
+  end
+
+  it 'skips Rack span construction when the tracer reports disabled' do
+    instrument = native_metric_instrument
+    disabled_tracer = Class.new do
+      def enabled?
+        false
+      end
+
+      def in_span(*)
+        raise 'span should not be created'
+      end
+    end.new
+    described_class.send(:write_trace_state, enabled: true, available: true, tracer: disabled_tracer, meter: Object.new, provider: nil)
+    described_class::TRACE_MUTEX.synchronize do
+      described_class::TRACE_STATE.request_counter = instrument
+    end
+
+    response = described_class.with_request_span('REQUEST_METHOD' => 'GET', 'SERVER_PROTOCOL' => 'HTTP/1.1') { [202, {}, ['OK']] }
+
+    expect(response.first).to eq(202)
+    expect(instrument.values.last.last).to include('http.response.status_code' => 202)
+  end
+
+  it 'falls back to span construction when sampler probing is unsupported' do
+    probing_tracer = Class.new do
+      attr_reader :span_count
+
+      def sampled?(_carrier)
+        raise ArgumentError
+      end
+
+      def in_span(*)
+        @span_count = span_count.to_i + 1
+        yield(Object.new)
+      end
+    end.new
+    described_class.send(:write_trace_state, enabled: true, available: true, tracer: probing_tracer, meter: nil, provider: nil)
+
+    described_class.with_request_span('REQUEST_METHOD' => 'GET') { [200, {}, ['OK']] }
+
+    expect(probing_tracer.span_count).to eq(1)
+  end
+
+  it 'reports span attempts unavailable for nil and non-recording tracers' do
+    non_recording_tracer = Class.new do
+      def recording?
+        false
+      end
+    end.new
+
+    expect(described_class.send(:span_attemptable?, nil, {})).to be(false)
+    expect(described_class.send(:span_attemptable?, non_recording_tracer, {})).to be(false)
+  end
+
+  it 'yields directly through the unsampled request path when metrics are unavailable' do
+    result = described_class.send(:with_request_metrics_or_direct, 'REQUEST_METHOD' => 'GET') { :direct }
+
+    expect(result).to eq(:direct)
   end
 
   it 'wraps request execution in a tracer span when tracing is available' do
@@ -245,12 +500,25 @@ RSpec.describe Vajra::Internal::Tracing do
         @entries << [value, attributes]
       end
     end.new
-    described_class.send(:write_trace_state, enabled: true, available: true, tracer:, meter: Object.new, provider: nil)
+    span = Object.new
+    parent_tracer = Class.new do
+      attr_reader :started
+
+      def initialize(span)
+        @span = span
+      end
+
+      def start_span(name, **options)
+        @started = [name, options]
+        @span
+      end
+    end.new(span)
+    stub_trace_with_span
+    described_class.send(:write_trace_state, enabled: true, available: true, tracer: parent_tracer, meter: Object.new, provider: nil)
     described_class::TRACE_MUTEX.synchronize do
       described_class::TRACE_STATE.request_counter = request_counter
       described_class::TRACE_STATE.request_duration = request_duration
     end
-    allow(tracer).to receive(:in_span).and_yield(Object.new)
 
     response = described_class.with_request_span(
       'REQUEST_METHOD' => 'GET',
@@ -259,8 +527,9 @@ RSpec.describe Vajra::Internal::Tracing do
     ) { [204, {}, []] }
 
     expect(response).to eq([204, {}, []])
-    expect(tracer).to have_received(:in_span).with(
-      'GET',
+    started_name, started_options = parent_tracer.started
+    expect(started_name).to eq('GET')
+    expect(started_options).to include(
       attributes: hash_including('http.request.method' => 'GET'),
       with_parent: :parent_context
     )
@@ -449,6 +718,26 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(provider.processors).to be_empty
   end
 
+  it 'does not store an app-owned provider for shutdown' do
+    provider_class = Class.new do
+      def initialize(tracer)
+        @tracer = tracer
+      end
+
+      def tracer(_name)
+        @tracer
+      end
+    end
+    provider = provider_class.new(tracer)
+    stub_open_telemetry_classes(provider:)
+    allow(described_class).to receive(:require).with('opentelemetry/sdk').and_return(true)
+    allow(Kernel).to receive(:require).with('opentelemetry/sdk').and_return(true)
+
+    expect(described_class.install_from_start_options!(trace_enabled: true, trace_otel_owner: false)).to be(true)
+
+    expect(described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.provider }).to be_nil
+  end
+
   it 'returns nil tracer when an app-owned global provider is unset' do
     stub_open_telemetry_classes(provider: nil)
     allow(described_class).to receive(:require).with('opentelemetry/sdk').and_return(true)
@@ -513,6 +802,7 @@ RSpec.describe Vajra::Internal::Tracing do
     allow(described_class).to receive(:require).with('opentelemetry/exporter/otlp').and_return(true)
     allow(Kernel).to receive(:require).with('opentelemetry/sdk').and_return(true)
     allow(Kernel).to receive(:require).with('opentelemetry/exporter/otlp').and_return(true)
+    ENV['OTEL_TRACES_EXPORTER'] = 'console'
 
     config = described_class.send(
       :resolve_config,
@@ -525,6 +815,356 @@ RSpec.describe Vajra::Internal::Tracing do
 
     expect(telemetry.fetch(:tracer)).to eq(tracer)
     expect(provider.processors).to eq([processor])
+    expect(OpenTelemetry::Exporter::OTLP::Exporter.last_options).to include(
+      endpoint: 'http://127.0.0.1:4318/v1/traces',
+      compression: 'none'
+    )
+    expect(OpenTelemetry::SDK::Trace::Export::BatchSpanProcessor.last_options).to include(
+      max_queue_size: 262_144,
+      max_export_batch_size: 65_536,
+      schedule_delay: 5_000.0,
+      exporter_timeout: 30_000.0
+    )
+  end
+
+  it 'builds a direct native OTLP request exporter when Vajra owns OTLP tracing' do
+    allow(described_class).to receive(:require).and_call_original
+    config = described_class::TraceConfig.new(
+      enabled: true,
+      endpoint: 'http://127.0.0.1:4318/v1/traces',
+      service_name: 'vajra-test',
+      otel_owner: true,
+      traces_exporter: 'otlp',
+      metrics_exporter: 'none',
+      sampler: ''
+    )
+
+    exporter = described_class.send(:configured_native_request_exporter, config)
+    exporter_config = exporter.instance_variable_get(:@config)
+
+    expect(exporter).to be_a(described_class::NativeRequestOtlpExporter)
+    expect(exporter_config.fetch(:uri).to_s).to eq('http://127.0.0.1:4318/v1/traces')
+    expect(exporter_config.fetch(:compression)).to eq('none')
+  end
+
+  it 'uses the SDK exporter path for HTTPS OTLP endpoints' do
+    allow(described_class).to receive(:require).and_call_original
+    config = described_class::TraceConfig.new(
+      enabled: true,
+      endpoint: 'https://collector.example.test/v1/traces',
+      service_name: 'vajra-test',
+      otel_owner: true,
+      traces_exporter: 'otlp',
+      metrics_exporter: 'none',
+      sampler: ''
+    )
+
+    expect(described_class.send(:configured_native_request_exporter, config)).to be_nil
+  end
+
+  it 'loads gzip support for a compressed direct native OTLP request exporter' do
+    allow(described_class).to receive(:require).and_call_original
+    ENV['OTEL_EXPORTER_OTLP_COMPRESSION'] = 'gzip'
+    config = described_class::TraceConfig.new(
+      enabled: true,
+      endpoint: 'http://127.0.0.1:4318/v1/traces',
+      service_name: 'vajra-test',
+      otel_owner: true,
+      traces_exporter: 'otlp',
+      metrics_exporter: 'none',
+      sampler: ''
+    )
+
+    exporter = described_class.send(:configured_native_request_exporter, config)
+
+    expect(exporter.instance_variable_get(:@config).fetch(:compression)).to eq('gzip')
+    expect(described_class).to have_received(:require).with('zlib')
+  end
+
+  it 'warns and disables direct native OTLP export when its dependencies are unavailable' do
+    allow(described_class).to receive(:require).with('json').and_raise(LoadError)
+    config = described_class::TraceConfig.new(
+      enabled: true,
+      endpoint: 'http://127.0.0.1:4318/v1/traces',
+      service_name: 'vajra-test',
+      otel_owner: true,
+      traces_exporter: 'otlp',
+      metrics_exporter: 'none',
+      sampler: ''
+    )
+
+    expect(described_class.send(:configured_native_request_exporter, config)).to be_nil
+    expect(described_class).to have_received(:warn).with(include('OpenTelemetry tracing requested'))
+  end
+
+  it 'uses an owned provider without installing an SDK exporter when direct native OTLP export is active' do
+    provider = Class.new do
+      attr_reader :processors
+
+      def initialize(tracer)
+        @tracer = tracer
+        @processors = []
+      end
+
+      def tracer(_name)
+        @tracer
+      end
+
+      def add_span_processor(processor)
+        @processors << processor
+      end
+    end.new(tracer)
+    stub_native_otlp_classes
+    trace_sdk_module = Module.new
+    trace_sdk_module.const_set(:TracerProvider, Class.new do
+      define_singleton_method(:new) { provider }
+    end)
+    OpenTelemetry::SDK.const_set(:Trace, trace_sdk_module)
+    OpenTelemetry.singleton_class.attr_accessor :tracer_provider
+    allow(described_class).to receive(:require).with('opentelemetry/sdk').and_return(true)
+    allow(described_class).to receive(:require).with('opentelemetry/exporter/otlp').and_return(true)
+    config = described_class::TraceConfig.new(
+      enabled: true,
+      endpoint: 'http://127.0.0.1:4318/v1/traces',
+      service_name: 'vajra-test',
+      otel_owner: true,
+      traces_exporter: 'otlp',
+      metrics_exporter: 'none',
+      sampler: ''
+    )
+
+    telemetry = described_class.send(:build_telemetry, config)
+
+    expect(telemetry.fetch(:provider)).to eq(provider)
+    expect(telemetry.fetch(:tracer)).to eq(tracer)
+    expect(telemetry.fetch(:native_request_exporter)).to be_a(described_class::NativeRequestOtlpExporter)
+    expect(provider.processors).to be_empty
+  end
+
+  it 'preserves an app-owned provider when direct-export provider setup is not owned' do
+    existing_provider = Object.new
+    stub_native_otlp_classes
+    OpenTelemetry.singleton_class.attr_accessor :tracer_provider
+    OpenTelemetry.tracer_provider = existing_provider
+    config = described_class::TraceConfig.new(
+      enabled: true,
+      endpoint: 'http://127.0.0.1:4318/v1/traces',
+      service_name: 'vajra-test',
+      otel_owner: false,
+      traces_exporter: 'otlp',
+      metrics_exporter: 'none',
+      sampler: ''
+    )
+
+    expect(described_class.send(:configured_tracer_provider_without_exporter, config)).to eq(existing_provider)
+  end
+
+  it 'builds a direct-export provider when global provider APIs are absent' do
+    provider = Object.new
+    stub_native_otlp_classes
+    trace_sdk_module = Module.new
+    trace_sdk_module.const_set(:TracerProvider, Class.new do
+      define_singleton_method(:new) { provider }
+    end)
+    OpenTelemetry::SDK.const_set(:Trace, trace_sdk_module)
+    config = described_class::TraceConfig.new(
+      enabled: true,
+      endpoint: 'http://127.0.0.1:4318/v1/traces',
+      service_name: 'vajra-test',
+      otel_owner: true,
+      traces_exporter: 'otlp',
+      metrics_exporter: 'none',
+      sampler: ''
+    )
+
+    expect(described_class.send(:configured_tracer_provider_without_exporter, config)).to eq(provider)
+  end
+
+  it 'exports native request span data directly without SDK span objects' do
+    require 'json'
+    require 'net/http'
+    require 'securerandom'
+    require 'uri'
+    requests = []
+    http = Class.new do
+      define_method(:initialize) { |captured| @captured = captured }
+      define_method(:request) { |request| @captured << request }
+    end.new(requests)
+    allow(Net::HTTP).to receive(:start).and_yield(http)
+    allow(SecureRandom).to receive(:hex).with(8).and_return('44' * 8)
+    allow(SecureRandom).to receive(:hex).with(16).and_return('33' * 16)
+    exporter = described_class::NativeRequestOtlpExporter.new(
+      endpoint: 'http://127.0.0.1:4318/v1/traces',
+      service_name: 'vajra-test',
+      compression: 'none'
+    )
+    parent_trace_id = '11' * 16
+    parent_span_id = '22' * 8
+    success_values = [
+      'GET', '/ok?x=1', 204, 10_000, 'HTTP/1.1', 'example.test',
+      'completed', '', true, 'completed', 2, 123, parent_trace_id, parent_span_id, ''
+    ]
+    failure_values = [
+      '', '/fail', 500, 20_000, 'HTTP/1.1', '',
+      'execution_error', 'execution_error', true, 'closed', 3, 456, '', '', 'boom'
+    ]
+    success = described_class.send(:native_event, success_values)
+    failure = described_class.send(:native_event, failure_values)
+
+    exporter.export([success, failure])
+
+    request = requests.fetch(0)
+    payload = JSON.parse(request.body)
+    first_span, second_span = payload.fetch('resourceSpans').fetch(0).fetch('scopeSpans').fetch(0).fetch('spans')
+    first_attributes = first_span.fetch('attributes').to_h { |entry| [entry.fetch('key'), entry.fetch('value')] }
+    expect(request['content-type']).to eq('application/json')
+    expect(first_span).to include(
+      'traceId' => parent_trace_id,
+      'spanId' => '44' * 8,
+      'parentSpanId' => parent_span_id,
+      'name' => 'GET',
+      'kind' => 2,
+      'status' => { 'code' => 1 }
+    )
+    expect(first_attributes).to include(
+      'url.path' => { 'stringValue' => '/ok' },
+      'http.response.status_code' => { 'intValue' => '204' },
+      'vajra.response.sent' => { 'boolValue' => true },
+      'vajra.request.outcome' => { 'stringValue' => 'completed' }
+    )
+    expect(second_span).to include(
+      'traceId' => '33' * 16,
+      'name' => 'HTTP request',
+      'status' => { 'code' => 2, 'message' => 'boom' }
+    )
+    expect(second_span).not_to have_key('parentSpanId')
+  end
+
+  it 'can gzip direct native OTLP JSON payloads' do
+    require 'json'
+    require 'net/http'
+    require 'securerandom'
+    require 'stringio'
+    require 'uri'
+    require 'zlib'
+    requests = []
+    http = Class.new do
+      define_method(:initialize) { |captured| @captured = captured }
+      define_method(:request) { |request| @captured << request }
+    end.new(requests)
+    allow(Net::HTTP).to receive(:start).and_yield(http)
+    allow(SecureRandom).to receive(:hex).with(8).and_return('55' * 8)
+    event = described_class.send(:native_event, [
+                                   'GET', '/gzip', 200, 1, 'HTTP/1.1', '',
+                                   'completed', '', true, '', 0, 1, '66' * 16, '77' * 8, ''
+                                 ])
+    exporter = described_class::NativeRequestOtlpExporter.new(
+      endpoint: 'http://127.0.0.1:4318/v1/traces',
+      service_name: 'vajra-test',
+      compression: 'gzip'
+    )
+
+    exporter.export([event])
+
+    request = requests.fetch(0)
+    body = Zlib::GzipReader.new(StringIO.new(request.body)).read
+    expect(request['content-encoding']).to eq('gzip')
+    expect(JSON.parse(body).fetch('resourceSpans')).not_to be_empty
+    expect(exporter.shutdown).to be_nil
+  end
+
+  it 'covers direct native OTLP scalar serializer fallbacks' do
+    exporter = described_class::NativeRequestOtlpExporter.new(
+      endpoint: 'http://127.0.0.1:4318/v1/traces',
+      service_name: 'vajra-test',
+      compression: 'none'
+    )
+    body = +''
+
+    exporter.send(:append_attribute_value, body, false)
+    exporter.send(:append_attribute_value, body, 1.25)
+
+    expect(body).to include('{"boolValue":false}', '{"doubleValue":1.25}')
+    expect(exporter.send(:protocol_pair, 'bad')).to eq([nil, nil])
+    expect(exporter.send(:integer_or_nil, 'bad')).to be_nil
+    expect(exporter.send(:integer_or_nil, nil)).to be_nil
+  end
+
+  it 'ignores direct native OTLP post failures' do
+    require 'json'
+    require 'net/http'
+    require 'securerandom'
+    require 'uri'
+    allow(Net::HTTP).to receive(:start).and_raise(Errno::ECONNREFUSED)
+    allow(SecureRandom).to receive(:hex).with(8).and_return('55' * 8)
+    event = described_class.send(:native_event, [
+                                   'GET', '/refused', 200, 1, 'HTTP/1.1', '',
+                                   'completed', '', true, '', 0, 1, '66' * 16, '77' * 8, ''
+                                 ])
+    exporter = described_class::NativeRequestOtlpExporter.new(
+      endpoint: 'http://127.0.0.1:4318/v1/traces',
+      service_name: 'vajra-test',
+      compression: 'none'
+    )
+
+    expect { exporter.export([event]) }.not_to raise_error
+    expect { exporter.export([event]) }.not_to raise_error
+    expect(Net::HTTP).to have_received(:start).once
+  end
+
+  it 'lets standard OTel exporter and batch processor env override Vajra-owned defaults' do
+    provider_class = Class.new do
+      attr_reader :processors
+
+      def initialize(tracer)
+        @tracer = tracer
+        @processors = []
+      end
+
+      def tracer(_name)
+        @tracer
+      end
+
+      def add_span_processor(processor)
+        @processors << processor
+      end
+    end
+    provider = provider_class.new(tracer)
+    stub_open_telemetry_classes(provider:)
+    allow(described_class).to receive(:require).with('opentelemetry/sdk').and_return(true)
+    allow(described_class).to receive(:require).with('opentelemetry/exporter/otlp').and_return(true)
+    ENV['OTEL_TRACES_EXPORTER'] = 'console'
+    ENV['OTEL_EXPORTER_OTLP_COMPRESSION'] = 'gzip'
+    ENV['OTEL_BSP_MAX_QUEUE_SIZE'] = '1024'
+    ENV['OTEL_BSP_MAX_EXPORT_BATCH_SIZE'] = '256'
+    ENV['OTEL_BSP_SCHEDULE_DELAY'] = '100'
+    ENV['OTEL_BSP_EXPORT_TIMEOUT'] = '200'
+
+    config = described_class.send(
+      :resolve_config,
+      trace_enabled: true,
+      trace_endpoint: 'http://127.0.0.1:4318/v1/traces',
+      trace_otel_owner: true
+    )
+    described_class.send(:build_telemetry, config)
+
+    expect(OpenTelemetry::Exporter::OTLP::Exporter.last_options).to include(compression: 'gzip')
+    expect(OpenTelemetry::SDK::Trace::Export::BatchSpanProcessor.last_options).to include(
+      max_queue_size: 1024,
+      max_export_batch_size: 256,
+      schedule_delay: 100.0,
+      exporter_timeout: 200.0
+    )
+  end
+
+  it 'falls back to high-throughput batch processor defaults for invalid standard env values' do
+    ENV['OTEL_BSP_MAX_QUEUE_SIZE'] = 'bad'
+    ENV['OTEL_BSP_SCHEDULE_DELAY'] = 'bad'
+
+    expect(described_class.send(:batch_span_processor_options)).to include(
+      max_queue_size: 262_144,
+      schedule_delay: 5_000.0
+    )
   end
 
   it 'resolves standard OTEL environment variables behind explicit Vajra options' do
@@ -553,7 +1193,18 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(config.endpoint).to eq('')
     expect(config.propagators).to eq('tracecontext')
     expect(config.resource_attributes).to eq('deployment.environment=test')
-    expect(config.sampler).to eq('0.25')
+    expect(config.sampler).to eq('')
+    expect(config.sampler_arg).to eq('0.25')
+  end
+
+  it 'resolves native sample ratios from standard sampler configuration' do
+    expect(described_class.send(:native_sample_ratio, described_class::TraceConfig.new(sampler: 'always_off'))).to eq(0.0)
+    expect(described_class.send(:native_sample_ratio, described_class::TraceConfig.new(sampler: 'parentbased_always_off'))).to eq(0.0)
+    expect(described_class.send(:native_sample_ratio, described_class::TraceConfig.new(sampler: 'traceidratio', sampler_arg: '0.25'))).to eq(0.25)
+    expect(described_class.send(:native_sample_ratio, described_class::TraceConfig.new(sampler: 'parentbased_traceidratio', sampler_arg: '2'))).to eq(1.0)
+    expect(described_class.send(:native_sample_ratio, described_class::TraceConfig.new(sampler: 'parentbased_traceidratio', sampler_arg: '-1'))).to eq(0.0)
+    expect(described_class.send(:native_sample_ratio, described_class::TraceConfig.new(sampler: 'traceidratio', sampler_arg: 'bad'))).to eq(1.0)
+    expect(described_class.send(:native_sample_ratio, described_class::TraceConfig.new(sampler: 'always_on'))).to eq(1.0)
   end
 
   it 'returns unavailable telemetry when the OTLP exporter dependency is unavailable' do
@@ -578,6 +1229,7 @@ RSpec.describe Vajra::Internal::Tracing do
     allow(described_class).to receive(:require).with('opentelemetry/exporter/otlp').and_raise(LoadError)
     allow(Kernel).to receive(:require).with('opentelemetry/sdk').and_return(true)
     allow(Kernel).to receive(:require).with('opentelemetry/exporter/otlp').and_raise(LoadError)
+    ENV['OTEL_TRACES_EXPORTER'] = 'console'
 
     config = described_class.send(
       :resolve_config,
@@ -626,6 +1278,7 @@ RSpec.describe Vajra::Internal::Tracing do
     stub_open_telemetry_classes(provider:, processor:, batch_processor: false)
     allow(described_class).to receive(:require).with('opentelemetry/sdk').and_return(true)
     allow(described_class).to receive(:require).with('opentelemetry/exporter/otlp').and_return(true)
+    ENV['OTEL_TRACES_EXPORTER'] = 'console'
 
     config = described_class.send(
       :resolve_config,
@@ -722,6 +1375,17 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(described_class.send(:configured_meter, config)).to be_nil
   end
 
+  it 'returns no meter when the OpenTelemetry meter provider is unset' do
+    ENV['OTEL_METRICS_EXPORTER'] = 'otlp'
+    stub_open_telemetry_classes(provider: Object.new)
+    OpenTelemetry.singleton_class.attr_accessor :meter_provider
+    OpenTelemetry.meter_provider = nil
+
+    config = described_class.send(:resolve_config, trace_enabled: true)
+
+    expect(described_class.send(:configured_meter, config)).to be_nil
+  end
+
   it 'handles propagation extraction and fallback request span names' do
     propagation = Class.new do
       attr_reader :carrier
@@ -740,6 +1404,66 @@ RSpec.describe Vajra::Internal::Tracing do
       described_class.send(:extract_context, 'HTTP_TRACEPARENT' => 'trace', 'HTTP_TRACESTATE' => 'state')
     ).to eq(:context)
     expect(propagation.carrier).to eq('traceparent' => 'trace', 'tracestate' => 'state')
+    expect(described_class.send(:extract_context, {})).to be_nil
+  end
+
+  it 'records and closes parented spans when the request block raises' do
+    propagation = Class.new do
+      def extract(_carrier)
+        :parent_context
+      end
+    end.new
+    span = Class.new do
+      attr_reader :exception
+      attr_accessor :status, :finished
+
+      def record_exception(error)
+        @exception = error
+      end
+
+      def finish
+        @finished = true
+      end
+    end.new
+    parent_tracer = Class.new do
+      def initialize(span)
+        @span = span
+      end
+
+      def start_span(_name, **_options)
+        @span
+      end
+    end.new(span)
+    stub_trace_with_span(error_status: :error)
+    OpenTelemetry.singleton_class.define_method(:propagation) { propagation }
+    described_class.send(:write_trace_state, enabled: true, available: true, tracer: parent_tracer, meter: nil, provider: nil)
+
+    expect do
+      described_class.with_request_span('REQUEST_METHOD' => 'GET', 'HTTP_TRACEPARENT' => 'trace') { raise 'boom' }
+    end.to raise_error(RuntimeError, 'boom')
+    expect(span.exception.message).to eq('boom')
+    expect(span.status).to eq([:error, 'Unhandled exception of type: RuntimeError'])
+    expect(span.finished).to be(true)
+  end
+
+  it 'reraises parent span start failures before a span exists' do
+    propagation = Class.new do
+      def extract(_carrier)
+        :parent_context
+      end
+    end.new
+    parent_tracer = Class.new do
+      def start_span(_name, **_options)
+        raise 'start failed'
+      end
+    end.new
+    stub_trace_with_span
+    OpenTelemetry.singleton_class.define_method(:propagation) { propagation }
+    described_class.send(:write_trace_state, enabled: true, available: true, tracer: parent_tracer, meter: nil, provider: nil)
+
+    expect do
+      described_class.with_request_span('REQUEST_METHOD' => 'GET', 'HTTP_TRACEPARENT' => 'trace') { [200, {}, ['OK']] }
+    end.to raise_error(RuntimeError, 'start failed')
   end
 
   it 'records span response status and exceptions when span APIs are available' do
@@ -836,15 +1560,21 @@ RSpec.describe Vajra::Internal::Tracing do
 
       def set_attribute(_name, _value); end
     end.new
-    trace_module = Module.new
-    status_class = Class.new do
-      define_singleton_method(:ok) { :ok }
-    end
-    trace_module.const_set(:Status, status_class)
-    stub_const('OpenTelemetry::Trace', trace_module)
+    parent_tracer = Class.new do
+      attr_reader :started
+
+      def initialize(span)
+        @span = span
+      end
+
+      def start_span(name, **options)
+        @started = [name, options]
+        @span
+      end
+    end.new(span)
+    stub_trace_with_span(ok_status: :ok)
     OpenTelemetry.singleton_class.define_method(:propagation) { propagation }
-    described_class.send(:write_trace_state, enabled: true, available: true, tracer:, meter: nil, provider: nil)
-    allow(tracer).to receive(:in_span).and_yield(span)
+    described_class.send(:write_trace_state, enabled: true, available: true, tracer: parent_tracer, meter: nil, provider: nil)
 
     described_class.emit_native_request_span(
       method: '',
@@ -859,12 +1589,81 @@ RSpec.describe Vajra::Internal::Tracing do
       span_id: '2222222222222222'
     )
 
-    expect(tracer).to have_received(:in_span).with(
-      'HTTP request',
+    started_name, started_options = parent_tracer.started
+    expect(started_name).to eq('HTTP request')
+    expect(started_options).to include(
       attributes: hash_including('http.response.status_code' => 204, 'vajra.request.outcome' => 'completed'),
       with_parent: :native_parent
     )
     expect(span.status).to eq(:ok)
+  end
+
+  it 'emits native request spans from compact native span events' do
+    span = native_error_span
+    stub_error_status
+    described_class.send(:write_trace_state, enabled: true, available: true, tracer:, meter: nil, provider: nil)
+    allow(tracer).to receive(:in_span).and_yield(span)
+
+    described_class.emit_native_request_span(
+      [
+        'GET',
+        '/compact?ignored=true',
+        500,
+        10_000_000,
+        'HTTP/1.1',
+        'example.test',
+        'execution_error',
+        'execution_error',
+        true,
+        'close',
+        0,
+        123,
+        '',
+        '',
+        'boom'
+      ]
+    )
+
+    expect(tracer).to have_received(:in_span).with(
+      'GET',
+      attributes: hash_including(
+        'url.path' => '/compact',
+        'http.response.status_code' => 500,
+        'vajra.request.outcome' => 'execution_error'
+      )
+    )
+    expect(span.status).to eq([:error, 'boom'])
+  end
+
+  it 'records native request metrics without creating spans when the tracer reports unsampled' do
+    instrument = native_metric_instrument
+    unsampled_tracer = Class.new do
+      def sampled?(_event)
+        false
+      end
+
+      def in_span(*)
+        raise 'span should not be created'
+      end
+    end.new
+    described_class.send(:write_trace_state, enabled: true, available: true, tracer: unsampled_tracer, meter: Object.new, provider: nil)
+    described_class::TRACE_MUTEX.synchronize do
+      described_class::TRACE_STATE.request_counter = instrument
+      described_class::TRACE_STATE.metric_instruments = { native_request_counter: instrument, native_error_counter: instrument }
+    end
+
+    described_class.emit_native_request_span(
+      method: 'GET',
+      target: '/native',
+      protocol: 'HTTP/1.1',
+      status: 500,
+      duration_nanoseconds: 50_000_000,
+      outcome: 'execution_error',
+      failure_kind: 'execution_error',
+      response_sent: true
+    )
+
+    expect(instrument.values).to include([1, hash_including('vajra.request.outcome' => 'execution_error')])
   end
 
   it 'skips native request spans when tracing is unavailable' do
@@ -876,12 +1675,238 @@ RSpec.describe Vajra::Internal::Tracing do
   end
 
   it 'skips native request callback installation when the extension does not expose it' do
+    allow(described_class).to receive(:respond_to?).and_call_original
     allow(described_class).to receive(:respond_to?)
       .with(:__native_set_request_observability_callback__)
       .and_return(false)
 
     expect do
       described_class.send(:install_request_observability_callback, proc {})
+    end.not_to raise_error
+  end
+
+  it 'drains compact native request span events in batches' do
+    event = ['GET', '/queued', 503, 1, 'HTTP/1.1', '', 'queue_capacity', 'queue_capacity', true, '', 0, 123, '', '', '']
+    allow(described_class).to receive(:__native_drain_request_span_events__)
+      .with(described_class::REQUEST_OBSERVABILITY_BATCH_SIZE)
+      .and_return([event], [])
+    allow(described_class).to receive(:emit_native_request_span)
+
+    expect(described_class.send(:drain_request_observability_batch)).to eq(1)
+    expect(described_class).to have_received(:emit_native_request_span).with(event)
+    expect(described_class.send(:drain_request_observability_batch)).to eq(0)
+  end
+
+  it 'drains compact native request events through a direct exporter and records metrics' do
+    event = ['GET', '/queued', 503, 1, 'HTTP/1.1', '', 'queue_capacity', 'queue_capacity', true, '', 0, 123, '', '', '']
+    exporter = Class.new do
+      attr_reader :events
+
+      def export(events)
+        @events = events
+      end
+    end.new
+    instrument = native_metric_instrument
+    allow(described_class).to receive(:__native_drain_request_span_events__)
+      .with(described_class::REQUEST_OBSERVABILITY_BATCH_SIZE)
+      .and_return([event], [])
+    described_class.send(
+      :write_trace_state,
+      enabled: true,
+      available: false,
+      tracer: nil,
+      meter: Object.new,
+      provider: nil,
+      native_request_exporter: exporter
+    )
+    described_class::TRACE_MUTEX.synchronize do
+      described_class::TRACE_STATE.request_counter = instrument
+      described_class::TRACE_STATE.request_duration = instrument
+      described_class::TRACE_STATE.metric_instruments = {
+        native_request_counter: instrument,
+        native_error_counter: instrument,
+        admission_counter: instrument
+      }
+    end
+
+    expect(described_class.send(:drain_request_observability_batch)).to eq(1)
+
+    expect(exporter.events.first).to eq(event)
+    expect(instrument.values).to include(
+      [1, hash_including('vajra.request.outcome' => 'queue_capacity')],
+      [1.0e-09, hash_including('vajra.request.outcome' => 'queue_capacity')]
+    )
+  end
+
+  it 'skips direct-drain metric allocation when no native request metrics are active' do
+    event = ['GET', '/queued', 503, 1, 'HTTP/1.1', '', 'queue_capacity', 'queue_capacity', true, '', 0, 123, '', '', '']
+    exporter = Class.new do
+      attr_reader :events
+
+      def export(events)
+        @events = events
+      end
+    end.new
+    allow(described_class).to receive(:__native_drain_request_span_events__)
+      .with(described_class::REQUEST_OBSERVABILITY_BATCH_SIZE)
+      .and_return([event], [])
+    allow(described_class).to receive(:record_native_request_metrics_only)
+    described_class.send(
+      :write_trace_state,
+      enabled: true,
+      available: false,
+      tracer: nil,
+      meter: nil,
+      provider: nil,
+      native_request_exporter: exporter
+    )
+
+    expect(described_class.send(:drain_request_observability_batch)).to eq(1)
+
+    expect(exporter.events).to eq([event])
+    expect(described_class).not_to have_received(:record_native_request_metrics_only)
+  end
+
+  it 'falls back to hash native request event drain when compact span drain is unavailable' do
+    event = {
+      method: 'GET',
+      target: '/queued',
+      protocol: 'HTTP/1.1',
+      status: 503,
+      duration_nanoseconds: 1,
+      outcome: 'queue_capacity',
+      failure_kind: 'queue_capacity',
+      response_sent: true
+    }
+    allow(described_class).to receive(:__native_drain_request_span_events__).and_raise(NoMethodError)
+    allow(described_class).to receive(:__native_drain_request_observability_events__)
+      .with(described_class::REQUEST_OBSERVABILITY_BATCH_SIZE)
+      .and_return([event], [])
+    allow(described_class).to receive(:emit_native_request_span)
+
+    expect(described_class.send(:drain_request_observability_batch)).to eq(1)
+    expect(described_class).to have_received(:emit_native_request_span).with(event)
+  end
+
+  it 'treats drain failures as empty batches' do
+    allow(described_class).to receive(:__native_drain_request_span_events__).and_raise(RuntimeError)
+
+    expect(described_class.send(:drain_request_observability_batch)).to eq(0)
+  end
+
+  it 'starts and stops the native request observability drain thread' do
+    allow(described_class).to receive_messages(
+      __native_drain_request_observability_events__: [],
+      __native_drain_request_span_events__: []
+    )
+
+    described_class.send(:start_request_observability_drain_thread)
+    thread = described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.request_observability_thread }
+    expect(thread).to be_alive
+
+    described_class.send(:stop_request_observability_drain_thread)
+
+    expect(described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.request_observability_thread }).to be_nil
+    expect(thread).not_to be_alive
+  end
+
+  it 'does not start a drain thread when the native drain API is unavailable' do
+    allow(described_class).to receive(:respond_to?).and_call_original
+    allow(described_class).to receive(:respond_to?)
+      .with(:__native_drain_request_observability_events__)
+      .and_return(false)
+    allow(described_class).to receive(:respond_to?)
+      .with(:__native_drain_request_span_events__)
+      .and_return(false)
+
+    described_class.send(:start_request_observability_drain_thread)
+
+    expect(described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.request_observability_thread }).to be_nil
+  end
+
+  it 'runs the drain loop through idle and final drain paths' do
+    batches = [0, 2, 0]
+    described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.request_observability_stop = false }
+    allow(described_class).to receive(:drain_request_observability_batch) do
+      value = batches.shift || 0
+      described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.request_observability_stop = true } if value == 2
+      value
+    end
+    allow(described_class).to receive(:sleep) do
+      described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.request_observability_stop = true }
+    end
+
+    described_class.send(:request_observability_drain_loop)
+
+    expect(described_class).to have_received(:sleep).with(described_class::REQUEST_OBSERVABILITY_POLL_SECONDS)
+    expect(batches).to eq([])
+  end
+
+  it 'runs the drain loop with a cooperative yield when batches are non-empty' do
+    batches = [1, 0]
+    described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.request_observability_stop = false }
+    allow(described_class).to receive(:drain_request_observability_batch) do
+      described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.request_observability_stop = true }
+      batches.shift || 0
+    end
+    allow(described_class).to receive(:sleep)
+
+    described_class.send(:request_observability_drain_loop)
+
+    expect(described_class).to have_received(:sleep).with(described_class::REQUEST_OBSERVABILITY_YIELD_SECONDS)
+  end
+
+  it 'stops when the recorded drain thread is already stopped' do
+    thread = Class.new do
+      attr_reader :joined
+
+      def alive?
+        false
+      end
+
+      def join(_timeout)
+        @joined = true
+      end
+    end.new
+    described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.request_observability_thread = thread }
+
+    described_class.send(:stop_request_observability_drain_thread)
+
+    expect(thread.joined).to be(true)
+  end
+
+  it 'wakes live drain threads and drains remaining events before clearing state' do
+    thread = Class.new do
+      attr_reader :joined, :woken
+
+      def alive?
+        true
+      end
+
+      def wakeup
+        @woken = true
+      end
+
+      def join(_timeout)
+        @joined = true
+      end
+    end.new
+    batches = [1, 0]
+    allow(described_class).to receive(:drain_request_observability_batch) { batches.shift || 0 }
+    described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.request_observability_thread = thread }
+
+    described_class.send(:stop_request_observability_drain_thread)
+
+    expect(thread.woken).to be(true)
+    expect(thread.joined).to be(true)
+    expect(batches).to be_empty
+  end
+
+  it 'does not join the current thread when stopping drain state' do
+    described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.request_observability_thread = Thread.current }
+
+    expect do
+      described_class.send(:stop_request_observability_drain_thread)
     end.not_to raise_error
   end
 
@@ -1110,6 +2135,47 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(described_class.send(:build_instrument, Object.new, :create_counter, 'missing')).to be_nil
   end
 
+  it 'skips tracer provider construction when the sampler is always_off' do
+    config = described_class::TraceConfig.new(
+      enabled: true,
+      endpoint: '',
+      service_name: 'vajra-test',
+      otel_owner: true,
+      traces_exporter: 'otlp',
+      metrics_exporter: 'none',
+      sampler: 'always_off'
+    )
+    stub_const('OpenTelemetry', Module.new)
+    allow(described_class).to receive(:require).with('opentelemetry/sdk')
+    allow(described_class).to receive(:configured_tracer_provider).and_return(Object.new)
+
+    telemetry = described_class.send(:build_telemetry, config)
+
+    expect(telemetry).to include(provider: nil, tracer: nil, meter: nil)
+    expect(described_class).not_to have_received(:configured_tracer_provider)
+  end
+
+  it 'skips tracer provider construction when Vajra-owned exporting is disabled' do
+    config = described_class::TraceConfig.new(
+      enabled: true,
+      endpoint: '',
+      service_name: 'vajra-test',
+      otel_owner: true,
+      traces_exporter: 'none',
+      metrics_exporter: 'none',
+      sampler: ''
+    )
+    stub_const('OpenTelemetry', Module.new)
+    allow(described_class).to receive(:require).with('opentelemetry/sdk')
+    allow(described_class).to receive(:configured_tracer_provider).and_return(Object.new)
+
+    telemetry = described_class.send(:build_telemetry, config)
+
+    expect(telemetry).to include(provider: nil, tracer: nil, meter: nil)
+    expect(described_class).not_to have_received(:configured_tracer_provider)
+    expect(described_class.send(:span_export_disabled?, config)).to be(true)
+  end
+
   it 'ignores propagation extraction API failures' do
     propagation = Class.new do
       def extract(_carrier)
@@ -1127,6 +2193,7 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(described_class.send(:empty_to_nil, '')).to be_nil
     expect(described_class.send(:empty_to_nil, 'value')).to eq('value')
     expect(described_class.send(:native_trace_env, trace_id: '', span_id: 'span')).to eq('HTTP_TRACEPARENT' => nil)
+    expect(described_class.send(:native_parent_context, trace_id: '', span_id: 'span')).to be_nil
     expect(described_class.send(:response_status_from, ['not-a-status'])).to be_nil
   end
 
@@ -1148,6 +2215,74 @@ RSpec.describe Vajra::Internal::Tracing do
 
     expect(provider.force_flushed).to be(true)
     expect(provider.shut_down).to be(true)
+  end
+
+  it 'shuts down a direct native request exporter without requiring an owned provider' do
+    exporter = Class.new do
+      attr_reader :shut_down
+
+      def shutdown
+        @shut_down = true
+      end
+    end.new
+    described_class.send(
+      :write_trace_state,
+      enabled: true,
+      available: false,
+      tracer: nil,
+      meter: nil,
+      provider: nil,
+      native_request_exporter: exporter
+    )
+
+    described_class.shutdown!
+
+    expect(exporter.shut_down).to be(true)
+    expect(described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.native_request_exporter }).to be_nil
+  end
+
+  it 'does not restart Ruby request draining after worker fork when native export owns requests' do
+    exporter = Object.new
+    allow(described_class).to receive(:start_request_observability_drain_thread)
+    described_class.send(
+      :write_trace_state,
+      enabled: true,
+      available: false,
+      tracer: nil,
+      meter: nil,
+      provider: nil,
+      native_request_exporter: exporter
+    )
+
+    described_class.after_fork!
+
+    expect(described_class).not_to have_received(:start_request_observability_drain_thread)
+  end
+
+  it 'restarts Ruby request draining after worker fork when Ruby metrics own request events' do
+    allow(described_class).to receive(:start_request_observability_drain_thread)
+    described_class.send(
+      :write_trace_state,
+      enabled: true,
+      available: false,
+      tracer: nil,
+      meter: Object.new,
+      provider: nil,
+      native_request_exporter: nil
+    )
+
+    described_class.after_fork!
+
+    expect(described_class).to have_received(:start_request_observability_drain_thread)
+  end
+
+  it 'does not restart native request observability draining after fork when tracing output is inactive' do
+    allow(described_class).to receive(:start_request_observability_drain_thread)
+    described_class.send(:write_trace_state, enabled: true, available: false, tracer: nil, meter: nil, provider: nil)
+
+    described_class.after_fork!
+
+    expect(described_class).not_to have_received(:start_request_observability_drain_thread)
   end
 
   it 'shuts down cleanly when a provider has no lifecycle APIs' do

@@ -23,6 +23,7 @@ module Vajra
         :propagators,
         :resource_attributes,
         :sampler,
+        :sampler_arg,
         keyword_init: true
       )
       # Mutable process-local telemetry state shared by request and lifecycle hooks.
@@ -37,6 +38,9 @@ module Vajra
         :request_duration,
         :active_requests,
         :metric_instruments,
+        :request_observability_thread,
+        :request_observability_stop,
+        :native_request_exporter,
         keyword_init: true
       )
       TRACE_MUTEX = Mutex.new
@@ -50,10 +54,280 @@ module Vajra
         request_counter: nil,
         request_duration: nil,
         active_requests: nil,
-        metric_instruments: {}
+        metric_instruments: {},
+        request_observability_thread: nil,
+        request_observability_stop: false,
+        native_request_exporter: nil
       )
       INTERNAL_TRACE_ID_HEADER = 'X-Vajra-Internal-Trace-Id'
       INTERNAL_SPAN_ID_HEADER = 'X-Vajra-Internal-Span-Id'
+      REQUEST_OBSERVABILITY_BATCH_SIZE = 4096
+      REQUEST_OBSERVABILITY_POLL_SECONDS = 0.01
+      REQUEST_OBSERVABILITY_YIELD_SECONDS = 0.001
+
+      # Positional native request span event wrapper used to avoid per-event Hash allocation.
+      class NativeEvent
+        INDEXES = {
+          method: 0,
+          target: 1,
+          status: 2,
+          duration_nanoseconds: 3,
+          protocol: 4,
+          host: 5,
+          outcome: 6,
+          failure_kind: 7,
+          response_sent: 8,
+          connection_outcome: 9,
+          worker_index: 10,
+          worker_pid: 11,
+          trace_id: 12,
+          span_id: 13,
+          error_message: 14
+        }.freeze
+
+        def initialize(values)
+          @values = values
+        end
+
+        def [](key)
+          @values[INDEXES.fetch(key)]
+        end
+      end
+
+      # Exports compact native request spans as OTLP/HTTP JSON without SDK Span objects.
+      class NativeRequestOtlpExporter
+        MAX_EXPORT_BATCH_SIZE = 4096
+        OTLP_SPAN_KIND_SERVER = 2
+        OTLP_STATUS_CODE_OK = 1
+        OTLP_STATUS_CODE_ERROR = 2
+        EXPORT_TIMEOUT_SECONDS = 0.01
+        EXPORT_FAILURE_BACKOFF_SECONDS = 1.0
+
+        def initialize(endpoint:, service_name:, compression:)
+          @config = {
+            uri: URI(endpoint),
+            service_name:,
+            gzip: compression == 'gzip',
+            compression:
+          }
+          @mutex = Mutex.new
+          @retry_after_monotonic = 0.0
+        end
+
+        def export(events)
+          return if export_backing_off?
+
+          events.each_slice(MAX_EXPORT_BATCH_SIZE) { |slice| export_slice(slice) }
+        end
+
+        def shutdown
+          nil
+        end
+
+        private
+
+        def export_slice(events)
+          body, headers = encode_payload(events)
+          @mutex.synchronize do
+            post(body, headers)
+            @retry_after_monotonic = 0.0
+          end
+        rescue StandardError
+          record_export_failure
+          nil
+        end
+
+        def export_backing_off?
+          monotonic_seconds < @retry_after_monotonic
+        end
+
+        def record_export_failure
+          @mutex.synchronize { @retry_after_monotonic = monotonic_seconds + EXPORT_FAILURE_BACKOFF_SECONDS }
+        end
+
+        def json_payload_for(events)
+          service_name = @config.fetch(:service_name)
+          body = String.new(capacity: 512 + (events.size * 512))
+          body << '{"resourceSpans":[{"resource":{"attributes":['
+          append_attribute(body, true, 'service.name', service_name)
+          body << ']},"scopeSpans":[{"scope":{"name":'
+          append_json_string(body, service_name)
+          body << '},"spans":['
+          events.each_with_index do |event, index|
+            body << ',' if index.positive?
+            append_span_json(body, event)
+          end
+          body << ']}]}]}'
+          body
+        end
+
+        def append_span_json(body, event) # rubocop:disable Metrics/AbcSize
+          event = Vajra::Internal::Tracing.send(:native_event, event)
+          trace_id, parent_span_id = trace_identity(event)
+          end_timestamp = monotonic_wall_time_nanoseconds
+          duration = event[:duration_nanoseconds].to_i
+          body << '{"traceId":'
+          append_json_string(body, trace_id)
+          body << ',"spanId":'
+          append_json_string(body, SecureRandom.hex(8))
+          if parent_span_id
+            body << ',"parentSpanId":'
+            append_json_string(body, parent_span_id)
+          end
+          body << ',"name":'
+          append_json_string(body, Vajra::Internal::Tracing.send(:native_request_span_name, event))
+          body << ',"kind":'
+          body << OTLP_SPAN_KIND_SERVER.to_s
+          body << ',"startTimeUnixNano":'
+          append_json_string(body, (end_timestamp - duration).to_s)
+          body << ',"endTimeUnixNano":'
+          append_json_string(body, end_timestamp.to_s)
+          body << ',"attributes":['
+          append_span_attributes(body, event)
+          body << '],"status":'
+          append_status_json(body, event)
+          body << '}'
+        end
+
+        def trace_identity(event)
+          trace_id = event[:trace_id].to_s
+          span_id = event[:span_id].to_s
+          return [trace_id, span_id] unless trace_id.empty? || span_id.empty?
+
+          [SecureRandom.hex(16), nil]
+        end
+
+        def append_status_json(body, event)
+          if Vajra::Internal::Tracing.send(:native_success_event?, event)
+            body << '{"code":'
+            body << OTLP_STATUS_CODE_OK.to_s
+            body << '}'
+            return
+          end
+
+          body << '{"code":'
+          body << OTLP_STATUS_CODE_ERROR.to_s
+          body << ',"message":'
+          append_json_string(body, event[:error_message].to_s)
+          body << '}'
+        end
+
+        def append_span_attributes(body, event) # rubocop:disable Metrics/AbcSize
+          protocol_name, protocol_version = protocol_pair(event[:protocol].to_s)
+          first = true
+          first = append_attribute(body, first, 'http.request.method', empty_to_nil_string(event[:method]))
+          first = append_attribute(body, first, 'url.path', Vajra::Internal::Tracing.send(:request_path, event[:target].to_s))
+          first = append_attribute(body, first, 'http.response.status_code', integer_or_nil(event[:status]))
+          first = append_attribute(body, first, 'server.address', empty_to_nil_string(event[:host]))
+          first = append_attribute(body, first, 'network.protocol.name', protocol_name)
+          first = append_attribute(body, first, 'network.protocol.version', protocol_version)
+          first = append_attribute(body, first, 'vajra.request.outcome', event[:outcome])
+          first = append_attribute(body, first, 'vajra.failure.kind', empty_to_nil_string(event[:failure_kind]))
+          first = append_attribute(body, first, 'vajra.response.sent', event[:response_sent])
+          first = append_attribute(body, first, 'vajra.connection.outcome', empty_to_nil_string(event[:connection_outcome]))
+          first = append_attribute(body, first, 'vajra.worker.index', integer_or_nil(event[:worker_index]))
+          append_attribute(body, first, 'vajra.worker.pid', integer_or_nil(event[:worker_pid]))
+        end
+
+        def append_attribute(body, first, name, value)
+          return first if value.nil?
+
+          body << ',' unless first
+          body << '{"key":'
+          append_json_string(body, name)
+          body << ',"value":'
+          append_attribute_value(body, value)
+          body << '}'
+          false
+        end
+
+        def append_attribute_value(body, value)
+          case value
+          when TrueClass, FalseClass
+            body << '{"boolValue":'
+            body << (value ? 'true' : 'false')
+          when Integer
+            body << '{"intValue":'
+            append_json_string(body, value.to_s)
+          when Float
+            body << '{"doubleValue":'
+            body << value.to_s
+          else
+            body << '{"stringValue":'
+            append_json_string(body, value.to_s)
+          end
+          body << '}'
+        end
+
+        def append_json_string(body, value)
+          body << JSON.generate(value.to_s)
+        end
+
+        def protocol_pair(protocol)
+          match = protocol.match(%r{\AHTTP/([0-9.]+)\z})
+          return ['http', match[1]] if match
+
+          [nil, nil]
+        end
+
+        def empty_to_nil_string(value)
+          value = value.to_s
+          value.empty? ? nil : value
+        end
+
+        def integer_or_nil(value)
+          return nil if value.nil? || value.to_s.empty?
+
+          Integer(value)
+        rescue ArgumentError
+          nil
+        end
+
+        def encode_payload(events)
+          body = json_payload_for(events)
+          headers = { 'Content-Type' => 'application/json' }
+          return [body, headers] unless @config.fetch(:gzip)
+
+          [gzip(body), headers.merge('Content-Encoding' => 'gzip')]
+        end
+
+        def gzip(body)
+          buffer = StringIO.new
+          writer = Zlib::GzipWriter.new(buffer)
+          writer.write(body)
+          writer.close
+          buffer.string
+        end
+
+        def post(body, headers)
+          uri = @config.fetch(:uri)
+          request = Net::HTTP::Post.new(uri)
+          headers.each { |name, value| request[name] = value }
+          request.body = body
+          Net::HTTP.start(*http_start_args(uri)) { |http| http.request(request) }
+        end
+
+        def http_start_args(uri)
+          [
+            uri.hostname,
+            uri.port,
+            {
+              use_ssl: uri.scheme == 'https',
+              open_timeout: EXPORT_TIMEOUT_SECONDS,
+              read_timeout: EXPORT_TIMEOUT_SECONDS,
+              write_timeout: EXPORT_TIMEOUT_SECONDS
+            }
+          ]
+        end
+
+        def monotonic_seconds
+          Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        end
+
+        def monotonic_wall_time_nanoseconds
+          (Time.now.to_f * 1_000_000_000).to_i
+        end
+      end
 
       def install_from_start_options!(options)
         config = resolve_config(options)
@@ -61,23 +335,28 @@ module Vajra
         service_name = config.service_name
 
         unless config.enabled
+          stop_request_observability_drain_thread
           update_native_status(enabled: false, available: false, endpoint:, service_name:)
           install_lifecycle_callback(nil)
           install_request_observability_callback(nil)
-          write_trace_state(enabled: false, available: false, tracer: nil, meter: nil, provider: nil)
+          write_trace_state(enabled: false, available: false, tracer: nil, meter: nil, provider: nil, native_request_exporter: nil)
           return false
         end
 
         telemetry = build_telemetry(config)
         tracer = telemetry.fetch(:tracer)
+        meter = telemetry.fetch(:meter)
+        native_request_exporter = telemetry.fetch(:native_request_exporter, nil)
         available = !tracer.equal?(nil)
+        otel_owner = config.otel_owner
 
         write_trace_state(
           enabled: true,
           available:,
           tracer:,
-          meter: telemetry.fetch(:meter),
-          provider: telemetry.fetch(:provider)
+          meter:,
+          provider: otel_owner ? telemetry.fetch(:provider) : nil,
+          native_request_exporter:
         )
         install_metric_instruments
 
@@ -85,38 +364,81 @@ module Vajra
           enabled: true,
           available: available,
           endpoint:,
-          service_name:
+          service_name:,
+          active_context_required: available && !otel_owner,
+          sample_ratio: native_sample_ratio(config)
         )
-        install_lifecycle_callback(available ? method(:emit_lifecycle_span) : nil)
-        install_request_observability_callback(available ? method(:emit_native_request_span) : nil)
+        install_telemetry_callbacks(telemetry)
         available
       end
 
+      def install_telemetry_callbacks(telemetry)
+        install_lifecycle_callback(callback_available?(telemetry) ? method(:emit_lifecycle_span) : nil)
+        install_request_observability_callback(
+          request_callback_available?(telemetry) ? method(:emit_native_request_span) : nil
+        )
+      end
+      private_class_method :install_telemetry_callbacks
+
+      def callback_available?(telemetry)
+        !telemetry.fetch(:tracer).equal?(nil) || telemetry_output_available?(telemetry)
+      end
+      private_class_method :callback_available?
+
+      def telemetry_output_available?(telemetry)
+        !telemetry.fetch(:meter).equal?(nil) || !telemetry.fetch(:native_request_exporter, nil).equal?(nil)
+      end
+      private_class_method :telemetry_output_available?
+
+      def request_callback_available?(telemetry)
+        telemetry.fetch(:native_request_exporter, nil).equal?(nil) && callback_available?(telemetry)
+      end
+      private_class_method :request_callback_available?
+
       def shutdown!
-        provider = TRACE_MUTEX.synchronize { TRACE_STATE.provider }
+        provider, native_request_exporter = TRACE_MUTEX.synchronize { [TRACE_STATE.provider, TRACE_STATE.native_request_exporter] }
+        native_request_exporter&.shutdown
         return unless provider
 
         provider.force_flush if provider.respond_to?(:force_flush)
         provider.shutdown if provider.respond_to?(:shutdown)
       ensure
-        write_trace_state(enabled: false, available: false, tracer: nil, meter: nil, provider: nil)
+        stop_request_observability_drain_thread
+        write_trace_state(enabled: false, available: false, tracer: nil, meter: nil, provider: nil, native_request_exporter: nil)
       end
 
-      def with_request_span(env)
-        tracer = TRACE_MUTEX.synchronize { TRACE_STATE.tracer }
-        return yield if tracer.equal?(nil)
+      def after_fork!
+        enabled, output_available = TRACE_MUTEX.synchronize do
+          [
+            TRACE_STATE.enabled,
+            TRACE_STATE.native_request_exporter.equal?(nil) && (TRACE_STATE.available || TRACE_STATE.meter)
+          ]
+        end
+        start_request_observability_drain_thread if enabled && output_available
+      end
 
+      def with_request_span(env, &)
+        drain_request_observability_batch
+        tracer = TRACE_MUTEX.synchronize { TRACE_STATE.tracer }
+        tracer_missing = tracer.equal?(nil)
+        return yield if tracer_missing && !request_metrics_available?
+        return with_request_metrics_only(env, &) if tracer_missing
+        return with_request_metrics_or_direct(env, &) unless span_attemptable?(tracer, env)
+
+        with_traced_request_span(env, tracer, &)
+      end
+
+      def with_traced_request_span(env, tracer)
         attributes = request_attributes(env)
         span_name = request_span_name(env)
         context = extract_context(env)
         options = { attributes: attributes }
-        options[:with_parent] = context if context
 
         record_active_request(1, attributes)
         started_at = monotonic_seconds
         response_status = nil
         begin
-          tracer.in_span(span_name, **options) do |span|
+          in_span(tracer, span_name, options, context) do |span|
             yield.tap do |result|
               response_status = response_status_from(result)
               record_span_response_status(span, response_status)
@@ -134,15 +456,17 @@ module Vajra
           record_active_request(-1, attributes)
         end
       end
+      private_class_method :with_traced_request_span
 
       def emit_lifecycle_span(event)
         tracer = TRACE_MUTEX.synchronize { TRACE_STATE.tracer }
-        return unless tracer
 
         event_name = event.fetch(:event)
         metric_attributes = lifecycle_attributes(event)
         record_named_metric(:worker_lifecycle_counter, 1, metric_attributes)
         record_named_metric(:worker_health_counter, 1, metric_attributes)
+        return unless tracer
+
         tracer.in_span("vajra.#{event_name}", attributes: compact_attributes(
           'vajra.worker.index' => event[:worker_index],
           'vajra.worker.pid' => event[:pid],
@@ -158,16 +482,16 @@ module Vajra
       end
 
       def emit_native_request_span(event)
+        event = native_event(event)
         tracer = TRACE_MUTEX.synchronize { TRACE_STATE.tracer }
-        return unless tracer
+        return record_native_request_metrics_only(event) unless span_attemptable?(tracer, event)
 
         attributes = native_request_attributes(event)
-        options = { attributes: attributes }
-        context = extract_context(native_trace_env(event))
-        options[:with_parent] = context if context
         duration = nanoseconds_to_seconds(event[:duration_nanoseconds])
 
-        tracer.in_span(native_request_span_name(event), **options) do |span|
+        options = { attributes: attributes }
+        context = native_parent_context(event)
+        in_span(tracer, native_request_span_name(event), options, context) do |span|
           status = integer_or_nil(event[:status])
           record_span_response_status(span, status)
           mark_span_success(span) if status && status < 500 && event[:response_sent]
@@ -190,7 +514,8 @@ module Vajra
           metrics_exporter: env_value('OTEL_METRICS_EXPORTER') || 'none',
           propagators: env_value('OTEL_PROPAGATORS') || 'tracecontext,baggage',
           resource_attributes: env_value('OTEL_RESOURCE_ATTRIBUTES') || '',
-          sampler: env_value('OTEL_TRACES_SAMPLER') || env_value('OTEL_TRACES_SAMPLER_ARG') || ''
+          sampler: env_value('OTEL_TRACES_SAMPLER') || '',
+          sampler_arg: env_value('OTEL_TRACES_SAMPLER_ARG') || ''
         )
       end
       private_class_method :resolve_config
@@ -235,15 +560,71 @@ module Vajra
 
       def build_telemetry(config)
         require 'opentelemetry/sdk'
-        provider = configured_tracer_provider(config)
+        native_request_exporter = configured_native_request_exporter(config)
+        provider = nil
+        unless sampler_always_off?(config) || span_export_disabled?(config)
+          provider = native_request_exporter ? configured_tracer_provider_without_exporter(config) : configured_tracer_provider(config)
+        end
         tracer = provider&.tracer(config.service_name)
         meter = configured_meter(config)
-        { provider:, tracer:, meter: }
+        { provider:, tracer:, meter:, native_request_exporter: }
       rescue LoadError
         emit_missing_dependency_warning
-        { provider: nil, tracer: nil, meter: nil }
+        { provider: nil, tracer: nil, meter: nil, native_request_exporter: nil }
       end
       private_class_method :build_telemetry
+
+      def configured_native_request_exporter(config)
+        endpoint = config.endpoint
+        return nil unless config.otel_owner && config.traces_exporter == 'otlp' && !endpoint.empty?
+        return nil unless endpoint.start_with?('http://')
+
+        require 'json'
+        require 'net/http'
+        require 'securerandom'
+        require 'stringio'
+        require 'uri'
+        require 'zlib' if otlp_compression == 'gzip'
+
+        NativeRequestOtlpExporter.new(endpoint:, service_name: config.service_name, compression: otlp_compression)
+      rescue LoadError
+        emit_missing_dependency_warning
+        nil
+      end
+      private_class_method :configured_native_request_exporter
+
+      def sampler_always_off?(config)
+        config.sampler.to_s == 'always_off'
+      end
+      private_class_method :sampler_always_off?
+
+      def native_sample_ratio(config)
+        case config.sampler.to_s
+        when 'always_off', 'parentbased_always_off'
+          0.0
+        when 'traceidratio', 'parentbased_traceidratio'
+          bounded_sample_ratio(config.sampler_arg)
+        else
+          1.0
+        end
+      end
+      private_class_method :native_sample_ratio
+
+      def bounded_sample_ratio(raw)
+        ratio = Float(raw)
+        return 0.0 if ratio.negative?
+        return 1.0 if ratio > 1.0
+
+        ratio
+      rescue ArgumentError, TypeError
+        1.0
+      end
+      private_class_method :bounded_sample_ratio
+
+      def span_export_disabled?(config)
+        config.otel_owner && config.traces_exporter == 'none' && config.endpoint.empty?
+      end
+      private_class_method :span_export_disabled?
 
       def configured_tracer_provider(config)
         existing_provider = OpenTelemetry.tracer_provider if OpenTelemetry.respond_to?(:tracer_provider)
@@ -256,26 +637,79 @@ module Vajra
       end
       private_class_method :configured_tracer_provider
 
+      def configured_tracer_provider_without_exporter(config)
+        existing_provider = OpenTelemetry.tracer_provider if OpenTelemetry.respond_to?(:tracer_provider)
+        return existing_provider unless config.otel_owner
+
+        provider = OpenTelemetry::SDK::Trace::TracerProvider.new
+        OpenTelemetry.tracer_provider = provider if OpenTelemetry.respond_to?(:tracer_provider=)
+        provider
+      end
+      private_class_method :configured_tracer_provider_without_exporter
+
       def install_exporter_processor(provider, config)
         require 'opentelemetry/exporter/otlp'
-        exporter = OpenTelemetry::Exporter::OTLP::Exporter.new(endpoint: config.endpoint)
+        exporter = OpenTelemetry::Exporter::OTLP::Exporter.new(
+          endpoint: config.endpoint,
+          compression: otlp_compression
+        )
+        batch_processor_available = defined?(OpenTelemetry::SDK::Trace::Export::BatchSpanProcessor)
         processor_class =
-          if defined?(OpenTelemetry::SDK::Trace::Export::BatchSpanProcessor)
+          if batch_processor_available
             OpenTelemetry::SDK::Trace::Export::BatchSpanProcessor
           else
             OpenTelemetry::SDK::Trace::Export::SimpleSpanProcessor
           end
-        provider.add_span_processor(processor_class.new(exporter))
+        processor = if batch_processor_available
+                      processor_class.new(exporter, **batch_span_processor_options)
+                    else
+                      processor_class.new(exporter)
+                    end
+        provider.add_span_processor(processor)
       rescue LoadError
         emit_missing_dependency_warning
       end
       private_class_method :install_exporter_processor
 
+      def otlp_compression
+        env_value('OTEL_EXPORTER_OTLP_TRACES_COMPRESSION') ||
+          env_value('OTEL_EXPORTER_OTLP_COMPRESSION') ||
+          'none'
+      end
+      private_class_method :otlp_compression
+
+      def batch_span_processor_options
+        {
+          max_queue_size: integer_env_value('OTEL_BSP_MAX_QUEUE_SIZE', 262_144),
+          max_export_batch_size: integer_env_value('OTEL_BSP_MAX_EXPORT_BATCH_SIZE', 65_536),
+          schedule_delay: numeric_env_value('OTEL_BSP_SCHEDULE_DELAY', 5_000),
+          exporter_timeout: numeric_env_value('OTEL_BSP_EXPORT_TIMEOUT', 30_000)
+        }
+      end
+      private_class_method :batch_span_processor_options
+
+      def integer_env_value(name, default_value)
+        Integer(env_value(name) || default_value)
+      rescue ArgumentError, TypeError
+        default_value
+      end
+      private_class_method :integer_env_value
+
+      def numeric_env_value(name, default_value)
+        Float(env_value(name) || default_value)
+      rescue ArgumentError, TypeError
+        default_value
+      end
+      private_class_method :numeric_env_value
+
       def configured_meter(config)
         return nil if config.metrics_exporter == 'none'
-        return OpenTelemetry.meter_provider.meter(config.service_name) if OpenTelemetry.respond_to?(:meter_provider)
+        return nil unless OpenTelemetry.respond_to?(:meter_provider)
 
-        nil
+        meter_provider = OpenTelemetry.meter_provider
+        return nil if meter_provider.nil?
+
+        meter_provider.meter(config.service_name)
       end
       private_class_method :configured_meter
 
@@ -353,11 +787,78 @@ module Vajra
           'traceparent' => env['HTTP_TRACEPARENT'],
           'tracestate' => env['HTTP_TRACESTATE']
         }.compact
+        return nil if carrier.empty?
+
         OpenTelemetry.propagation.extract(carrier)
       rescue NoMethodError
         nil
       end
       private_class_method :extract_context
+
+      def in_span(tracer, name, options, parent_context, &)
+        return tracer.in_span(name, **options, &) unless parent_context && tracer.respond_to?(:start_span) && defined?(OpenTelemetry::Trace)
+
+        span = tracer.start_span(name, **options, with_parent: parent_context)
+        OpenTelemetry::Trace.with_span(span) { |active_span, _context| yield active_span }
+      rescue Exception => e # rubocop:disable Lint/RescueException
+        span.record_exception(e) if !span.nil? && span.respond_to?(:record_exception)
+        record_span_error(span, "Unhandled exception of type: #{e.class}") if span
+        raise
+      ensure
+        span.finish if !span.nil? && span.respond_to?(:finish)
+      end
+      private_class_method :in_span
+
+      def with_request_metrics_only(env)
+        attributes = request_attributes(env)
+        record_active_request(1, attributes)
+        started_at = monotonic_seconds
+        response_status = nil
+        begin
+          yield.tap do |result|
+            response_status = response_status_from(result)
+          end
+        ensure
+          duration = monotonic_seconds - started_at
+          metric_attributes = response_status ? attributes.merge('http.response.status_code' => response_status) : attributes
+          record_request_metrics(duration, metric_attributes)
+          record_active_request(-1, attributes)
+        end
+      end
+      private_class_method :with_request_metrics_only
+
+      def with_request_metrics_or_direct(env, &)
+        return yield unless request_metrics_available?
+
+        with_request_metrics_only(env, &)
+      end
+      private_class_method :with_request_metrics_or_direct
+
+      def request_metrics_available?
+        TRACE_MUTEX.synchronize do
+          [TRACE_STATE.request_counter, TRACE_STATE.request_duration, TRACE_STATE.active_requests].any?
+        end
+      end
+      private_class_method :request_metrics_available?
+
+      def native_request_metrics_available?
+        TRACE_MUTEX.synchronize do
+          TRACE_STATE.request_counter || TRACE_STATE.request_duration || TRACE_STATE.metric_instruments.any?
+        end
+      end
+      private_class_method :native_request_metrics_available?
+
+      def span_attemptable?(tracer, carrier)
+        return false unless tracer
+        return false if tracer.respond_to?(:enabled?) && !tracer.enabled?
+        return false if tracer.respond_to?(:recording?) && !tracer.recording?
+        return tracer.sampled?(carrier) if tracer.respond_to?(:sampled?)
+
+        true
+      rescue ArgumentError, NoMethodError
+        true
+      end
+      private_class_method :span_attemptable?
 
       def mark_span_success(span)
         return unless span.respond_to?(:status=)
@@ -470,6 +971,14 @@ module Vajra
       end
       private_class_method :record_native_request_metrics
 
+      def record_native_request_metrics_only(event)
+        attributes = native_request_attributes(event)
+        duration = nanoseconds_to_seconds(event[:duration_nanoseconds])
+        record_request_metrics(duration, attributes)
+        record_native_request_metrics(event, attributes)
+      end
+      private_class_method :record_native_request_metrics_only
+
       def record_named_metric(name, value, attributes)
         instrument = TRACE_MUTEX.synchronize { TRACE_STATE.metric_instruments.fetch(name, nil) }
         instrument&.add(value, attributes: attributes)
@@ -512,13 +1021,14 @@ module Vajra
       end
       private_class_method :compact_attributes
 
-      def write_trace_state(enabled:, available:, tracer:, meter:, provider:)
+      def write_trace_state(enabled:, available:, tracer:, meter:, provider:, native_request_exporter: nil)
         TRACE_MUTEX.synchronize do
           TRACE_STATE.enabled = enabled
           TRACE_STATE.available = available
           TRACE_STATE.tracer = tracer
           TRACE_STATE.meter = meter
           TRACE_STATE.provider = provider
+          TRACE_STATE.native_request_exporter = native_request_exporter
           TRACE_STATE.request_counter = nil unless meter
           TRACE_STATE.request_duration = nil unless meter
           TRACE_STATE.active_requests = nil unless meter
@@ -526,6 +1036,13 @@ module Vajra
         end
       end
       private_class_method :write_trace_state
+
+      def native_event(event)
+        return event unless event.is_a?(Array)
+
+        NativeEvent.new(event)
+      end
+      private_class_method :native_event
 
       def native_request_attributes(event)
         protocol_name, protocol_version = protocol_attributes('SERVER_PROTOCOL' => event[:protocol])
@@ -546,13 +1063,25 @@ module Vajra
       end
       private_class_method :native_request_attributes
 
-      def native_trace_env(event)
+      def native_traceparent(event)
         trace_id = event[:trace_id].to_s
         span_id = event[:span_id].to_s
-        traceparent = trace_id.empty? || span_id.empty? ? nil : "00-#{trace_id}-#{span_id}-01"
-        { 'HTTP_TRACEPARENT' => traceparent }
+        trace_id.empty? || span_id.empty? ? nil : "00-#{trace_id}-#{span_id}-01"
+      end
+      private_class_method :native_traceparent
+
+      def native_trace_env(event)
+        { 'HTTP_TRACEPARENT' => native_traceparent(event) }
       end
       private_class_method :native_trace_env
+
+      def native_parent_context(event)
+        traceparent = native_traceparent(event)
+        return nil unless traceparent
+
+        extract_context('HTTP_TRACEPARENT' => traceparent)
+      end
+      private_class_method :native_parent_context
 
       def native_request_span_name(event)
         method = event[:method].to_s
@@ -603,7 +1132,14 @@ module Vajra
       private_class_method :emit_missing_dependency_warning
 
       def update_native_status(config)
-        __native_set_tracing_status__(config.fetch(:enabled), config.fetch(:available), config.fetch(:endpoint), config.fetch(:service_name))
+        __native_set_tracing_status__(
+          config.fetch(:enabled),
+          config.fetch(:available),
+          config.fetch(:endpoint),
+          config.fetch(:service_name),
+          config.fetch(:active_context_required, false),
+          config.fetch(:sample_ratio, 1.0)
+        )
       end
       private_class_method :update_native_status
 
@@ -616,8 +1152,86 @@ module Vajra
         return unless respond_to?(:__native_set_request_observability_callback__)
 
         __native_set_request_observability_callback__(callback)
+        callback ? start_request_observability_drain_thread : stop_request_observability_drain_thread
       end
       private_class_method :install_request_observability_callback
+
+      def start_request_observability_drain_thread
+        return unless respond_to?(:__native_drain_request_observability_events__)
+
+        stop_request_observability_drain_thread
+        # rubocop:disable ThreadSafety/NewThread
+        thread = Thread.new { request_observability_drain_loop }
+        # rubocop:enable ThreadSafety/NewThread
+        TRACE_MUTEX.synchronize do
+          TRACE_STATE.request_observability_stop = false
+          TRACE_STATE.request_observability_thread = thread
+        end
+      end
+      private_class_method :start_request_observability_drain_thread
+
+      def stop_request_observability_drain_thread
+        thread = TRACE_MUTEX.synchronize do
+          TRACE_STATE.request_observability_stop = true
+          TRACE_STATE.request_observability_thread
+        end
+        if thread
+          thread.wakeup if thread.alive?
+          thread.join(1) unless thread == Thread.current
+        end
+        drain_request_observability_batch until drain_request_observability_batch.zero?
+        TRACE_MUTEX.synchronize do
+          TRACE_STATE.request_observability_thread = nil
+          TRACE_STATE.request_observability_stop = false
+        end
+      end
+      private_class_method :stop_request_observability_drain_thread
+
+      def request_observability_stop?
+        TRACE_MUTEX.synchronize { TRACE_STATE.request_observability_stop }
+      end
+      private_class_method :request_observability_stop?
+
+      def request_observability_drain_loop
+        thread = Thread.current
+        thread.abort_on_exception = false
+        thread.priority = -5
+        loop do
+          break if request_observability_stop?
+
+          drained = drain_request_observability_batch
+          sleep(drained.zero? ? REQUEST_OBSERVABILITY_POLL_SECONDS : REQUEST_OBSERVABILITY_YIELD_SECONDS)
+        end
+        drain_request_observability_batch until drain_request_observability_batch.zero?
+      end
+      private_class_method :request_observability_drain_loop
+
+      def drain_request_observability_batch
+        events = drain_native_request_observability_events
+        native_request_exporter = TRACE_MUTEX.synchronize { TRACE_STATE.native_request_exporter }
+        if native_request_exporter
+          native_request_exporter.export(events)
+          record_native_request_metrics_batch(events) if native_request_metrics_available?
+        else
+          events.each { |event| emit_native_request_span(event) }
+        end
+        events.size
+      rescue StandardError
+        0
+      end
+      private_class_method :drain_request_observability_batch
+
+      def record_native_request_metrics_batch(events)
+        events.each { |event| record_native_request_metrics_only(native_event(event)) }
+      end
+      private_class_method :record_native_request_metrics_batch
+
+      def drain_native_request_observability_events
+        __native_drain_request_span_events__(REQUEST_OBSERVABILITY_BATCH_SIZE)
+      rescue NoMethodError
+        __native_drain_request_observability_events__(REQUEST_OBSERVABILITY_BATCH_SIZE)
+      end
+      private_class_method :drain_native_request_observability_events
     end
     # rubocop:enable Metrics/ModuleLength
   end

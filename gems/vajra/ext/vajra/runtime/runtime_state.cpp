@@ -4,6 +4,7 @@
 // LICENSE file in the root directory of this source tree.
 
 #include "runtime/runtime_state.hpp"
+#include "runtime/runtime_logging.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -762,6 +763,11 @@ std::string Vajra::runtime::runtime_stats_payload_json()
           << "\"dispatch_count\":" << total_dispatches << ','
           << "\"receive_count\":" << total_receives << ','
           << "\"fd_transfer_failures\":" << total_fd_transfer_failures
+          << "},"
+          << "\"native_observability\":{"
+          << "\"request_events_total\":" << Vajra::runtime::runtime_native_request_observability_events_total() << ','
+          << "\"request_errors_total\":" << Vajra::runtime::runtime_native_request_observability_errors_total() << ','
+          << "\"admission_rejections_total\":" << Vajra::runtime::runtime_native_request_admission_rejections_total()
           << "},"
           << "\"health_counts\":{"
           << "\"healthy\":" << healthy << ','

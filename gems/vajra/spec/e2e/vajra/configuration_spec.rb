@@ -308,6 +308,50 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
     end
   end
 
+  def custom_access_log_result
+    Dir.mktmpdir('vajra-custom-access-log') do |root|
+      access_log_path = File.join(root, 'access.log')
+      script = <<~RUBY
+        require "vajra"
+
+        Vajra::Internal::RackExecution.install!(
+          lambda do |_rack_env|
+            [200, { "Content-Type" => "text/plain" }, ["OK"]]
+          end
+        )
+
+        Vajra.start(
+          workers: 1,
+          threads: [1, 1],
+          access_log: ENV.fetch("ACCESS_LOG_PATH"),
+          access_log_format: "%m %U %u"
+        )
+      RUBY
+
+      managed_popen2e(
+        vajra_env(port: disposable_listener_port).merge('ACCESS_LOG_PATH' => access_log_path),
+        *inline_ruby_command(script),
+        chdir: VajraE2EHelpers::PACKAGE_ROOT
+      ) do |_stdin, output, wait_thread|
+        startup_output = []
+        selected_port = wait_for_banner(output, captured_lines: startup_output)
+        socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+        begin
+          socket.write("GET /tokens HTTP/1.1\r\nHost: example.test\r\nUser-Agent: vajra\tagent\r\nConnection: close\r\n\r\n")
+          response = parse_http_response(read_raw_http_response(socket, wait_thread:, output:, request_label: 'custom_access_log_result'))
+        ensure
+          socket.close unless socket.closed?
+        end
+
+        status = stop_process(wait_thread)
+        lines = File.exist?(access_log_path) ? File.readlines(access_log_path, chomp: true) : []
+        { exitstatus: status.exitstatus, response:, lines:, output: "#{startup_output.join}#{output.read}" }
+      ensure
+        cleanup_process(wait_thread, output)
+      end
+    end
+  end
+
   def otel_observability_script
     <<~RUBY
       require "json"
@@ -354,6 +398,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
       end
 
       class FakeTracer
+        def sampled?(_carrier) = ENV.fetch("UNSAMPLED_OTEL", "") != "1"
         def in_span(name, **options)
           span = FakeSpan.new
           yield span
@@ -372,6 +417,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
         access_log: ENV.fetch("ACCESS_LOG_PATH"),
         access_log_format: "json",
         structured_logs: true,
+        stats_path: "/__vajra/stats",
         trace_enabled: true,
         trace_service_name: "vajra-e2e"
       )
@@ -394,9 +440,17 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
     end
   end
 
-  def otel_observability_result_from_paths(access_log_path, span_log_path)
+  def unsampled_otel_observability_result
+    Dir.mktmpdir('vajra-unsampled-otel-observability') do |root|
+      access_log_path = File.join(root, 'access.log')
+      span_log_path = File.join(root, 'spans.jsonl')
+      otel_observability_result_from_paths(access_log_path, span_log_path, extra_env: { 'UNSAMPLED_OTEL' => '1' }, include_stats: true)
+    end
+  end
+
+  def otel_observability_result_from_paths(access_log_path, span_log_path, extra_env: {}, include_stats: false)
     managed_popen2e(
-      vajra_env(port: disposable_listener_port).merge('ACCESS_LOG_PATH' => access_log_path, 'SPAN_LOG_PATH' => span_log_path),
+      vajra_env(port: disposable_listener_port).merge('ACCESS_LOG_PATH' => access_log_path, 'SPAN_LOG_PATH' => span_log_path).merge(extra_env),
       *inline_ruby_command(otel_observability_script),
       chdir: VajraE2EHelpers::PACKAGE_ROOT
     ) do |_stdin, output, wait_thread|
@@ -410,17 +464,44 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
         'otel_observability_result:normal'
       )
       malformed_response = otel_observability_request(selected_port, wait_thread, output, "NOT_HTTP\r\n\r\n", 'otel_observability_result:malformed')
+      drain_response = otel_observability_request(
+        selected_port,
+        wait_thread,
+        output,
+        "GET /drain-native-observability HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n",
+        'otel_observability_result:drain'
+      )
+      wait_for_native_span_log(span_log_path) unless extra_env.fetch('UNSAMPLED_OTEL', '') == '1'
+      stats_response = if include_stats
+                         otel_observability_request(
+                           selected_port,
+                           wait_thread,
+                           output,
+                           "GET /__vajra/stats HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n",
+                           'otel_observability_result:stats'
+                         )
+                       end
       status = stop_process(wait_thread)
       {
         exitstatus: status.exitstatus,
         normal_response:,
         malformed_response:,
+        drain_response:,
+        stats_response:,
         access_lines: File.exist?(access_log_path) ? File.readlines(access_log_path, chomp: true) : [],
         span_lines: File.exist?(span_log_path) ? File.readlines(span_log_path, chomp: true) : [],
         output: "#{startup_output.join}#{output.read}"
       }
     ensure
       cleanup_process(wait_thread, output)
+    end
+  end
+
+  def wait_for_native_span_log(span_log_path)
+    100.times do
+      return if File.exist?(span_log_path) && File.read(span_log_path).include?('request_parse_error')
+
+      sleep 0.01
     end
   end
 
@@ -1059,6 +1140,14 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
     expect(access_event.fetch('worker_index')).to eq(0)
   end
 
+  it 'escapes request-derived values in custom access log formats' do
+    result = custom_access_log_result
+
+    expect(result[:exitstatus]).to eq(0), result[:output]
+    expect(result[:response][:status_line]).to eq('HTTP/1.1 200 OK')
+    expect(result[:lines]).to include('GET /tokens vajra\\tagent')
+  end
+
   it 'correlates access logs with active OTel span ids and emits native error spans' do
     result = otel_observability_result
 
@@ -1086,5 +1175,24 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
       'vajra.response.sent' => true
     )
     expect(native_error_span.fetch('status').first).to eq('error')
+  end
+
+  it 'skips unsampled OTel spans while preserving logs and native stats' do
+    result = unsampled_otel_observability_result
+
+    expect(result[:exitstatus]).to eq(0), result[:output]
+    expect(result[:normal_response][:status_line]).to eq('HTTP/1.1 200 OK')
+    expect(result[:malformed_response][:status_line]).to eq('HTTP/1.1 400 Bad Request')
+    expect(result[:span_lines]).to be_empty
+
+    access_event = JSON.parse(result[:access_lines].find { |line| line.include?('/active-span') })
+    expect(access_event).to include('status' => 200)
+    expect(access_event).not_to include('trace_id', 'span_id')
+
+    stats = JSON.parse(result[:stats_response][:body])
+    expect(stats.fetch('native_observability')).to include(
+      'request_events_total' => be >= 1,
+      'request_errors_total' => be >= 1
+    )
   end
 end

@@ -13,7 +13,23 @@ module Performance
   TMP_ROOT = File.join(ROOT, 'tmp')
   DEFAULT_SERVERS = %w[vajra puma passenger falcon].freeze
   DEFAULT_FIXTURES = %w[rack rails roda sinatra hanami].freeze
+  DEFAULT_OBSERVABILITY_MODES = %w[
+    off
+    access_text
+    access_json
+    access_common
+    access_combined
+    access_token
+    structured_json
+    otel_spans
+    otel_metrics
+    otel_all_local
+    otel_otlp
+    otel_all_otlp
+  ].freeze
   DURATION_SECONDS = 20
+  OBSERVABILITY_FIXTURE = 'rack'
+  OBSERVABILITY_DURATION_SECONDS = 5
   RSS_SAMPLE_INTERVAL_SECONDS = 1
   VUS = 20
   ROUTES = [
@@ -24,7 +40,9 @@ module Performance
     ['post', '/upload']
   ].freeze
 
-  Handle = Struct.new(:fixture, :server, :pid, :url, keyword_init: true)
+  Handle = Struct.new(:fixture, :server, :pid, :url, :mode, keyword_init: true)
+  ObservabilityMode = Struct.new(:name, :config, :env, keyword_init: true)
+  OtlpDrain = Struct.new(:server, :thread, :url, keyword_init: true)
 
   class << self
     def run
@@ -32,6 +50,34 @@ module Performance
       run_root = run_root_path
       puts "[performance] output=#{run_root}"
 
+      summaries = run_main_profile(run_root, options)
+      observability_summaries = run_observability(run_root, options)
+      print_results(summaries)
+      print_observability_results(observability_summaries)
+      write_session_summary(run_root, options, summaries, observability_summaries)
+    end
+
+    def run_main
+      options = config
+      run_root = run_root_path
+      puts "[performance] output=#{run_root}"
+
+      summaries = run_main_profile(run_root, options)
+      print_results(summaries)
+      write_session_summary(run_root, options, summaries, [])
+    end
+
+    def run_observability_profile
+      options = config
+      run_root = run_root_path
+      puts "[performance] output=#{run_root}"
+
+      observability_summaries = run_observability(run_root, options)
+      print_observability_results(observability_summaries)
+      write_session_summary(run_root, options, [], observability_summaries)
+    end
+
+    def run_main_profile(run_root, options)
       summaries = []
       options.fetch(:fixtures).each do |fixture|
         fixture_root = File.join(run_root, fixture)
@@ -41,9 +87,7 @@ module Performance
       ensure
         Array(handles).each { |handle| stop_process_group(handle.pid) }
       end
-
-      print_results(summaries)
-      write_session_summary(run_root, options, summaries)
+      summaries
     end
 
     def config
@@ -66,40 +110,56 @@ module Performance
       end
     end
 
-    def start_server(fixture, server, fixture_root, options)
+    def start_server(fixture, server, fixture_root, options, observability_mode: nil)
       port = reserve_port
-      env = server_env(server, port, options)
+      env = server_env(server, port, options, observability_mode:)
       raise 'missing server' unless available?(server, env, fixture_root)
 
       log_path = File.join(fixture_root, "#{server}.log")
       pid = Process.spawn(env, *command_for(server, port, options), chdir: fixture_root, pgroup: true, out: log_path, err: log_path)
-      handle = Handle.new(fixture:, server:, pid:, url: "http://127.0.0.1:#{port}")
+      handle = Handle.new(fixture:, server:, pid:, url: "http://127.0.0.1:#{port}", mode: observability_mode&.name)
       wait_until_ready(handle)
-      puts "[performance] #{fixture}/#{server}: ready"
+      puts "[performance] #{handle_label(handle)}: ready"
       handle
     end
 
-    def run_k6(fixture_root, handle, options)
+    def run_k6(fixture_root, handle, options, duration: duration_seconds(options))
       script_path = File.join(fixture_root, "#{handle.server}.k6.js")
       summary_path = File.join(fixture_root, "#{handle.server}.summary.json")
-      File.write(script_path, k6_script(handle.url, duration_seconds(options)))
+      File.write(script_path, k6_script(handle.url, duration))
 
       rss_sampler = start_rss_sampler(handle)
       rss_sampler = run_k6_load(fixture_root, handle, summary_path, script_path, rss_sampler)
-      snapshot_vajra_stats(fixture_root, handle) if handle.server == 'vajra'
-      summary = summarize_k6(handle.fixture, handle.server, JSON.parse(File.read(summary_path)), rss_sampler.fetch(:samples), options)
+      stats_snapshot = handle.server == 'vajra' ? snapshot_vajra_stats(fixture_root, handle) : {}
+      summary = summarize_run(fixture_root, handle, summary_path, rss_sampler, options, stats_snapshot)
       File.write(File.join(fixture_root, "#{handle.server}.run-summary.json"), JSON.pretty_generate(summary))
       summary
     end
 
+    def summarize_run(fixture_root, handle, summary_path, rss_sampler, options, stats_snapshot)
+      summary = summarize_k6(handle.fixture, handle.server, JSON.parse(File.read(summary_path)), rss_sampler.fetch(:samples), options)
+      return summary unless handle.mode
+
+      summary.merge(
+        mode: handle.mode,
+        access_log_bytes: access_log_bytes(fixture_root),
+        stats: stats_snapshot
+      )
+    end
+
     def run_k6_load(fixture_root, handle, summary_path, script_path, rss_sampler)
       log_path = File.join(fixture_root, "#{handle.server}.k6.log")
-      puts "[performance] #{handle.fixture}/#{handle.server}: k6"
+      puts "[performance] #{handle_label(handle)}: k6"
       system('k6', 'run', '--quiet', '--summary-export', summary_path, script_path, out: log_path, err: log_path) ||
         raise("k6 failed for #{handle.fixture}/#{handle.server}")
       stop_rss_sampler(rss_sampler)
     ensure
       stop_rss_sampler(rss_sampler) if rss_sampler&.fetch(:thread)&.alive?
+    end
+
+    def handle_label(handle)
+      base = "#{handle.fixture}/#{handle.server}"
+      handle.mode ? "#{base}/#{handle.mode}" : base
     end
 
     def k6_script(url, duration)
@@ -183,6 +243,18 @@ module Performance
       end
     end
 
+    def print_observability_results(summaries)
+      return if summaries.empty?
+
+      puts
+      puts 'vajra observability profile'
+      summaries.group_by { |summary| summary.fetch(:fixture) }.each do |fixture, fixture_summaries|
+        puts
+        puts fixture
+        print_table(observability_headers, fixture_summaries.map { |summary| observability_row(summary) })
+      end
+    end
+
     def result_headers
       ['Server', 'Req/s', 'Req/core', 'Requests', 'Error %', 'P95 ms', 'P99 ms', 'RSS min', 'RSS max', 'RSS final']
     end
@@ -202,7 +274,28 @@ module Performance
       ]
     end
 
-    def write_session_summary(run_root, options, summaries)
+    def observability_headers
+      ['Mode', 'Req/s', 'Req/core', 'Requests', 'Error %', 'P95 ms', 'P99 ms', 'RSS max', 'Log bytes', 'Stats ms', 'Stats bytes']
+    end
+
+    def observability_row(summary)
+      stats = summary.fetch(:stats, {})
+      [
+        summary.fetch(:mode),
+        format('%.2f', summary.fetch(:requests_per_second)),
+        format('%.2f', summary.fetch(:requests_per_core)),
+        summary.fetch(:requests).to_s,
+        format('%.2f', summary.fetch(:error_rate)),
+        format('%.2f', summary.fetch(:p95_ms)),
+        format('%.2f', summary.fetch(:p99_ms)),
+        format_bytes(summary.fetch(:rss_bytes).fetch(:max)),
+        summary.fetch(:access_log_bytes, 0).to_s,
+        format('%.2f', stats.fetch(:duration_ms, 0.0)),
+        stats.fetch(:bytes, 0).to_s
+      ]
+    end
+
+    def write_session_summary(run_root, options, summaries, observability_summaries)
       payload = {
         generated_at: Time.now.utc.iso8601,
         duration_seconds: duration_seconds(options),
@@ -213,8 +306,12 @@ module Performance
         servers: options.fetch(:servers),
         fixtures: options.fetch(:fixtures),
         access_log: access_logging_enabled?,
+        observability_fixture: OBSERVABILITY_FIXTURE,
+        observability_duration_seconds: OBSERVABILITY_DURATION_SECONDS,
+        observability_modes: DEFAULT_OBSERVABILITY_MODES,
         results: summaries
       }
+      payload[:observability_results] = observability_summaries unless observability_summaries.empty?
       File.write(File.join(run_root, 'summary.json'), JSON.pretty_generate(payload))
     end
 
@@ -244,10 +341,10 @@ module Performance
       false
     end
 
-    def write_fixture(fixture, fixture_root)
+    def write_fixture(fixture, fixture_root, observability_mode: nil)
       FileUtils.mkdir_p(File.join(fixture_root, 'config'))
       File.write(File.join(fixture_root, 'config.ru'), fixture_app(fixture))
-      File.write(File.join(fixture_root, 'config', 'vajra.rb'), vajra_config)
+      File.write(File.join(fixture_root, 'config', 'vajra.rb'), vajra_config(observability_mode:))
     end
 
     def run_root_path
@@ -515,26 +612,60 @@ module Performance
       RUBY
     end
 
-    def vajra_config
+    def vajra_config(observability_mode: nil)
+      mode_config = observability_mode&.config || {}
       lines = [
         'Vajra.configure do |config|',
         '  config.rackup "config.ru"',
-        access_logging_enabled? ? "  config.access_log #{access_log_path_for('vajra').inspect}" : nil,
-        ENV.fetch('STRUCTURED_LOGS', '0') == '1' ? '  config.structured_logs' : nil,
+        vajra_access_log_config_line(mode_config),
+        string_config_line(:access_log_format, mode_config.fetch(:access_log_format, nil)),
+        boolean_config_line(:structured_logs, mode_config.fetch(:structured_logs, ENV.fetch('STRUCTURED_LOGS', '0') == '1')),
         '  config.stats_path "/__vajra/stats"',
+        boolean_config_line(:trace_enabled, mode_config.fetch(:trace_enabled, nil)),
+        boolean_config_line(:trace_otel_owner, mode_config.fetch(:trace_otel_owner, nil)),
+        string_config_line(:trace_endpoint, mode_config.fetch(:trace_endpoint, nil)),
+        string_config_line(:trace_service_name, mode_config.fetch(:trace_service_name, nil)),
         'end'
       ]
       "#{lines.compact.join("\n")}\n"
+    end
+
+    def vajra_access_log_config_line(mode_config)
+      access_log = mode_config.fetch(:access_log, nil)
+      access_log = access_log_path_for('vajra') if access_log.nil? && access_logging_enabled?
+      string_config_line(:access_log, access_log)
+    end
+
+    def string_config_line(name, value)
+      return nil if value.nil?
+
+      "  config.#{name} #{value.inspect}"
+    end
+
+    def boolean_config_line(name, value)
+      return nil if value.nil? || value == false
+
+      "  config.#{name}"
     end
 
     def snapshot_vajra_stats(fixture_root, handle)
       uri = URI(handle.url)
       uri.path = '/__vajra/stats'
       uri.query = nil
+      started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       response = Net::HTTP.get_response(uri)
-      File.write(File.join(fixture_root, 'vajra.stats.json'), response.body) if response.is_a?(Net::HTTPSuccess)
+      duration_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1000.0
+      return {} unless response.is_a?(Net::HTTPSuccess)
+
+      File.write(File.join(fixture_root, 'vajra.stats.json'), response.body)
+      { duration_ms:, bytes: response.body.bytesize }
     rescue StandardError
-      nil
+      {}
+    end
+
+    def access_log_bytes(fixture_root)
+      path = File.join(fixture_root, 'vajra.access.log')
+      File.exist?(path) ? File.size(path) : 0
     end
 
     def start_rss_sampler(handle)
@@ -602,7 +733,7 @@ module Performance
       end
     end
 
-    def server_env(server, port, options)
+    def server_env(server, port, options, observability_mode: nil)
       env = {
         'BUNDLE_GEMFILE' => File.join(__dir__, 'Gemfile'),
         'PORT' => port.to_s,
@@ -614,8 +745,108 @@ module Performance
         'RACK_ENV' => 'development',
         'RAILS_ENV' => 'development'
       }
+      env.merge!(observability_mode.env) if observability_mode
       env['PERFORMANCE_ACCESS_LOG'] = access_log_path_for(server) if access_logging_enabled? && server != 'vajra'
       env
+    end
+
+    def run_observability(run_root, options)
+      otlp_drain = start_otlp_drain
+      DEFAULT_OBSERVABILITY_MODES.filter_map do |mode_name|
+        mode = observability_modes(otlp_endpoint: otlp_drain.url).fetch(mode_name)
+        mode_root = File.join(run_root, OBSERVABILITY_FIXTURE, 'observability', mode.name)
+        write_fixture(OBSERVABILITY_FIXTURE, mode_root, observability_mode: mode)
+        handle = start_server(OBSERVABILITY_FIXTURE, 'vajra', mode_root, options, observability_mode: mode)
+        run_k6(mode_root, handle, options, duration: OBSERVABILITY_DURATION_SECONDS)
+      rescue StandardError => e
+        warn "[performance] #{OBSERVABILITY_FIXTURE}/vajra/#{mode_name}: skipped (#{e.message})"
+        nil
+      ensure
+        stop_process_group(handle.pid) if handle
+      end
+    ensure
+      stop_otlp_drain(otlp_drain)
+    end
+
+    def start_otlp_drain
+      server = TCPServer.new('127.0.0.1', 0)
+      url = "http://127.0.0.1:#{server.addr.fetch(1)}/v1/traces"
+      thread = Thread.new { run_otlp_drain(server) }
+      puts "[performance] otlp_drain=#{url}"
+      OtlpDrain.new(server:, thread:, url:)
+    end
+
+    def run_otlp_drain(server)
+      loop do
+        client = server.accept
+        drain_otlp_request(client)
+      rescue IOError, Errno::EBADF
+        break
+      rescue StandardError
+        nil
+      end
+    end
+
+    def drain_otlp_request(client)
+      content_length = 0
+      while (line = client.gets)
+        break if line == "\r\n"
+
+        content_length = line.split(':', 2).fetch(1, '0').to_i if line.downcase.start_with?('content-length:')
+      end
+      client.read(content_length) if content_length.positive?
+      client.write("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    ensure
+      client&.close
+    end
+
+    def stop_otlp_drain(drain)
+      return unless drain
+
+      drain.server.close
+      drain.thread.join(1)
+    end
+
+    def observability_modes(otlp_endpoint: 'http://127.0.0.1:4318/v1/traces')
+      local_trace = {
+        trace_enabled: true,
+        trace_otel_owner: true,
+        trace_service_name: 'vajra-performance'
+      }
+      otlp_trace = local_trace.merge(trace_endpoint: otlp_endpoint)
+      {
+        'off' => observability_mode('off', config: {}),
+        'access_text' => observability_mode('access_text', config: { access_log: 'vajra.access.log' }),
+        'access_json' => observability_mode('access_json', config: access_log_config('json')),
+        'access_common' => observability_mode('access_common', config: access_log_config('common')),
+        'access_combined' => observability_mode('access_combined', config: access_log_config('combined')),
+        'access_token' => observability_mode('access_token', config: access_log_config('%m %U %s %D %b %a %H %h %u %r %T %S')),
+        'structured_json' => observability_mode('structured_json', config: access_log_config('json').merge(structured_logs: true)),
+        'otel_spans' => observability_mode('otel_spans', config: local_trace),
+        'otel_metrics' => observability_mode('otel_metrics', config: local_trace, metrics_exporter: 'memory'),
+        'otel_all_local' => observability_mode('otel_all_local', config: local_trace.merge(access_log_config('json'), structured_logs: true),
+                                                                 metrics_exporter: 'memory'),
+        'otel_otlp' => observability_mode('otel_otlp', config: otlp_trace, traces_exporter: 'otlp'),
+        'otel_all_otlp' => observability_mode('otel_all_otlp', config: otlp_trace.merge(access_log_config('json'), structured_logs: true),
+                                                               traces_exporter: 'otlp', metrics_exporter: 'memory')
+      }
+    end
+
+    def observability_mode(name, config:, traces_exporter: 'none', metrics_exporter: 'none')
+      ObservabilityMode.new(name:, config:, env: otel_env(traces_exporter, metrics_exporter))
+    end
+
+    def access_log_config(format)
+      { access_log: 'vajra.access.log', access_log_format: format }
+    end
+
+    def otel_env(traces_exporter, metrics_exporter)
+      {
+        'OTEL_TRACES_EXPORTER' => traces_exporter,
+        'OTEL_METRICS_EXPORTER' => metrics_exporter,
+        'OTEL_SERVICE_NAME' => 'vajra-performance',
+        'OTEL_RESOURCE_ATTRIBUTES' => 'service.namespace=vajra.performance'
+      }
     end
 
     def access_logging_enabled?
@@ -675,9 +906,19 @@ module Performance
 end
 
 namespace :performance do
-  desc 'Run k6 performance comparison'
+  desc 'Run main and observability performance profiles'
   task :run do
     Performance.run
+  end
+
+  desc 'Run the main framework/server performance profile'
+  task :main do
+    Performance.run_main
+  end
+
+  desc 'Run the Vajra observability performance profile'
+  task :observability do
+    Performance.run_observability_profile
   end
 end
 

@@ -751,6 +751,104 @@ namespace
     return env;
   }
 
+  struct DirectRackObservabilityFields
+  {
+    std::string method;
+    std::string target;
+    std::string protocol;
+    std::string host;
+    std::string traceparent;
+  };
+
+  DirectRackObservabilityFields direct_rack_observability_fields(
+      const std::vector<Vajra::request::RackEnvEntry> &env_entries)
+  {
+    DirectRackObservabilityFields fields;
+    std::string path;
+    std::string query;
+    std::string server_name;
+    for (const Vajra::request::RackEnvEntry &entry : env_entries)
+    {
+      if (entry.key == "REQUEST_METHOD")
+      {
+        fields.method = entry.value;
+      }
+      else if (entry.key == "PATH_INFO")
+      {
+        path = entry.value;
+      }
+      else if (entry.key == "QUERY_STRING")
+      {
+        query = entry.value;
+      }
+      else if (entry.key == "SERVER_PROTOCOL")
+      {
+        fields.protocol = entry.value;
+      }
+      else if (entry.key == "HTTP_HOST")
+      {
+        fields.host = entry.value;
+      }
+      else if (entry.key == "SERVER_NAME")
+      {
+        server_name = entry.value;
+      }
+      else if (entry.key == "HTTP_TRACEPARENT")
+      {
+        fields.traceparent = entry.value;
+      }
+    }
+    fields.target = std::move(path);
+    if (!query.empty())
+    {
+      fields.target += "?" + query;
+    }
+    if (fields.host.empty())
+    {
+      fields.host = std::move(server_name);
+    }
+    return fields;
+  }
+
+  std::string traceparent_part(const std::string &traceparent, int part)
+  {
+    std::size_t cursor = 0;
+    for (int index = 0; index < part; ++index)
+    {
+      cursor = traceparent.find('-', cursor);
+      if (cursor == std::string::npos)
+      {
+        return "";
+      }
+      ++cursor;
+    }
+    const std::size_t end = traceparent.find('-', cursor);
+    return traceparent.substr(cursor, end == std::string::npos ? std::string::npos : end - cursor);
+  }
+
+  Vajra::runtime::RequestSpanEvent direct_rack_observability_event(
+      const DirectRackObservabilityFields &fields,
+      const Vajra::response::Response &response,
+      std::chrono::steady_clock::time_point started_at)
+  {
+    return Vajra::runtime::RequestSpanEvent{
+        fields.method,
+        fields.target,
+        response.status.code,
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at).count(),
+        fields.protocol,
+        fields.host,
+        "completed",
+        "",
+        true,
+        response.connection_behavior == Vajra::response::ConnectionBehavior::close ? "close" : "keepalive",
+        static_cast<int>(Vajra::runtime::current_worker_index()),
+        getpid(),
+        traceparent_part(fields.traceparent, 1),
+        traceparent_part(fields.traceparent, 2),
+        ""};
+  }
+
   VALUE protected_execute_rack_request(VALUE data)
   {
     auto *context = reinterpret_cast<ExecutionCallContext *>(data);
@@ -1044,6 +1142,7 @@ namespace
   VALUE protected_execute_native_rack_request(VALUE data)
   {
     auto *context = reinterpret_cast<ExecutionCallContext *>(data);
+    const auto started_at = std::chrono::steady_clock::now();
     try
     {
       VALUE app = Qnil;
@@ -1060,6 +1159,16 @@ namespace
       VALUE env = ruby_rack_env_from(*context->env_entries, *context->request_body);
       VALUE result = rb_funcall(app, id_call, 1, env);
       context->response = response_from_rack_result(result);
+      DirectRackObservabilityFields observability_fields;
+      if (context->response && Vajra::runtime::runtime_request_span_observability_enabled())
+      {
+        observability_fields = direct_rack_observability_fields(*context->env_entries);
+      }
+      if (context->response && Vajra::runtime::runtime_trace_sampled(observability_fields.traceparent))
+      {
+        Vajra::runtime::emit_runtime_request_span_event(
+            direct_rack_observability_event(observability_fields, *context->response, started_at));
+      }
       return Qnil;
     }
     catch (const std::exception &error)
@@ -1386,7 +1495,7 @@ namespace
       ExecutionCallContext context{&env_entries, &request_body, std::nullopt, ""};
       context.use_native_app =
           rack_execution_app_installed_flag.load(std::memory_order_acquire) &&
-          !Vajra::runtime::runtime_tracing_enabled();
+          !Vajra::runtime::runtime_tracing_active_context_required();
       rb_thread_call_with_gvl(execute_rack_request_with_gvl, &context);
 
       if (!context.error_message.empty())
@@ -1413,7 +1522,7 @@ namespace
       ExecutionCallContext context{&env_entries, &request_body, std::nullopt, ""};
       context.use_native_app =
           rack_execution_app_installed_flag.load(std::memory_order_acquire) &&
-          !Vajra::runtime::runtime_tracing_enabled();
+          !Vajra::runtime::runtime_tracing_active_context_required();
       execute_rack_request_with_gvl(&context);
 
       if (!context.error_message.empty())

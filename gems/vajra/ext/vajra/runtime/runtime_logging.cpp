@@ -28,6 +28,7 @@
 #include <memory>
 #include <mutex>
 #include <netdb.h>
+#include <optional>
 #include <signal.h>
 #include <sstream>
 #include <string>

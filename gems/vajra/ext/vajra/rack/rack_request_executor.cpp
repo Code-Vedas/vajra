@@ -831,22 +831,21 @@ namespace
       const Vajra::response::Response &response,
       std::chrono::steady_clock::time_point started_at)
   {
-    return Vajra::runtime::RequestSpanEvent{
-        fields.method,
-        fields.target,
-        response.status.code,
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at).count(),
-        fields.protocol,
-        fields.host,
-        "completed",
-        "",
-        true,
-        response.connection_behavior == Vajra::response::ConnectionBehavior::close ? "close" : "keepalive",
-        static_cast<int>(Vajra::runtime::current_worker_index()),
-        getpid(),
-        traceparent_part(fields.traceparent, 1),
-        traceparent_part(fields.traceparent, 2),
-        ""};
+    Vajra::runtime::RequestSpanEvent event;
+    event.method = fields.method;
+    event.target = fields.target;
+    event.status_code = response.status.code;
+    event.duration_nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at).count();
+    event.protocol = fields.protocol;
+    event.host = fields.host;
+    event.outcome = "completed";
+    event.response_sent = true;
+    event.connection_outcome = response.connection_behavior == Vajra::response::ConnectionBehavior::close ? "close" : "keepalive";
+    event.worker_index = static_cast<int>(Vajra::runtime::current_worker_index());
+    event.worker_pid = getpid();
+    event.trace_id = traceparent_part(fields.traceparent, 1);
+    event.span_id = traceparent_part(fields.traceparent, 2);
+    return event;
   }
 
   VALUE protected_execute_rack_request(VALUE data)

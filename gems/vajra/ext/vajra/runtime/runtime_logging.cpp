@@ -164,7 +164,7 @@ namespace
   std::atomic_bool request_observability_enabled{false};
   std::mutex request_observability_mutex;
   std::deque<Vajra::runtime::RequestObservabilityEvent> request_observability_events;
-  std::deque<Vajra::runtime::RequestSpanEvent> request_span_events;
+  std::deque<Vajra::runtime::RequestSpanEvent> native_otlp_span_events;
   std::condition_variable request_span_condition;
   std::atomic<std::uint64_t> native_request_observability_events_total{0};
   std::atomic<std::uint64_t> native_request_observability_errors_total{0};
@@ -1381,7 +1381,6 @@ namespace
     const auto now = std::chrono::system_clock::now().time_since_epoch();
     const auto end_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
     const auto start_ns = end_ns - event.duration_nanoseconds;
-    const auto [protocol_name, protocol_version] = protocol_pair_for_otlp(event.protocol);
     out += "{\"traceId\":";
     append_native_otlp_trace_id(out, event);
     out += ",\"spanId\":";
@@ -1392,27 +1391,45 @@ namespace
       append_json_escaped(out, event.span_id);
     }
     out += ",\"name\":";
-    append_json_escaped(out, event.method.empty() ? std::string("HTTP request") : event.method);
-    out += ",\"kind\":2,\"startTimeUnixNano\":";
+    append_json_escaped(out, event.lifecycle_span ? "vajra." + event.event_name : event.method.empty() ? std::string("HTTP request") : event.method);
+    out += ",\"kind\":";
+    out += event.lifecycle_span ? "1" : "2";
+    out += ",\"startTimeUnixNano\":";
     append_json_escaped(out, std::to_string(start_ns));
     out += ",\"endTimeUnixNano\":";
     append_json_escaped(out, std::to_string(end_ns));
     out += ",\"attributes\":[";
     bool first = true;
-    append_otlp_string_attribute(out, first, "http.request.method", event.method);
-    append_otlp_path_attribute(out, first, event.target);
-    append_otlp_int_attribute(out, first, "http.response.status_code", event.status_code);
-    append_otlp_string_attribute(out, first, "server.address", event.host);
-    append_otlp_string_attribute(out, first, "network.protocol.name", protocol_name);
-    append_otlp_string_attribute(out, first, "network.protocol.version", protocol_version);
-    append_otlp_string_attribute(out, first, "vajra.request.outcome", event.outcome);
-    append_otlp_string_attribute(out, first, "vajra.failure.kind", event.failure_kind);
-    append_otlp_bool_attribute(out, first, "vajra.response.sent", event.response_sent);
-    append_otlp_string_attribute(out, first, "vajra.connection.outcome", event.connection_outcome);
+    if (event.lifecycle_span)
+    {
+      append_otlp_string_attribute(out, first, "vajra.worker.lifecycle_event", event.event_name);
+      append_otlp_string_attribute(out, first, "vajra.worker.lifecycle_state", event.lifecycle_state);
+      append_otlp_string_attribute(out, first, "vajra.worker.health_state", event.health_state);
+      append_otlp_string_attribute(out, first, "vajra.worker.recovery_state", event.recovery_state);
+      append_otlp_bool_attribute(out, first, "vajra.worker.available", event.available);
+      append_otlp_string_attribute(out, first, "vajra.worker.exit_classification", event.exit_classification);
+      append_otlp_bool_attribute(out, first, "vajra.worker.terminal_replacement_failure", event.terminal_replacement_failure);
+      append_otlp_bool_attribute(out, first, "vajra.worker.replacement_needed", event.replacement_needed);
+      append_otlp_int_attribute(out, first, "vajra.worker.exit_detail", event.exit_detail);
+    }
+    else
+    {
+      const auto [protocol_name, protocol_version] = protocol_pair_for_otlp(event.protocol);
+      append_otlp_string_attribute(out, first, "http.request.method", event.method);
+      append_otlp_path_attribute(out, first, event.target);
+      append_otlp_int_attribute(out, first, "http.response.status_code", event.status_code);
+      append_otlp_string_attribute(out, first, "server.address", event.host);
+      append_otlp_string_attribute(out, first, "network.protocol.name", protocol_name);
+      append_otlp_string_attribute(out, first, "network.protocol.version", protocol_version);
+      append_otlp_string_attribute(out, first, "vajra.request.outcome", event.outcome);
+      append_otlp_string_attribute(out, first, "vajra.failure.kind", event.failure_kind);
+      append_otlp_bool_attribute(out, first, "vajra.response.sent", event.response_sent);
+      append_otlp_string_attribute(out, first, "vajra.connection.outcome", event.connection_outcome);
+    }
     append_otlp_int_attribute(out, first, "vajra.worker.index", event.worker_index);
     append_otlp_int_attribute(out, first, "vajra.worker.pid", static_cast<int>(event.worker_pid));
     out += "],\"status\":{\"code\":";
-    if (native_request_span_success(event))
+    if (event.lifecycle_span || native_request_span_success(event))
     {
       out += "1";
     }
@@ -1422,6 +1439,32 @@ namespace
       append_json_escaped(out, event.error_message);
     }
     out += "}}";
+  }
+
+  Vajra::runtime::RequestSpanEvent request_span_event_from_access(
+      const Vajra::runtime::AccessLogEvent &event,
+      const std::string &outcome,
+      const std::string &failure_kind,
+      bool response_sent,
+      const std::string &error_message)
+  {
+    Vajra::runtime::RequestSpanEvent span;
+    span.method = event.method;
+    span.target = event.target;
+    span.status_code = event.status_code;
+    span.duration_nanoseconds = event.duration_nanoseconds;
+    span.protocol = event.protocol;
+    span.host = event.host;
+    span.outcome = outcome;
+    span.failure_kind = failure_kind;
+    span.response_sent = response_sent;
+    span.connection_outcome = event.connection_outcome;
+    span.worker_index = event.worker_index;
+    span.worker_pid = event.worker_pid;
+    span.trace_id = event.trace_id;
+    span.span_id = event.span_id;
+    span.error_message = error_message;
+    return span;
   }
 
   std::string native_otlp_payload(
@@ -1493,12 +1536,12 @@ namespace
   {
     std::vector<Vajra::runtime::RequestSpanEvent> drained;
     const std::lock_guard<std::mutex> lock(request_observability_mutex);
-    const std::size_t count = std::min(limit, request_span_events.size());
+    const std::size_t count = std::min(limit, native_otlp_span_events.size());
     drained.reserve(count);
     for (std::size_t index = 0; index < count; ++index)
     {
-      drained.push_back(std::move(request_span_events.front()));
-      request_span_events.pop_front();
+      drained.push_back(std::move(native_otlp_span_events.front()));
+      native_otlp_span_events.pop_front();
     }
     return drained;
   }
@@ -1512,10 +1555,10 @@ namespace
       {
         std::unique_lock<std::mutex> lock(request_observability_mutex);
         request_span_condition.wait_for(lock, kNativeOtlpFlushInterval, [] {
-          return request_span_events.size() >= kNativeOtlpBatchSize ||
+          return native_otlp_span_events.size() >= kNativeOtlpBatchSize ||
                  native_otlp_exporter.stopping.load(std::memory_order_acquire);
         });
-        if (request_span_events.empty() && native_otlp_exporter.stopping.load(std::memory_order_acquire))
+        if (native_otlp_span_events.empty() && native_otlp_exporter.stopping.load(std::memory_order_acquire))
         {
           break;
         }
@@ -1590,27 +1633,6 @@ namespace
     }
   }
 
-  Vajra::runtime::RequestSpanEvent request_span_event_from_observability(
-      const Vajra::runtime::RequestObservabilityEvent &event)
-  {
-    return Vajra::runtime::RequestSpanEvent{
-        event.access.method,
-        event.access.target,
-        event.access.status_code,
-        event.access.duration_nanoseconds,
-        event.access.protocol,
-        event.access.host,
-        event.outcome,
-        event.failure_kind,
-        event.response_sent,
-        event.access.connection_outcome,
-        event.access.worker_index,
-        event.access.worker_pid,
-        event.access.trace_id,
-        event.access.span_id,
-        event.error_message};
-  }
-
   void enqueue_runtime_request_observability_event(
       const Vajra::runtime::AccessLogEvent &event,
       const std::string &outcome,
@@ -1634,6 +1656,7 @@ namespace
       return;
     }
 
+    const auto span = request_span_event_from_access(event, outcome, failure_kind, response_sent, error_message);
     const std::lock_guard<std::mutex> lock(request_observability_mutex);
     if (request_observability_enabled.load(std::memory_order_acquire))
     {
@@ -1645,30 +1668,14 @@ namespace
       queued.error_message = error_message;
       queued.timestamp = Vajra::runtime::utc_timestamp();
       request_observability_events.push_back(std::move(queued));
-      request_span_events.push_back(request_span_event_from_observability(request_observability_events.back()));
     }
-    else
+    if (native_otlp_export_enabled.load(std::memory_order_acquire))
     {
-      request_span_events.push_back(Vajra::runtime::RequestSpanEvent{
-          event.method,
-          event.target,
-          event.status_code,
-          event.duration_nanoseconds,
-          event.protocol,
-          event.host,
-          outcome,
-          failure_kind,
-          response_sent,
-          event.connection_outcome,
-          event.worker_index,
-          event.worker_pid,
-          event.trace_id,
-          event.span_id,
-          error_message});
-    }
-    if (request_span_events.size() >= kNativeOtlpBatchSize)
-    {
-      request_span_condition.notify_one();
+      native_otlp_span_events.push_back(span);
+      if (native_otlp_span_events.size() >= kNativeOtlpBatchSize)
+      {
+        request_span_condition.notify_one();
+      }
     }
   }
 
@@ -1691,8 +1698,52 @@ namespace
     }
 
     const std::lock_guard<std::mutex> lock(request_observability_mutex);
-    request_span_events.push_back(std::move(event));
-    if (request_span_events.size() >= kNativeOtlpBatchSize)
+    if (native_otlp_export_enabled.load(std::memory_order_acquire))
+    {
+      native_otlp_span_events.push_back(std::move(event));
+      if (native_otlp_span_events.size() >= kNativeOtlpBatchSize)
+      {
+        request_span_condition.notify_one();
+      }
+    }
+  }
+
+  void enqueue_runtime_lifecycle_span_event(
+      const char *event_name,
+      std::size_t worker_index,
+      pid_t pid,
+      Vajra::runtime::WorkerLifecycleState lifecycle_state,
+      Vajra::runtime::WorkerHealthState health_state,
+      Vajra::runtime::WorkerRecoveryState recovery_state,
+      bool available,
+      Vajra::runtime::WorkerExitClassification exit_classification,
+      bool terminal_replacement_failure,
+      bool replacement_needed,
+      int exit_detail)
+  {
+    if (!native_otlp_export_enabled.load(std::memory_order_acquire) || !Vajra::runtime::runtime_trace_sampled(""))
+    {
+      return;
+    }
+
+    Vajra::runtime::RequestSpanEvent span;
+    span.lifecycle_span = true;
+    span.event_name = event_name;
+    span.duration_nanoseconds = 0;
+    span.worker_index = static_cast<int>(worker_index);
+    span.worker_pid = pid;
+    span.lifecycle_state = worker_lifecycle_state_name(lifecycle_state);
+    span.health_state = worker_health_state_name(health_state);
+    span.recovery_state = worker_recovery_state_name(recovery_state);
+    span.available = available;
+    span.exit_classification = worker_exit_classification_name(exit_classification);
+    span.terminal_replacement_failure = terminal_replacement_failure;
+    span.replacement_needed = replacement_needed;
+    span.exit_detail = exit_detail;
+
+    const std::lock_guard<std::mutex> lock(request_observability_mutex);
+    native_otlp_span_events.push_back(std::move(span));
+    if (native_otlp_span_events.size() >= kNativeOtlpBatchSize)
     {
       request_span_condition.notify_one();
     }
@@ -2141,6 +2192,18 @@ void Vajra::runtime::log_worker_lifecycle_event(
     line << '}';
     write_runtime_line(line.str());
     flush_runtime_streams();
+    enqueue_runtime_lifecycle_span_event(
+        event_name,
+        worker_index,
+        pid,
+        lifecycle_state,
+        health_state,
+        recovery_state,
+        available,
+        exit_classification,
+        terminal_replacement_failure,
+        replacement_needed,
+        exit_detail);
     emit_runtime_lifecycle_callback(
         event_name,
         worker_index,
@@ -2176,6 +2239,18 @@ void Vajra::runtime::log_worker_lifecycle_event(
   }
   write_runtime_line(line.str());
   flush_runtime_streams();
+  enqueue_runtime_lifecycle_span_event(
+      event_name,
+      worker_index,
+      pid,
+      lifecycle_state,
+      health_state,
+      recovery_state,
+      available,
+      exit_classification,
+      terminal_replacement_failure,
+      replacement_needed,
+      exit_detail);
   emit_runtime_lifecycle_callback(
       event_name,
       worker_index,
@@ -2293,25 +2368,6 @@ std::vector<Vajra::runtime::RequestObservabilityEvent> Vajra::runtime::drain_run
   {
     drained.push_back(std::move(request_observability_events.front()));
     request_observability_events.pop_front();
-  }
-  return drained;
-}
-
-std::vector<Vajra::runtime::RequestSpanEvent> Vajra::runtime::drain_runtime_request_span_events(std::size_t limit)
-{
-  std::vector<Vajra::runtime::RequestSpanEvent> drained;
-  if (limit == 0)
-  {
-    return drained;
-  }
-
-  const std::lock_guard<std::mutex> lock(request_observability_mutex);
-  const std::size_t count = std::min(limit, request_span_events.size());
-  drained.reserve(count);
-  for (std::size_t index = 0; index < count; ++index)
-  {
-    drained.push_back(std::move(request_span_events.front()));
-    request_span_events.pop_front();
   }
   return drained;
 }

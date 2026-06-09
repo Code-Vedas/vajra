@@ -116,6 +116,8 @@ namespace Vajra
     };
     struct RequestSpanEvent
     {
+      bool lifecycle_span = false;
+      std::string event_name;
       std::string method;
       std::string target;
       int status_code = 0;
@@ -131,9 +133,16 @@ namespace Vajra
       std::string trace_id;
       std::string span_id;
       std::string error_message;
+      std::string lifecycle_state;
+      std::string health_state;
+      std::string recovery_state;
+      bool available = false;
+      std::string exit_classification;
+      bool terminal_replacement_failure = false;
+      bool replacement_needed = false;
+      int exit_detail = 0;
     };
     std::vector<RequestObservabilityEvent> drain_runtime_request_observability_events(std::size_t limit);
-    std::vector<RequestSpanEvent> drain_runtime_request_span_events(std::size_t limit);
     std::uint64_t runtime_native_request_observability_events_total();
     std::uint64_t runtime_native_request_observability_errors_total();
     std::uint64_t runtime_native_request_admission_rejections_total();

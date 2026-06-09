@@ -147,27 +147,6 @@ namespace
     return event;
   }
 
-  VALUE request_observability_event_to_span_array(const Vajra::runtime::RequestSpanEvent &event)
-  {
-    VALUE payload = rb_ary_new_capa(15);
-    rb_ary_push(payload, rb_str_new(event.method.c_str(), static_cast<long>(event.method.size())));
-    rb_ary_push(payload, rb_str_new(event.target.c_str(), static_cast<long>(event.target.size())));
-    rb_ary_push(payload, INT2NUM(event.status_code));
-    rb_ary_push(payload, LL2NUM(event.duration_nanoseconds));
-    rb_ary_push(payload, rb_str_new(event.protocol.c_str(), static_cast<long>(event.protocol.size())));
-    rb_ary_push(payload, rb_str_new(event.host.c_str(), static_cast<long>(event.host.size())));
-    rb_ary_push(payload, rb_str_new(event.outcome.c_str(), static_cast<long>(event.outcome.size())));
-    rb_ary_push(payload, rb_str_new(event.failure_kind.c_str(), static_cast<long>(event.failure_kind.size())));
-    rb_ary_push(payload, event.response_sent ? Qtrue : Qfalse);
-    rb_ary_push(payload, rb_str_new(event.connection_outcome.c_str(), static_cast<long>(event.connection_outcome.size())));
-    rb_ary_push(payload, INT2NUM(event.worker_index));
-    rb_ary_push(payload, INT2NUM(event.worker_pid));
-    rb_ary_push(payload, rb_str_new(event.trace_id.c_str(), static_cast<long>(event.trace_id.size())));
-    rb_ary_push(payload, rb_str_new(event.span_id.c_str(), static_cast<long>(event.span_id.size())));
-    rb_ary_push(payload, rb_str_new(event.error_message.c_str(), static_cast<long>(event.error_message.size())));
-    return payload;
-  }
-
   VALUE rb_tracing_native_drain_request_observability_events(VALUE self, VALUE limit)
   {
     (void)self;
@@ -176,18 +155,6 @@ namespace
     for (const auto &event : events)
     {
       rb_ary_push(list, request_observability_event_to_hash(event));
-    }
-    return list;
-  }
-
-  VALUE rb_tracing_native_drain_request_span_events(VALUE self, VALUE limit)
-  {
-    (void)self;
-    const auto events = Vajra::runtime::drain_runtime_request_span_events(NUM2SIZET(limit));
-    VALUE list = rb_ary_new_capa(static_cast<long>(events.size()));
-    for (const auto &event : events)
-    {
-      rb_ary_push(list, request_observability_event_to_span_array(event));
     }
     return list;
   }
@@ -256,11 +223,6 @@ extern "C" void Init_vajra()
       mTracing,
       "__native_drain_request_observability_events__",
       RUBY_METHOD_FUNC(rb_tracing_native_drain_request_observability_events),
-      1);
-  rb_define_singleton_method(
-      mTracing,
-      "__native_drain_request_span_events__",
-      RUBY_METHOD_FUNC(rb_tracing_native_drain_request_span_events),
       1);
   rb_define_singleton_method(
       mTracing,

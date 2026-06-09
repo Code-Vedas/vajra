@@ -2,28 +2,18 @@ detectors:
   ControlParameter:
     exclude:
       - Vajra::CLI::Launcher#app
-      - Vajra::Internal::Tracing::NativeRequestOtlpExporter
-  DataClump:
-    exclude:
-      - Vajra::Internal::Tracing::NativeRequestOtlpExporter
   DuplicateMethodCall:
     exclude:
-      - Vajra::Internal::Tracing::NativeRequestOtlpExporter
       - Vajra::Internal::Tracing#install_metric_instruments
       - Vajra::Internal::Tracing#in_span
       - Vajra::Internal::Tracing#stop_request_observability_drain_thread
-  FeatureEnvy:
-    exclude:
-      - Vajra::Internal::Tracing::NativeRequestOtlpExporter
   LongParameterList:
     exclude:
-      - Vajra::Internal::Tracing::NativeRequestOtlpExporter
       - Vajra::Internal::Tracing#in_span
       - Vajra::Internal::Tracing#resolve_string
       - Vajra::Internal::Tracing#write_trace_state
   NilCheck:
     exclude:
-      - Vajra::Internal::Tracing::NativeRequestOtlpExporter
       - Vajra::CLI::Launcher#normalize_setting_values
       - Vajra::Internal::Tracing#configured_meter
       - Vajra::Internal::Tracing#in_span
@@ -34,9 +24,6 @@ detectors:
       - Vajra::Internal::Tracing#resolve_boolean
       - Vajra::Internal::Tracing#resolve_config
       - Vajra::Internal::Tracing#trace_context_value
-  RepeatedConditional:
-    exclude:
-      - Vajra::Internal::Tracing::NativeRequestOtlpExporter
   UncommunicativeVariableName:
     accept:
       - e
@@ -44,9 +31,6 @@ detectors:
   TooManyStatements:
     enabled: true
     max_statements: 25
-  TooManyMethods:
-    exclude:
-      - Vajra::Internal::Tracing::NativeRequestOtlpExporter
   TooManyConstants:
     enabled: true
     max_constants: 10

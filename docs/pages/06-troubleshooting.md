@@ -102,8 +102,8 @@ It means:
 
 Tracing is soft-optional. If `trace_enabled` is true but no spans are exported:
 
-- install the OpenTelemetry SDK and OTLP exporter gems in the application bundle
-- set `trace_otel_owner true` only when Vajra should create the global provider
+- install the OpenTelemetry SDK and exporter gems when the application owns OTel
+- set `trace_otel_owner true` only when Vajra should use native OTLP/HTTP export
 - check `OTEL_EXPORTER_OTLP_ENDPOINT` or `VAJRA_TRACE_ENDPOINT`
 - set `OTEL_TRACES_EXPORTER=otlp`; `none` disables trace exporting
 - confirm the stats endpoint reports tracing as enabled and available

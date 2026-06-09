@@ -89,9 +89,9 @@ end
 ```
 
 When `trace_otel_owner` is false, Vajra uses the application's existing global
-OpenTelemetry provider. When it is true, Vajra creates the provider, installs an
-OTLP exporter with a batch span processor, and flushes/shuts it down during
-`Vajra.stop`.
+OpenTelemetry provider so application and library spans share the same active
+Rack context. When it is true, Vajra owns request-span export through its native
+OTLP/HTTP pipeline and shuts that native exporter down during `Vajra.stop`.
 
 Collector example:
 

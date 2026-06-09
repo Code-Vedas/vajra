@@ -1686,6 +1686,8 @@ RSpec.describe Vajra::Internal::Tracing do
 
     expect(provider.force_flushed).to be(true)
     expect(provider.shut_down).to be(true)
+    expect(described_class).to have_received(:__native_set_lifecycle_callback__).with(nil)
+    expect(described_class).to have_received(:__native_set_request_observability_callback__).with(nil)
   end
 
   it 'does not restart Ruby request draining after worker fork when native export owns requests' do
@@ -1727,6 +1729,17 @@ RSpec.describe Vajra::Internal::Tracing do
     described_class.shutdown!
 
     expect(described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.provider }).to be_nil
+    expect(described_class).to have_received(:__native_set_lifecycle_callback__).with(nil)
+    expect(described_class).to have_received(:__native_set_request_observability_callback__).with(nil)
+  end
+
+  it 'uninstalls native callbacks on shutdown when native export owns tracing' do
+    described_class.send(:write_trace_state, enabled: true, available: true, tracer: nil, meter: nil, provider: nil)
+
+    described_class.shutdown!
+
+    expect(described_class).to have_received(:__native_set_lifecycle_callback__).with(nil)
+    expect(described_class).to have_received(:__native_set_request_observability_callback__).with(nil)
   end
 
   it 'only warns once for missing tracing dependencies' do

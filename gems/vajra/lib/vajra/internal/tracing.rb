@@ -164,6 +164,8 @@ module Vajra
         provider.shutdown if provider.respond_to?(:shutdown)
       ensure
         stop_request_observability_drain_thread
+        install_lifecycle_callback(nil)
+        install_request_observability_callback(nil)
         write_trace_state(enabled: false, available: false, tracer: nil, meter: nil, provider: nil)
       end
 

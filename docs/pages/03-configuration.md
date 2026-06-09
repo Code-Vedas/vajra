@@ -126,7 +126,7 @@ Vajra.configure do |config|
   # Set the OpenTelemetry service name.
   config.trace_service_name "vajra"
 
-  # Let Vajra create and shut down the global OTel provider.
+  # Let Vajra export request spans through its native OTLP/HTTP pipeline.
   config.trace_otel_owner false
 
   # Expose an in-process stats endpoint.

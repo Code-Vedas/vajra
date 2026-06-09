@@ -1645,10 +1645,7 @@ namespace
       queued.error_message = error_message;
       queued.timestamp = Vajra::runtime::utc_timestamp();
       request_observability_events.push_back(std::move(queued));
-      if (native_otlp_export_enabled.load(std::memory_order_acquire))
-      {
-        request_span_events.push_back(request_span_event_from_observability(request_observability_events.back()));
-      }
+      request_span_events.push_back(request_span_event_from_observability(request_observability_events.back()));
     }
     else
     {

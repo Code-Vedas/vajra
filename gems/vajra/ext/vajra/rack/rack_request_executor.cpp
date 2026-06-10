@@ -810,20 +810,51 @@ namespace
     return fields;
   }
 
+  bool traceparent_hex_value(const std::string &value, std::size_t expected_length, bool require_non_zero)
+  {
+    if (value.size() != expected_length)
+    {
+      return false;
+    }
+    bool non_zero = false;
+    for (const char character : value)
+    {
+      const bool hex =
+          (character >= '0' && character <= '9') ||
+          (character >= 'a' && character <= 'f') ||
+          (character >= 'A' && character <= 'F');
+      if (!hex)
+      {
+        return false;
+      }
+      non_zero = non_zero || character != '0';
+    }
+    return !require_non_zero || non_zero;
+  }
+
   std::string traceparent_part(const std::string &traceparent, int part)
   {
-    std::size_t cursor = 0;
-    for (int index = 0; index < part; ++index)
+    const std::size_t first = traceparent.find('-');
+    const std::size_t second = first == std::string::npos ? std::string::npos : traceparent.find('-', first + 1);
+    const std::size_t third = second == std::string::npos ? std::string::npos : traceparent.find('-', second + 1);
+    if (first != 2 || second == std::string::npos || third == std::string::npos)
     {
-      cursor = traceparent.find('-', cursor);
-      if (cursor == std::string::npos)
-      {
-        return "";
-      }
-      ++cursor;
+      return "";
     }
-    const std::size_t end = traceparent.find('-', cursor);
-    return traceparent.substr(cursor, end == std::string::npos ? std::string::npos : end - cursor);
+
+    const std::string version = traceparent.substr(0, first);
+    const std::string trace_id = traceparent.substr(first + 1, second - first - 1);
+    const std::string span_id = traceparent.substr(second + 1, third - second - 1);
+    const std::string flags = traceparent.substr(third + 1);
+    if (!traceparent_hex_value(version, 2, false) ||
+        !traceparent_hex_value(trace_id, 32, true) ||
+        !traceparent_hex_value(span_id, 16, true) ||
+        !traceparent_hex_value(flags, 2, false))
+    {
+      return "";
+    }
+
+    return part == 1 ? trace_id : span_id;
   }
 
   Vajra::runtime::RequestSpanEvent direct_rack_observability_event(

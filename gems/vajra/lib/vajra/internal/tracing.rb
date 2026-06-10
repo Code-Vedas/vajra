@@ -151,7 +151,7 @@ module Vajra
       end
 
       def with_request_span(env, &)
-        drain_request_observability_batch
+        drain_request_observability_batch unless request_observability_drain_thread_running?
         tracer = TRACE_MUTEX.synchronize { TRACE_STATE.tracer }
         tracer_missing = tracer.equal?(nil)
         return yield if tracer_missing && !request_metrics_available?
@@ -844,6 +844,13 @@ module Vajra
         TRACE_MUTEX.synchronize { TRACE_STATE.request_observability_stop }
       end
       private_class_method :request_observability_stop?
+
+      def request_observability_drain_thread_running?
+        thread = TRACE_MUTEX.synchronize { TRACE_STATE.request_observability_thread }
+
+        thread&.alive? && thread != Thread.current
+      end
+      private_class_method :request_observability_drain_thread_running?
 
       def request_observability_drain_loop
         thread = Thread.current

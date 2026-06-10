@@ -276,32 +276,33 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
         startup_output = []
         selected_port = wait_for_banner(output, captured_lines: startup_output)
 
-        socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
-        begin
-          socket.write(
-            "GET /observability HTTP/1.1\r\n" \
-            "Host: example.test\r\n" \
-            "User-Agent: vajra-e2e\r\n" \
-            "Referer: https://example.test/source\r\n" \
-            "X-Request-Id: request-123\r\n" \
-            "Traceparent: 00-11111111111111111111111111111111-2222222222222222-01\r\n" \
-            "Connection: close\r\n\r\n"
-          )
-          response = parse_http_response(
-            read_raw_http_response(
-              socket,
-              wait_thread:,
-              output:,
-              request_label: 'json_access_log_result'
-            )
-          )
-        ensure
-          socket.close unless socket.closed?
-        end
+        response = otel_observability_request(
+          selected_port,
+          wait_thread,
+          output,
+          "GET /observability HTTP/1.1\r\n" \
+          "Host: example.test\r\n" \
+          "User-Agent: vajra-e2e\r\n" \
+          "Referer: https://example.test/source\r\n" \
+          "X-Request-Id: request-123\r\n" \
+          "Traceparent: 00-11111111111111111111111111111111-2222222222222222-01\r\n" \
+          "Connection: close\r\n\r\n",
+          'json_access_log_result'
+        )
+        invalid_response = otel_observability_request(
+          selected_port,
+          wait_thread,
+          output,
+          "GET /invalid-traceparent HTTP/1.1\r\n" \
+          "Host: example.test\r\n" \
+          "Traceparent: 00-not-a-trace-id-2222222222222222-01\r\n" \
+          "Connection: close\r\n\r\n",
+          'json_access_log_invalid_traceparent_result'
+        )
 
         status = stop_process(wait_thread)
         lines = File.exist?(access_log_path) ? File.readlines(access_log_path, chomp: true) : []
-        { exitstatus: status.exitstatus, response:, lines:, output: "#{startup_output.join}#{output.read}" }
+        { exitstatus: status.exitstatus, response:, invalid_response:, lines:, output: "#{startup_output.join}#{output.read}" }
       ensure
         cleanup_process(wait_thread, output)
       end
@@ -1138,6 +1139,20 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
     expect(access_event.fetch('duration_nanoseconds')).to be > 0
     expect(access_event.fetch('worker_pid')).to be > 0
     expect(access_event.fetch('worker_index')).to eq(0)
+  end
+
+  it 'does not use malformed traceparent values for structured access-log correlation' do
+    result = json_access_log_result
+
+    expect(result[:exitstatus]).to eq(0), result[:output]
+    expect(result[:invalid_response][:status_line]).to eq('HTTP/1.1 200 OK')
+    access_event = JSON.parse(result[:lines].find { |line| line.include?('/invalid-traceparent') })
+    expect(access_event).to include(
+      'component' => 'access',
+      'target' => '/invalid-traceparent',
+      'status' => 200
+    )
+    expect(access_event).not_to include('trace_id', 'span_id')
   end
 
   it 'escapes request-derived values in custom access log formats' do

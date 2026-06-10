@@ -241,6 +241,31 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(seen).to be(true)
   end
 
+  it 'drains native request events on the request path only when no background drain thread is running' do
+    live_thread = Class.new do
+      def alive?
+        true
+      end
+    end.new
+    stopped_thread = Class.new do
+      def alive?
+        false
+      end
+    end.new
+    allow(described_class).to receive(:drain_request_observability_batch).and_return(0)
+
+    described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.request_observability_thread = live_thread }
+    described_class.with_request_span('REQUEST_METHOD' => 'GET') { :live }
+    expect(described_class).not_to have_received(:drain_request_observability_batch)
+
+    described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.request_observability_thread = stopped_thread }
+    described_class.with_request_span('REQUEST_METHOD' => 'GET') { :stopped }
+    expect(described_class).to have_received(:drain_request_observability_batch).once
+
+    described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.request_observability_thread = Thread.current }
+    expect(described_class.send(:request_observability_drain_thread_running?)).to be(false)
+  end
+
   it 'records request metrics without creating spans when only metrics are available' do
     request_counter = Class.new do
       attr_reader :entries

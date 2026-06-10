@@ -30,7 +30,9 @@ namespace Vajra
         bool trace_enabled,
         const std::string &trace_endpoint,
         const std::string &trace_service_name,
-        bool active_context_required = false);
+        bool active_context_required = false,
+        const std::string &resource_attributes = "",
+        const std::string &propagators = "tracecontext,baggage");
     void start_runtime_tracing_worker();
     void stop_runtime_tracing_worker();
     void set_runtime_trace_sample_ratio(double sample_ratio);
@@ -41,6 +43,10 @@ namespace Vajra
     bool runtime_trace_sampled(const std::string &traceparent);
     std::string runtime_tracing_endpoint();
     std::string runtime_tracing_service_name();
+#ifdef VAJRA_RUNTIME_TESTING
+    std::string runtime_tracing_resource_attributes();
+    bool runtime_tracecontext_propagator_enabled();
+#endif
     struct AccessLogFieldNeeds
     {
       bool host = false;
@@ -50,6 +56,7 @@ namespace Vajra
       bool trace_context = false;
     };
     AccessLogFieldNeeds access_log_field_needs();
+    bool access_logging_enabled();
     void start_runtime_logging_worker();
     void stop_runtime_logging_worker();
 #ifdef VAJRA_RUNTIME_TESTING

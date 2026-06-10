@@ -99,6 +99,42 @@ Vajra.configure do |config|
   # Limit the global pending request queue.
   config.socket_queue_capacity 100_000
 
+  # Enable TLS for the listener.
+  config.tls false
+
+  # Set the TLS certificate chain path.
+  config.tls_certificate "config/certs/server.crt"
+
+  # Set the TLS private key path.
+  config.tls_private_key "config/certs/server.key"
+
+  # Set the TLS client CA bundle path.
+  config.tls_ca_certificate "config/certs/ca.crt"
+
+  # Set TLS peer verification behavior.
+  config.tls_verify_mode "none"
+
+  # Set the minimum TLS version.
+  config.tls_min_version "TLSv1_2"
+
+  # Set advertised ALPN protocols.
+  config.alpn_protocols %w[http/1.1]
+
+  # Enable HTTP/2 when supported by the runtime.
+  config.http2 false
+
+  # Set HTTP/2 concurrent stream capacity.
+  config.http2_max_concurrent_streams 128
+
+  # Set HTTP/2 stream flow-control window size.
+  config.http2_initial_window_size 65_535
+
+  # Set HTTP/2 maximum frame size.
+  config.http2_max_frame_size 16_384
+
+  # Set HTTP/2 HPACK dynamic table size.
+  config.http2_header_table_size 4096
+
   # Set lifecycle and runtime log level.
   config.log_level "info"
 

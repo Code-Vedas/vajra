@@ -42,7 +42,9 @@ namespace VajraNative
       bool trace_enabled = false,
       std::string trace_endpoint = "",
       std::string trace_service_name = "",
-      bool trace_otel_owner = false);
+      bool trace_otel_owner = false,
+      std::string trace_resource_attributes = "",
+      std::string trace_propagators = "tracecontext,baggage");
   void stop();
 }
 

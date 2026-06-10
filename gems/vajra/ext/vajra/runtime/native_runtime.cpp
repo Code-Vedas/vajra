@@ -1982,7 +1982,7 @@ void Vajra::runtime::NativeRuntime::clear_worker_runtime()
     debug_logging_.store(false, std::memory_order_release);
   }
 
-  configure_runtime_tracing(false, "", "", false);
+  configure_runtime_tracing(false, "", "", false, "", "tracecontext,baggage");
   set_runtime_tracing_available(false);
 
   for (const auto &worker_state : worker_states)
@@ -3016,7 +3016,9 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
         config.trace_enabled,
         config.trace_endpoint,
         config.trace_service_name,
-        config.trace_enabled && !config.trace_otel_owner);
+        config.trace_enabled && !config.trace_otel_owner,
+        config.trace_resource_attributes,
+        config.trace_propagators);
     const BootContractResult master_boot_result = BootContract::run(
         BootContractConfig{config.port, config.max_request_head_bytes, kMasterPreloadRuntimeRole});
     BootContract::ensure_ready(master_boot_result);
@@ -3291,7 +3293,9 @@ void VajraNative::start(
     bool trace_enabled,
     std::string trace_endpoint,
     std::string trace_service_name,
-    bool trace_otel_owner)
+    bool trace_otel_owner,
+    std::string trace_resource_attributes,
+    std::string trace_propagators)
 {
   Vajra::runtime::NativeRuntime::instance().start(Vajra::runtime::RuntimeConfig{
       std::move(host),
@@ -3317,7 +3321,9 @@ void VajraNative::start(
       trace_enabled,
       std::move(trace_endpoint),
       std::move(trace_service_name),
-      trace_otel_owner});
+      trace_otel_owner,
+      std::move(trace_resource_attributes),
+      std::move(trace_propagators)});
 }
 
 void VajraNative::stop()

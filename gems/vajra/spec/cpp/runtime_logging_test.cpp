@@ -133,7 +133,17 @@ namespace
   void test_runtime_trace_sampling_uses_ratio_and_parent_flags()
   {
     Vajra::runtime::set_runtime_request_observability_callback(reinterpret_cast<void *>(1));
-    Vajra::runtime::configure_runtime_tracing(true, "http://127.0.0.1:4318/v1/traces", "vajra-test", false);
+    Vajra::runtime::configure_runtime_tracing(
+        true,
+        "http://127.0.0.1:4318/v1/traces",
+        "vajra-test",
+        false,
+        "service.namespace=vajra.test",
+        "tracecontext,baggage");
+    if (Vajra::runtime::runtime_tracing_resource_attributes() != "service.namespace=vajra.test")
+    {
+      VajraSpecCpp::fail("runtime tracing should retain OTEL resource attributes for native export");
+    }
     Vajra::runtime::set_runtime_trace_sample_ratio(0.0);
     if (Vajra::runtime::runtime_trace_sampled(""))
     {
@@ -146,6 +156,22 @@ namespace
     if (Vajra::runtime::runtime_trace_sampled("00-11111111111111111111111111111111-2222222222222222-00"))
     {
       VajraSpecCpp::fail("unsampled traceparent should preserve parent sampling");
+    }
+
+    Vajra::runtime::configure_runtime_tracing(
+        true,
+        "http://127.0.0.1:4318/v1/traces",
+        "vajra-test",
+        false,
+        "",
+        "none");
+    if (Vajra::runtime::runtime_tracecontext_propagator_enabled())
+    {
+      VajraSpecCpp::fail("OTEL_PROPAGATORS=none should disable tracecontext extraction");
+    }
+    if (Vajra::runtime::runtime_trace_sampled("00-11111111111111111111111111111111-2222222222222222-01"))
+    {
+      VajraSpecCpp::fail("disabled tracecontext propagator should ignore parent sampling");
     }
 
     Vajra::runtime::set_runtime_trace_sample_ratio(1.0);

@@ -40,6 +40,7 @@ module Vajra
         :metric_instruments,
         :request_observability_thread,
         :request_observability_stop,
+        :propagators,
         keyword_init: true
       )
       TRACE_MUTEX = Mutex.new
@@ -55,7 +56,8 @@ module Vajra
         active_requests: nil,
         metric_instruments: {},
         request_observability_thread: nil,
-        request_observability_stop: false
+        request_observability_stop: false,
+        propagators: 'tracecontext,baggage'
       )
       INTERNAL_TRACE_ID_HEADER = 'X-Vajra-Internal-Trace-Id'
       INTERNAL_SPAN_ID_HEADER = 'X-Vajra-Internal-Span-Id'
@@ -67,13 +69,15 @@ module Vajra
         config = resolve_config(options)
         endpoint = config.endpoint
         service_name = config.service_name
+        propagators = config.propagators
+        resource_attributes = config.resource_attributes
 
         unless config.enabled
           stop_request_observability_drain_thread
           update_native_status(enabled: false, available: false, endpoint:, service_name:)
           install_lifecycle_callback(nil)
           install_request_observability_callback(nil)
-          write_trace_state(enabled: false, available: false, tracer: nil, meter: nil, provider: nil)
+          write_trace_state(enabled: false, available: false, tracer: nil, meter: nil, provider: nil, propagators:)
           return false
         end
 
@@ -88,7 +92,8 @@ module Vajra
           available:,
           tracer:,
           meter:,
-          provider: otel_owner ? telemetry.fetch(:provider) : nil
+          provider: otel_owner ? telemetry.fetch(:provider) : nil,
+          propagators:
         )
         install_metric_instruments
 
@@ -98,7 +103,9 @@ module Vajra
           endpoint:,
           service_name:,
           active_context_required: available && !otel_owner,
-          sample_ratio: native_sample_ratio(config)
+          sample_ratio: native_sample_ratio(config),
+          resource_attributes:,
+          propagators:
         )
         install_telemetry_callbacks(telemetry)
         available
@@ -151,10 +158,16 @@ module Vajra
       end
 
       def with_request_span(env, &)
-        drain_request_observability_batch unless request_observability_drain_thread_running?
-        tracer = TRACE_MUTEX.synchronize { TRACE_STATE.tracer }
+        tracer, metrics_available = TRACE_MUTEX.synchronize do
+          [
+            TRACE_STATE.tracer,
+            [TRACE_STATE.request_counter, TRACE_STATE.request_duration, TRACE_STATE.active_requests].any?
+          ]
+        end
         tracer_missing = tracer.equal?(nil)
-        return yield if tracer_missing && !request_metrics_available?
+        return yield if tracer_missing && !metrics_available
+
+        drain_request_observability_batch unless request_observability_drain_thread_running?
         return with_request_metrics_only(env, &) if tracer_missing
         return with_request_metrics_or_direct(env, &) unless span_attemptable?(tracer, env)
 
@@ -444,6 +457,7 @@ module Vajra
 
       def extract_context(env)
         return nil unless defined?(OpenTelemetry) && OpenTelemetry.respond_to?(:propagation)
+        return nil unless tracecontext_propagator_enabled?
 
         carrier = {
           'traceparent' => env['HTTP_TRACEPARENT'],
@@ -456,6 +470,12 @@ module Vajra
         nil
       end
       private_class_method :extract_context
+
+      def tracecontext_propagator_enabled?
+        propagators = TRACE_MUTEX.synchronize { TRACE_STATE.propagators.to_s }
+        propagators.split(',').map { |value| value.strip.downcase }.include?('tracecontext')
+      end
+      private_class_method :tracecontext_propagator_enabled?
 
       def in_span(tracer, name, options, parent_context, &)
         return tracer.in_span(name, **options, &) unless parent_context && tracer.respond_to?(:start_span) && defined?(OpenTelemetry::Trace)
@@ -682,7 +702,7 @@ module Vajra
       end
       private_class_method :compact_attributes
 
-      def write_trace_state(enabled:, available:, tracer:, meter:, provider:)
+      def write_trace_state(enabled:, available:, tracer:, meter:, provider:, propagators: 'tracecontext,baggage')
         TRACE_MUTEX.synchronize do
           TRACE_STATE.enabled = enabled
           TRACE_STATE.available = available
@@ -693,6 +713,7 @@ module Vajra
           TRACE_STATE.request_duration = nil unless meter
           TRACE_STATE.active_requests = nil unless meter
           TRACE_STATE.metric_instruments = {} unless meter
+          TRACE_STATE.propagators = propagators
         end
       end
       private_class_method :write_trace_state
@@ -791,7 +812,9 @@ module Vajra
           config.fetch(:endpoint),
           config.fetch(:service_name),
           config.fetch(:active_context_required, false),
-          config.fetch(:sample_ratio, 1.0)
+          config.fetch(:sample_ratio, 1.0),
+          config.fetch(:resource_attributes, ''),
+          config.fetch(:propagators, 'tracecontext,baggage')
         )
       end
       private_class_method :update_native_status

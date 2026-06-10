@@ -57,6 +57,15 @@ namespace
     std::string traceparent;
   };
 
+  bool request_headers_needed(const Vajra::runtime::AccessLogFieldNeeds &needs)
+  {
+    return needs.host ||
+           needs.user_agent ||
+           needs.referer ||
+           needs.request_id ||
+           needs.trace_context;
+  }
+
   ObservedRequestHeaders observed_request_headers(
       const Vajra::request::ParsedRequest &request,
       const Vajra::runtime::AccessLogFieldNeeds &needs)
@@ -137,8 +146,8 @@ namespace
 
   bool internal_trace_header(const Vajra::response::Header &header)
   {
-    return Vajra::response::lowercase_header_name(header.name) == "x-vajra-internal-trace-id" ||
-           Vajra::response::lowercase_header_name(header.name) == "x-vajra-internal-span-id";
+    return Vajra::request::ascii_case_insensitive_equal(header.name, "x-vajra-internal-trace-id") ||
+           Vajra::request::ascii_case_insensitive_equal(header.name, "x-vajra-internal-span-id");
   }
 
   std::string response_header_value(const Vajra::response::Response &response, const std::string &name)
@@ -177,7 +186,10 @@ namespace
       const std::string &span_id = "")
   {
     const Vajra::runtime::AccessLogFieldNeeds needs = Vajra::runtime::access_log_field_needs();
-    const ObservedRequestHeaders headers = observed_request_headers(request_context.request, needs);
+    const ObservedRequestHeaders headers = request_headers_needed(needs)
+                                               ? observed_request_headers(request_context.request, needs)
+                                               : ObservedRequestHeaders{};
+    const bool use_incoming_trace_context = needs.trace_context && !headers.traceparent.empty();
     const std::size_t worker_index = Vajra::runtime::current_worker_index();
     return Vajra::runtime::AccessLogEvent{
         request_context.request.request_line.method,
@@ -194,8 +206,8 @@ namespace
         getpid(),
         static_cast<int>(worker_index),
         connection_outcome,
-        trace_id.empty() && needs.trace_context ? traceparent_part(headers.traceparent, 1) : trace_id,
-        span_id.empty() && needs.trace_context ? traceparent_part(headers.traceparent, 2) : span_id};
+        trace_id.empty() && use_incoming_trace_context ? traceparent_part(headers.traceparent, 1) : trace_id,
+        span_id.empty() && use_incoming_trace_context ? traceparent_part(headers.traceparent, 2) : span_id};
   }
 
   Vajra::runtime::AccessLogEvent access_event_for_unparsed_head(
@@ -434,12 +446,15 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
         return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
       }
       Vajra::runtime::note_worker_request_completed();
-      Vajra::runtime::log_access_event(access_event_for(
-          request_context,
-          control_response->status.code,
-          control_response->body.size(),
-          request_started_at,
-          connection_outcome_for(connection_behavior)));
+      if (Vajra::runtime::access_logging_enabled())
+      {
+        Vajra::runtime::log_access_event(access_event_for(
+            request_context,
+            control_response->status.code,
+            control_response->body.size(),
+            request_started_at,
+            connection_outcome_for(connection_behavior)));
+      }
       return RequestProcessingResult{
           connection_behavior == Vajra::response::ConnectionBehavior::close
               ? RequestProcessingOutcome::close
@@ -534,12 +549,7 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
         head_failure_kind_token(error.kind()),
         true,
         error.what());
-    Vajra::runtime::log_access_event(access_event_for(
-        request_context,
-        rejection_response.status.code,
-        rejection_response.body.size(),
-        request_started_at,
-        "close"));
+    Vajra::runtime::log_access_event(event);
     return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
   }
   catch (const QueueCapacityError &error)
@@ -593,14 +603,17 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
     return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
   }
   Vajra::runtime::note_worker_request_completed();
-  Vajra::runtime::log_access_event(access_event_for(
-      request_context,
-      response.status.code,
-      response.body.size(),
-      request_started_at,
-      connection_outcome_for(connection_behavior),
-      response_trace_id,
-      response_span_id));
+  if (Vajra::runtime::access_logging_enabled())
+  {
+    Vajra::runtime::log_access_event(access_event_for(
+        request_context,
+        response.status.code,
+        response.body.size(),
+        request_started_at,
+        connection_outcome_for(connection_behavior),
+        response_trace_id,
+        response_span_id));
+  }
 
   return RequestProcessingResult{
       connection_behavior == Vajra::response::ConnectionBehavior::close

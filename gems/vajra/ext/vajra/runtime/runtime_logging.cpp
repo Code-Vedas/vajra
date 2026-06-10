@@ -85,6 +85,9 @@ namespace
     std::string error_log_path;
     std::string trace_endpoint;
     std::string trace_service_name;
+    std::string trace_resource_attributes;
+    std::string trace_propagators = "tracecontext,baggage";
+    bool tracecontext_propagator = true;
     Vajra::runtime::AccessLogFieldNeeds access_field_needs;
     int access_log_fd = STDOUT_FILENO;
     int error_log_fd = STDERR_FILENO;
@@ -159,6 +162,7 @@ namespace
   std::atomic_bool access_need_trace_context{false};
   std::atomic_bool trace_available_snapshot{false};
   std::atomic_bool trace_active_context_required_snapshot{false};
+  std::atomic_bool tracecontext_propagator_snapshot{true};
   std::atomic<std::uint64_t> trace_sample_threshold{std::numeric_limits<std::uint64_t>::max()};
   std::atomic<std::uint64_t> trace_sample_counter{0};
   std::atomic_bool request_observability_enabled{false};
@@ -189,6 +193,7 @@ namespace
     std::atomic<pid_t> owner_pid{-1};
     NativeOtlpEndpoint endpoint;
     std::string service_name;
+    std::string resource_attributes;
   };
 
   NativeOtlpExporterState native_otlp_exporter;
@@ -209,6 +214,71 @@ namespace
     }
     const std::size_t end = traceparent.find('-', cursor);
     return traceparent.substr(cursor, end == std::string::npos ? std::string::npos : end - cursor);
+  }
+
+  std::string trim_copy(const std::string &value)
+  {
+    std::size_t begin = 0;
+    while (begin < value.size() && std::isspace(static_cast<unsigned char>(value[begin])) != 0)
+    {
+      ++begin;
+    }
+    std::size_t end = value.size();
+    while (end > begin && std::isspace(static_cast<unsigned char>(value[end - 1])) != 0)
+    {
+      --end;
+    }
+    return value.substr(begin, end - begin);
+  }
+
+  bool propagators_include_tracecontext(const std::string &propagators)
+  {
+    std::size_t cursor = 0;
+    while (cursor <= propagators.size())
+    {
+      const std::size_t comma = propagators.find(',', cursor);
+      std::string token = trim_copy(propagators.substr(cursor, comma == std::string::npos ? std::string::npos : comma - cursor));
+      std::transform(token.begin(), token.end(), token.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+      });
+      if (token == "tracecontext")
+      {
+        return true;
+      }
+      if (comma == std::string::npos)
+      {
+        break;
+      }
+      cursor = comma + 1;
+    }
+    return false;
+  }
+
+  std::vector<std::pair<std::string, std::string>> resource_attributes_from_env(const std::string &raw)
+  {
+    std::vector<std::pair<std::string, std::string>> attributes;
+    std::size_t cursor = 0;
+    while (cursor <= raw.size())
+    {
+      const std::size_t comma = raw.find(',', cursor);
+      const std::string entry = trim_copy(raw.substr(cursor, comma == std::string::npos ? std::string::npos : comma - cursor));
+      const std::size_t equals = entry.find('=');
+      if (equals != std::string::npos)
+      {
+        const std::string key = trim_copy(entry.substr(0, equals));
+        const std::string value = trim_copy(entry.substr(equals + 1));
+        if (!key.empty() && key != "service.name")
+        {
+          attributes.emplace_back(key, value);
+        }
+      }
+      if (comma == std::string::npos)
+      {
+        break;
+      }
+      cursor = comma + 1;
+    }
+    return attributes;
   }
 
   std::uint64_t trace_sample_threshold_for(double ratio)
@@ -1538,13 +1608,23 @@ namespace
 
   std::string native_otlp_payload(
       const std::vector<Vajra::runtime::RequestSpanEvent> &events,
-      const std::string &service_name)
+      const std::string &service_name,
+      const std::string &resource_attributes)
   {
     std::string body;
     body.reserve(512 + (events.size() * 512));
     body += "{\"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":";
     append_json_escaped(body, service_name);
-    body += "}}]},\"scopeSpans\":[{\"scope\":{\"name\":";
+    body += "}}";
+    for (const auto &[key, value] : resource_attributes_from_env(resource_attributes))
+    {
+      body += ",{\"key\":";
+      append_json_escaped(body, key);
+      body += ",\"value\":{\"stringValue\":";
+      append_json_escaped(body, value);
+      body += "}}";
+    }
+    body += "]},\"scopeSpans\":[{\"scope\":{\"name\":";
     append_json_escaped(body, service_name);
     body += "},\"spans\":[";
     for (std::size_t index = 0; index < events.size(); ++index)
@@ -1622,6 +1702,7 @@ namespace
     {
       NativeOtlpEndpoint endpoint;
       std::string service_name;
+      std::string resource_attributes;
       {
         std::unique_lock<std::mutex> lock(request_observability_mutex);
         request_span_condition.wait_for(lock, kNativeOtlpFlushInterval, [] {
@@ -1637,16 +1718,20 @@ namespace
         std::lock_guard<std::mutex> lock(native_otlp_exporter.mutex);
         endpoint = native_otlp_exporter.endpoint;
         service_name = native_otlp_exporter.service_name;
+        resource_attributes = native_otlp_exporter.resource_attributes;
       }
       auto events = drain_native_otlp_batch(kNativeOtlpBatchSize);
       if (!events.empty())
       {
-        (void)native_otlp_post(endpoint, native_otlp_payload(events, service_name));
+        (void)native_otlp_post(endpoint, native_otlp_payload(events, service_name, resource_attributes));
       }
     }
   }
 
-  void start_native_otlp_exporter(const std::string &endpoint, const std::string &service_name)
+  void start_native_otlp_exporter(
+      const std::string &endpoint,
+      const std::string &service_name,
+      const std::string &resource_attributes)
   {
     const auto parsed = parse_native_otlp_endpoint(endpoint);
     if (!parsed)
@@ -1674,6 +1759,7 @@ namespace
     }
     native_otlp_exporter.endpoint = *parsed;
     native_otlp_exporter.service_name = service_name.empty() ? "vajra" : service_name;
+    native_otlp_exporter.resource_attributes = resource_attributes;
     native_otlp_exporter.stopping.store(false, std::memory_order_release);
     native_otlp_exporter.owner_pid.store(getpid(), std::memory_order_release);
     native_otlp_exporter.running.store(true, std::memory_order_release);
@@ -1936,12 +2022,18 @@ void Vajra::runtime::configure_runtime_tracing(
     bool trace_enabled,
     const std::string &trace_endpoint,
     const std::string &trace_service_name,
-    bool active_context_required)
+    bool active_context_required,
+    const std::string &resource_attributes,
+    const std::string &propagators)
 {
   const std::lock_guard<std::mutex> lock(logging_mutex);
   logging_config.trace_enabled = trace_enabled;
   logging_config.trace_endpoint = trace_endpoint;
   logging_config.trace_service_name = trace_service_name;
+  logging_config.trace_resource_attributes = resource_attributes;
+  logging_config.trace_propagators = propagators.empty() ? "tracecontext,baggage" : propagators;
+  logging_config.tracecontext_propagator = propagators_include_tracecontext(logging_config.trace_propagators);
+  tracecontext_propagator_snapshot.store(logging_config.tracecontext_propagator, std::memory_order_release);
   logging_config.trace_active_context_required = active_context_required;
   trace_active_context_required_snapshot.store(active_context_required, std::memory_order_release);
   if (!trace_enabled)
@@ -1949,6 +2041,7 @@ void Vajra::runtime::configure_runtime_tracing(
     logging_config.trace_available = false;
     trace_available_snapshot.store(false, std::memory_order_release);
     trace_active_context_required_snapshot.store(false, std::memory_order_release);
+    tracecontext_propagator_snapshot.store(false, std::memory_order_release);
     trace_sample_threshold.store(0, std::memory_order_release);
     stop_native_otlp_exporter();
     return;
@@ -1964,6 +2057,7 @@ void Vajra::runtime::start_runtime_tracing_worker()
     config_snapshot.trace_enabled = logging_config.trace_enabled;
     config_snapshot.trace_endpoint = logging_config.trace_endpoint;
     config_snapshot.trace_service_name = logging_config.trace_service_name;
+    config_snapshot.trace_resource_attributes = logging_config.trace_resource_attributes;
     config_snapshot.trace_active_context_required = logging_config.trace_active_context_required;
   }
 
@@ -1971,7 +2065,10 @@ void Vajra::runtime::start_runtime_tracing_worker()
       !config_snapshot.trace_active_context_required &&
       !config_snapshot.trace_endpoint.empty())
   {
-    start_native_otlp_exporter(config_snapshot.trace_endpoint, config_snapshot.trace_service_name);
+    start_native_otlp_exporter(
+        config_snapshot.trace_endpoint,
+        config_snapshot.trace_service_name,
+        config_snapshot.trace_resource_attributes);
     return;
   }
 
@@ -2113,7 +2210,8 @@ bool Vajra::runtime::runtime_trace_sampled(const std::string &traceparent)
   {
     return false;
   }
-  const int parent_sampled = traceparent_sample_flag(traceparent);
+  const bool tracecontext_enabled = tracecontext_propagator_snapshot.load(std::memory_order_acquire);
+  const int parent_sampled = tracecontext_enabled ? traceparent_sample_flag(traceparent) : -1;
   if (parent_sampled >= 0)
   {
     return parent_sampled == 1;
@@ -2145,6 +2243,19 @@ std::string Vajra::runtime::runtime_tracing_service_name()
   return logging_config.trace_service_name;
 }
 
+#ifdef VAJRA_RUNTIME_TESTING
+std::string Vajra::runtime::runtime_tracing_resource_attributes()
+{
+  const std::lock_guard<std::mutex> lock(logging_mutex);
+  return logging_config.trace_resource_attributes;
+}
+
+bool Vajra::runtime::runtime_tracecontext_propagator_enabled()
+{
+  return tracecontext_propagator_snapshot.load(std::memory_order_acquire);
+}
+#endif
+
 Vajra::runtime::AccessLogFieldNeeds Vajra::runtime::access_log_field_needs()
 {
   return Vajra::runtime::AccessLogFieldNeeds{
@@ -2152,7 +2263,14 @@ Vajra::runtime::AccessLogFieldNeeds Vajra::runtime::access_log_field_needs()
       access_need_user_agent.load(std::memory_order_acquire),
       access_need_referer.load(std::memory_order_acquire),
       access_need_request_id.load(std::memory_order_acquire),
-      access_need_trace_context.load(std::memory_order_acquire) || trace_available_snapshot.load(std::memory_order_acquire)};
+      access_need_trace_context.load(std::memory_order_acquire) ||
+          (trace_available_snapshot.load(std::memory_order_acquire) &&
+           tracecontext_propagator_snapshot.load(std::memory_order_acquire))};
+}
+
+bool Vajra::runtime::access_logging_enabled()
+{
+  return !access_log_disabled.load(std::memory_order_acquire);
 }
 
 void Vajra::runtime::set_runtime_lifecycle_callback(void *callback)
@@ -2403,12 +2521,12 @@ void Vajra::runtime::log_runtime_error(const std::string &message)
 
 void Vajra::runtime::log_access_event(const AccessLogEvent &event)
 {
-  service_reopen_signal_if_requested();
   if (access_log_disabled.load(std::memory_order_acquire))
   {
     return;
   }
 
+  service_reopen_signal_if_requested();
   if (enqueue_log_event(LogEvent{
           LogEventKind::access,
           structured_logs_enabled.load(std::memory_order_acquire),

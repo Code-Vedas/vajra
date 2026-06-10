@@ -54,7 +54,9 @@ namespace
           config.trace_enabled,
           config.trace_endpoint,
           config.trace_service_name,
-          config.trace_otel_owner);
+          config.trace_otel_owner,
+          config.trace_resource_attributes,
+          config.trace_propagators);
     }
     catch (const std::exception &error)
     {
@@ -166,14 +168,18 @@ namespace
       VALUE endpoint,
       VALUE service_name,
       VALUE active_context_required,
-      VALUE sample_ratio)
+      VALUE sample_ratio,
+      VALUE resource_attributes,
+      VALUE propagators)
   {
     (void)self;
     Vajra::runtime::configure_runtime_tracing(
         enabled == Qtrue,
         NIL_P(endpoint) ? std::string() : StringValueCStr(endpoint),
         NIL_P(service_name) ? std::string("vajra") : StringValueCStr(service_name),
-        active_context_required == Qtrue);
+        active_context_required == Qtrue,
+        NIL_P(resource_attributes) ? std::string() : StringValueCStr(resource_attributes),
+        NIL_P(propagators) ? std::string("tracecontext,baggage") : StringValueCStr(propagators));
     Vajra::runtime::set_runtime_trace_sample_ratio(NUM2DBL(sample_ratio));
     Vajra::runtime::set_runtime_tracing_available(available == Qtrue);
     return Qnil;
@@ -228,5 +234,5 @@ extern "C" void Init_vajra()
       mTracing,
       "__native_set_tracing_status__",
       RUBY_METHOD_FUNC(rb_tracing_native_set_status),
-      6);
+      8);
 }

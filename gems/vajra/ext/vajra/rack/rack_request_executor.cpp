@@ -1189,15 +1189,14 @@ namespace
       VALUE env = ruby_rack_env_from(*context->env_entries, *context->request_body);
       VALUE result = rb_funcall(app, id_call, 1, env);
       context->response = response_from_rack_result(result);
-      DirectRackObservabilityFields observability_fields;
       if (context->response && Vajra::runtime::runtime_request_span_observability_enabled())
       {
-        observability_fields = direct_rack_observability_fields(*context->env_entries);
-      }
-      if (context->response && Vajra::runtime::runtime_trace_sampled(observability_fields.traceparent))
-      {
-        Vajra::runtime::emit_runtime_request_span_event(
-            direct_rack_observability_event(observability_fields, *context->response, started_at));
+        const DirectRackObservabilityFields observability_fields = direct_rack_observability_fields(*context->env_entries);
+        if (Vajra::runtime::runtime_trace_sampled(observability_fields.traceparent))
+        {
+          Vajra::runtime::emit_runtime_request_span_event(
+              direct_rack_observability_event(observability_fields, *context->response, started_at));
+        }
       }
       return Qnil;
     }

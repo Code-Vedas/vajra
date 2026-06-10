@@ -41,6 +41,8 @@ namespace Vajra
       std::string trace_endpoint;
       std::string trace_service_name;
       bool trace_otel_owner;
+      std::string trace_resource_attributes;
+      std::string trace_propagators;
     };
 
     class RuntimeConfigLoader final

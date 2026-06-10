@@ -654,6 +654,8 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
   const std::string trace_service_name =
       configured_string_from_env("VAJRA_TRACE_SERVICE_NAME", ruby_trace_service_name);
   const bool trace_otel_owner = configured_boolean_from_env("VAJRA_TRACE_OTEL_OWNER", ruby_trace_otel_owner);
+  const std::string trace_resource_attributes = configured_string_from_env("OTEL_RESOURCE_ATTRIBUTES", "");
+  const std::string trace_propagators = configured_string_from_env("OTEL_PROPAGATORS", "tracecontext,baggage");
 
   return RuntimeConfig{
       host,
@@ -679,5 +681,7 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       trace_enabled,
       trace_endpoint,
       trace_service_name,
-      trace_otel_owner};
+      trace_otel_owner,
+      trace_resource_attributes,
+      trace_propagators};
 }

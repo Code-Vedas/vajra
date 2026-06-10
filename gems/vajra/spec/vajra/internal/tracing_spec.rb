@@ -130,7 +130,7 @@ RSpec.describe Vajra::Internal::Tracing do
     ).to be(false)
 
     expect(described_class).to have_received(:__native_set_tracing_status__)
-      .with(false, false, '/ignored', 'vajra-test', false, 1.0)
+      .with(false, false, '/ignored', 'vajra-test', false, 1.0, '', 'tracecontext,baggage')
     expect(described_class).to have_received(:__native_set_lifecycle_callback__).with(nil)
     expect(described_class).to have_received(:__native_set_request_observability_callback__).with(nil)
   end
@@ -141,7 +141,8 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(described_class.install_from_start_options!({})).to be(false)
 
     expect(described_class).not_to have_received(:build_telemetry)
-    expect(described_class).to have_received(:__native_set_tracing_status__).with(false, false, '', 'vajra', false, 1.0)
+    expect(described_class).to have_received(:__native_set_tracing_status__)
+      .with(false, false, '', 'vajra', false, 1.0, '', 'tracecontext,baggage')
     expect(described_class).to have_received(:__native_set_lifecycle_callback__).with(nil)
     expect(described_class).to have_received(:__native_set_request_observability_callback__).with(nil)
     state = described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.to_h }
@@ -160,7 +161,7 @@ RSpec.describe Vajra::Internal::Tracing do
     ).to be(false)
 
     expect(described_class).to have_received(:__native_set_tracing_status__)
-      .with(true, false, 'http://127.0.0.1:4318/v1/traces', 'vajra-test', false, 1.0)
+      .with(true, false, 'http://127.0.0.1:4318/v1/traces', 'vajra-test', false, 1.0, '', 'tracecontext,baggage')
     expect(described_class).to have_received(:warn).with(include('OpenTelemetry tracing requested'))
   end
 
@@ -176,7 +177,7 @@ RSpec.describe Vajra::Internal::Tracing do
     ).to be(true)
 
     expect(described_class).to have_received(:__native_set_tracing_status__)
-      .with(true, true, 'http://127.0.0.1:4318/v1/traces', 'vajra-test', true, 1.0)
+      .with(true, true, 'http://127.0.0.1:4318/v1/traces', 'vajra-test', true, 1.0, '', 'tracecontext,baggage')
     expect(described_class).to have_received(:__native_set_lifecycle_callback__).with(described_class.method(:emit_lifecycle_span))
     expect(described_class).to have_received(:__native_set_request_observability_callback__)
       .with(described_class.method(:emit_native_request_span))
@@ -195,7 +196,7 @@ RSpec.describe Vajra::Internal::Tracing do
     ).to be(true)
 
     expect(described_class).to have_received(:__native_set_tracing_status__)
-      .with(true, true, 'http://127.0.0.1:4318/v1/traces', 'vajra-test', false, 1.0)
+      .with(true, true, 'http://127.0.0.1:4318/v1/traces', 'vajra-test', false, 1.0, '', 'tracecontext,baggage')
   end
 
   it 'installs native callbacks for metrics-only telemetry without reporting tracing as available' do
@@ -204,7 +205,8 @@ RSpec.describe Vajra::Internal::Tracing do
 
     expect(described_class.install_from_start_options!(trace_enabled: true, trace_service_name: 'vajra-test')).to be(false)
 
-    expect(described_class).to have_received(:__native_set_tracing_status__).with(true, false, '', 'vajra-test', false, 1.0)
+    expect(described_class).to have_received(:__native_set_tracing_status__)
+      .with(true, false, '', 'vajra-test', false, 1.0, '', 'tracecontext,baggage')
     expect(described_class).to have_received(:__native_set_lifecycle_callback__).with(described_class.method(:emit_lifecycle_span))
     expect(described_class).to have_received(:__native_set_request_observability_callback__)
       .with(described_class.method(:emit_native_request_span))
@@ -225,13 +227,14 @@ RSpec.describe Vajra::Internal::Tracing do
     ).to be(true)
 
     expect(described_class).to have_received(:__native_set_tracing_status__)
-      .with(true, true, 'http://127.0.0.1:4318/v1/traces', 'vajra-test', false, 1.0)
+      .with(true, true, 'http://127.0.0.1:4318/v1/traces', 'vajra-test', false, 1.0, '', 'tracecontext,baggage')
     expect(described_class).to have_received(:__native_set_lifecycle_callback__).with(nil)
     expect(described_class).to have_received(:__native_set_request_observability_callback__).with(nil)
   end
 
   it 'yields directly when request tracing is unavailable' do
     seen = false
+    allow(described_class).to receive(:drain_request_observability_batch).and_return(0)
 
     described_class.with_request_span('REQUEST_METHOD' => 'GET', 'PATH_INFO' => '/plain') do
       seen = true
@@ -239,9 +242,15 @@ RSpec.describe Vajra::Internal::Tracing do
     end
 
     expect(seen).to be(true)
+    expect(described_class).not_to have_received(:drain_request_observability_batch)
   end
 
   it 'drains native request events on the request path only when no background drain thread is running' do
+    disabled_tracer = Class.new do
+      def enabled?
+        false
+      end
+    end.new
     live_thread = Class.new do
       def alive?
         true
@@ -253,6 +262,7 @@ RSpec.describe Vajra::Internal::Tracing do
       end
     end.new
     allow(described_class).to receive(:drain_request_observability_batch).and_return(0)
+    described_class.send(:write_trace_state, enabled: true, available: true, tracer: disabled_tracer, meter: nil, provider: nil)
 
     described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.request_observability_thread = live_thread }
     described_class.with_request_span('REQUEST_METHOD' => 'GET') { :live }
@@ -908,6 +918,20 @@ RSpec.describe Vajra::Internal::Tracing do
     ).to eq(:context)
     expect(propagation.carrier).to eq('traceparent' => 'trace', 'tracestate' => 'state')
     expect(described_class.send(:extract_context, {})).to be_nil
+  end
+
+  it 'skips propagation extraction when tracecontext propagation is disabled' do
+    propagation = Class.new do
+      def extract(_carrier)
+        raise 'propagation should not be called'
+      end
+    end.new
+    stub_const('OpenTelemetry', Module.new)
+    OpenTelemetry.singleton_class.define_method(:propagation) { propagation }
+    described_class.send(:write_trace_state, enabled: true, available: true, tracer: tracer, meter: nil, provider: nil, propagators: 'none')
+
+    expect(described_class.send(:extract_context, 'HTTP_TRACEPARENT' => 'trace')).to be_nil
+    expect(described_class.send(:tracecontext_propagator_enabled?)).to be(false)
   end
 
   it 'records and closes parented spans when the request block raises' do

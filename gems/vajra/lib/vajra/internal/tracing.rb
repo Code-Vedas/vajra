@@ -5,6 +5,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+require 'uri'
+
 module Vajra
   module Internal
     # Soft-optional OpenTelemetry bridge for request and runtime lifecycle spans.
@@ -64,6 +66,7 @@ module Vajra
       REQUEST_OBSERVABILITY_BATCH_SIZE = 4096
       REQUEST_OBSERVABILITY_POLL_SECONDS = 0.01
       REQUEST_OBSERVABILITY_YIELD_SECONDS = 0.001
+      OPTION_UNSET = Object.new.freeze
 
       def install_from_start_options!(options)
         config = resolve_config(options)
@@ -247,11 +250,12 @@ module Vajra
 
       def resolve_config(options)
         otel_traces_exporter = env_value('OTEL_TRACES_EXPORTER')
+        otel_endpoint = normalized_otel_traces_endpoint(env_value('OTEL_EXPORTER_OTLP_ENDPOINT'))
         TraceConfig.new(
           enabled: resolve_boolean(options, :trace_enabled, 'VAJRA_TRACE_ENABLED') do
             !otel_traces_exporter.nil? && otel_traces_exporter != 'none'
           end,
-          endpoint: resolve_string(options, :trace_endpoint, 'VAJRA_TRACE_ENDPOINT', env_value('OTEL_EXPORTER_OTLP_ENDPOINT') || ''),
+          endpoint: resolve_string(options, :trace_endpoint, 'VAJRA_TRACE_ENDPOINT', otel_endpoint || ''),
           service_name: resolve_string(options, :trace_service_name, 'VAJRA_TRACE_SERVICE_NAME', env_value('OTEL_SERVICE_NAME') || 'vajra'),
           otel_owner: resolve_boolean(options, :trace_otel_owner, 'VAJRA_TRACE_OTEL_OWNER') { false },
           traces_exporter: otel_traces_exporter || 'otlp',
@@ -265,14 +269,16 @@ module Vajra
       private_class_method :resolve_config
 
       def resolve_string(options, key, env_name, default_value)
-        return options.fetch(key).to_s if options.key?(key)
+        value = options.fetch(key, OPTION_UNSET)
+        return value.to_s unless [OPTION_UNSET, nil].include?(value)
 
         env_value(env_name) || default_value
       end
       private_class_method :resolve_string
 
       def resolve_boolean(options, key, env_name)
-        return boolean_value(options.fetch(key), key.to_s) if options.key?(key)
+        value = options.fetch(key, OPTION_UNSET)
+        return boolean_value(value, key.to_s) unless [OPTION_UNSET, nil].include?(value)
 
         value = env_value(env_name)
         return boolean_value(value, env_name) unless value.nil?
@@ -301,6 +307,22 @@ module Vajra
         trimmed.empty? ? nil : trimmed
       end
       private_class_method :env_value
+
+      def normalized_otel_traces_endpoint(endpoint)
+        return nil if endpoint.to_s.empty?
+
+        uri = URI.parse(endpoint)
+        return endpoint unless uri.is_a?(URI::HTTP)
+
+        uri_path = uri.path.to_s
+        return endpoint if uri_path.end_with?('/v1/traces')
+
+        uri.path = "#{uri_path.sub(%r{/*\z}, '')}/v1/traces"
+        uri.to_s
+      rescue URI::InvalidURIError
+        endpoint
+      end
+      private_class_method :normalized_otel_traces_endpoint
 
       def build_telemetry(config)
         return native_owned_telemetry(config) if config.otel_owner

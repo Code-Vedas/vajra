@@ -800,6 +800,41 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(config.service_name).to eq('otel-service')
   end
 
+  it 'treats nil start options as unset when resolving booleans and strings' do
+    ENV['VAJRA_TRACE_ENABLED'] = 'true'
+    ENV['VAJRA_TRACE_OTEL_OWNER'] = 'true'
+    ENV['VAJRA_TRACE_ENDPOINT'] = 'http://vajra-env:4318/v1/traces'
+
+    config = described_class.send(
+      :resolve_config,
+      trace_enabled: nil,
+      trace_otel_owner: nil,
+      trace_endpoint: nil
+    )
+
+    expect(config.enabled).to be(true)
+    expect(config.otel_owner).to be(true)
+    expect(config.endpoint).to eq('http://vajra-env:4318/v1/traces')
+  end
+
+  it 'normalizes OTEL base endpoints to the traces endpoint' do
+    ENV['OTEL_EXPORTER_OTLP_ENDPOINT'] = 'http://collector:4318'
+
+    config = described_class.send(:resolve_config, {})
+
+    expect(config.endpoint).to eq('http://collector:4318/v1/traces')
+    expect(described_class.send(:normalized_otel_traces_endpoint, nil)).to be_nil
+    expect(described_class.send(:normalized_otel_traces_endpoint, '')).to be_nil
+    expect(described_class.send(:normalized_otel_traces_endpoint, 'http://collector:4318/otel'))
+      .to eq('http://collector:4318/otel/v1/traces')
+    expect(described_class.send(:normalized_otel_traces_endpoint, 'http://collector:4318/v1/traces'))
+      .to eq('http://collector:4318/v1/traces')
+    expect(described_class.send(:normalized_otel_traces_endpoint, 'mailto:collector@example.test'))
+      .to eq('mailto:collector@example.test')
+    expect(described_class.send(:normalized_otel_traces_endpoint, '%%%'))
+      .to eq('%%%')
+  end
+
   it 'treats blank environment values as unset and preserves OTEL metadata config' do
     ENV['VAJRA_TRACE_ENABLED'] = ' '
     ENV['OTEL_TRACES_EXPORTER'] = 'none'

@@ -250,6 +250,14 @@ namespace
         error_message);
   }
 
+  void log_access_event_if_enabled(const Vajra::runtime::AccessLogEvent &event)
+  {
+    if (Vajra::runtime::access_logging_enabled())
+    {
+      Vajra::runtime::log_access_event(event);
+    }
+  }
+
   std::string connection_outcome_for(Vajra::response::ConnectionBehavior behavior)
   {
     return behavior == Vajra::response::ConnectionBehavior::close ? "close" : "keepalive";
@@ -549,7 +557,7 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
         head_failure_kind_token(error.kind()),
         true,
         error.what());
-    Vajra::runtime::log_access_event(event);
+    log_access_event_if_enabled(event);
     return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
   }
   catch (const QueueCapacityError &error)
@@ -563,7 +571,7 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
         request_started_at,
         "close");
     emit_native_request_observability(event, "queue_capacity", "queue_capacity", true, error.what());
-    Vajra::runtime::log_access_event(event);
+    log_access_event_if_enabled(event);
     return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
   }
   catch (const RequestTimeoutError &error)
@@ -577,7 +585,7 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
         request_started_at,
         "close");
     emit_native_request_observability(event, "request_timeout", "request_timeout", true, error.what());
-    Vajra::runtime::log_access_event(event);
+    log_access_event_if_enabled(event);
     return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
   }
   catch (const std::exception &error)
@@ -591,7 +599,7 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
         request_started_at,
         "close");
     emit_native_request_observability(event, "execution_error", "execution_error", true, error.what());
-    Vajra::runtime::log_access_event(event);
+    log_access_event_if_enabled(event);
     return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
   }
 

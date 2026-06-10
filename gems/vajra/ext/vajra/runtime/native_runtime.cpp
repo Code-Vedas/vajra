@@ -862,6 +862,7 @@ namespace
     }
 
     close(write_fd);
+    Vajra::runtime::stop_runtime_tracing_worker();
     Vajra::runtime::stop_runtime_logging_worker();
     _exit(exit_code);
   }
@@ -2802,6 +2803,7 @@ void Vajra::runtime::NativeRuntime::run_worker_process(
       shutdown(control_channel_fd, SHUT_RDWR);
       close_fd_if_open(control_channel_fd);
     }
+    Vajra::runtime::stop_runtime_tracing_worker();
     Vajra::runtime::stop_runtime_logging_worker();
     _exit(0);
   }
@@ -3230,6 +3232,7 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
       log_runtime_stop_completed();
     }
     log_runtime_shutdown_complete();
+    Vajra::runtime::stop_runtime_tracing_worker();
     Vajra::runtime::stop_runtime_logging_worker();
   }
   catch (...)
@@ -3243,6 +3246,7 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
       wait_for_worker_exit(live_worker_states);
     }
     clear_worker_runtime();
+    Vajra::runtime::stop_runtime_tracing_worker();
     Vajra::runtime::stop_runtime_logging_worker();
     throw;
   }

@@ -4,6 +4,7 @@
 // LICENSE file in the root directory of this source tree.
 
 #include "runtime/runtime_logging.hpp"
+#include "runtime/traceparent.hpp"
 
 #if __has_include("ruby.h")
 #include "ruby.h"
@@ -200,22 +201,6 @@ namespace
   std::atomic_bool native_otlp_export_enabled{false};
   std::atomic<std::uint64_t> native_otlp_id_counter{0};
 
-  std::string traceparent_part(const std::string &traceparent, int part)
-  {
-    std::size_t cursor = 0;
-    for (int index = 0; index < part; ++index)
-    {
-      cursor = traceparent.find('-', cursor);
-      if (cursor == std::string::npos)
-      {
-        return "";
-      }
-      ++cursor;
-    }
-    const std::size_t end = traceparent.find('-', cursor);
-    return traceparent.substr(cursor, end == std::string::npos ? std::string::npos : end - cursor);
-  }
-
   std::string trim_copy(const std::string &value)
   {
     std::size_t begin = 0;
@@ -296,7 +281,7 @@ namespace
 
   int traceparent_sample_flag(const std::string &traceparent)
   {
-    const std::string flags = traceparent_part(traceparent, 3);
+    const std::string flags = Vajra::runtime::traceparent_part(traceparent, 3);
     if (flags.size() != 2)
     {
       return -1;

@@ -604,6 +604,16 @@ RSpec.describe Vajra::Internal::Tracing do
     hash_span_only_response = described_class.with_request_span('REQUEST_METHOD' => 'GET') { [200, {}, ['OK']] }
     nil_context_response = described_class.with_request_span('REQUEST_METHOD' => 'GET') { [200, {}, ['OK']] }
     object_header_response = described_class.with_request_span('REQUEST_METHOD' => 'GET') { [200, Object.new, ['OK']] }
+    append_only_headers = Class.new do
+      attr_reader :entries
+
+      def initialize
+        @entries = []
+      end
+
+      define_method(:<<) { |entry| @entries << entry }
+    end.new
+    append_only_response = described_class.with_request_span('REQUEST_METHOD' => 'GET') { [200, append_only_headers, ['OK']] }
 
     expect(hash_response[1]).to include(described_class::INTERNAL_TRACE_ID_HEADER => 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee')
     expect(hash_response[1]).not_to include(described_class::INTERNAL_SPAN_ID_HEADER)
@@ -615,6 +625,7 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(hash_span_only_response[1]).not_to include(described_class::INTERNAL_TRACE_ID_HEADER)
     expect(nil_context_response[1]).to be_empty
     expect(object_header_response[1]).not_to respond_to(:[])
+    expect(append_only_response[1].entries).to be_empty
   end
 
   it 'emits lifecycle spans when tracing is available' do

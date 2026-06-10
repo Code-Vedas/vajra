@@ -11,7 +11,9 @@
 #include "response/response_serializer.hpp"
 #include "runtime/runtime_logging.hpp"
 #include "runtime/runtime_state.hpp"
+#include "runtime/traceparent.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <iostream>
 #include <sstream>
@@ -97,73 +99,57 @@ namespace
     return observed;
   }
 
-  bool traceparent_hex_value(const std::string &value, std::size_t expected_length, bool require_non_zero)
-  {
-    if (value.size() != expected_length)
-    {
-      return false;
-    }
-    bool non_zero = false;
-    for (const char character : value)
-    {
-      const bool hex =
-          (character >= '0' && character <= '9') ||
-          (character >= 'a' && character <= 'f') ||
-          (character >= 'A' && character <= 'F');
-      if (!hex)
-      {
-        return false;
-      }
-      non_zero = non_zero || character != '0';
-    }
-    return !require_non_zero || non_zero;
-  }
-
-  std::string traceparent_part(const std::string &traceparent, int part)
-  {
-    const std::size_t first = traceparent.find('-');
-    const std::size_t second = first == std::string::npos ? std::string::npos : traceparent.find('-', first + 1);
-    const std::size_t third = second == std::string::npos ? std::string::npos : traceparent.find('-', second + 1);
-    if (first != 2 || second == std::string::npos || third == std::string::npos)
-    {
-      return "";
-    }
-
-    const std::string version = traceparent.substr(0, first);
-    const std::string trace_id = traceparent.substr(first + 1, second - first - 1);
-    const std::string span_id = traceparent.substr(second + 1, third - second - 1);
-    const std::string flags = traceparent.substr(third + 1);
-    if (!traceparent_hex_value(version, 2, false) ||
-        !traceparent_hex_value(trace_id, 32, true) ||
-        !traceparent_hex_value(span_id, 16, true) ||
-        !traceparent_hex_value(flags, 2, false))
-    {
-      return "";
-    }
-
-    return part == 1 ? trace_id : span_id;
-  }
-
   bool internal_trace_header(const Vajra::response::Header &header)
   {
     return Vajra::request::ascii_case_insensitive_equal(header.name, "x-vajra-internal-trace-id") ||
            Vajra::request::ascii_case_insensitive_equal(header.name, "x-vajra-internal-span-id");
   }
 
-  std::string response_header_value(const Vajra::response::Response &response, const std::string &name)
+  struct InternalTraceResponseHeaders
   {
+    std::string trace_id;
+    std::string span_id;
+    bool present = false;
+  };
+
+  InternalTraceResponseHeaders internal_trace_response_headers(const Vajra::response::Response &response)
+  {
+    InternalTraceResponseHeaders headers;
     for (const auto &header : response.headers)
     {
-      if (Vajra::request::ascii_case_insensitive_equal(header.name, name))
+      if (Vajra::request::ascii_case_insensitive_equal(header.name, kInternalTraceIdHeader))
       {
-        return header.value;
+        headers.trace_id = header.value;
+        headers.present = true;
+      }
+      else if (Vajra::request::ascii_case_insensitive_equal(header.name, kInternalSpanIdHeader))
+      {
+        headers.span_id = header.value;
+        headers.present = true;
       }
     }
-    return "";
+    return headers;
   }
 
   void strip_internal_trace_headers(Vajra::response::Response &response)
   {
+    if (response.headers.empty())
+    {
+      return;
+    }
+
+    const auto first_internal_header = std::find_if(
+        response.headers.begin(),
+        response.headers.end(),
+        [](const Vajra::response::Header &header)
+        {
+          return internal_trace_header(header);
+        });
+    if (first_internal_header == response.headers.end())
+    {
+      return;
+    }
+
     std::vector<Vajra::response::Header> filtered_headers;
     filtered_headers.reserve(response.headers.size());
     for (const auto &header : response.headers)
@@ -206,8 +192,8 @@ namespace
         getpid(),
         static_cast<int>(worker_index),
         connection_outcome,
-        trace_id.empty() && use_incoming_trace_context ? traceparent_part(headers.traceparent, 1) : trace_id,
-        span_id.empty() && use_incoming_trace_context ? traceparent_part(headers.traceparent, 2) : span_id};
+        trace_id.empty() && use_incoming_trace_context ? Vajra::runtime::traceparent_part(headers.traceparent, 1) : trace_id,
+        span_id.empty() && use_incoming_trace_context ? Vajra::runtime::traceparent_part(headers.traceparent, 2) : span_id};
   }
 
   Vajra::runtime::AccessLogEvent access_event_for_unparsed_head(
@@ -603,9 +589,11 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
     return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
   }
 
-  const std::string response_trace_id = response_header_value(response, kInternalTraceIdHeader);
-  const std::string response_span_id = response_header_value(response, kInternalSpanIdHeader);
-  strip_internal_trace_headers(response);
+  const InternalTraceResponseHeaders trace_headers = internal_trace_response_headers(response);
+  if (trace_headers.present)
+  {
+    strip_internal_trace_headers(response);
+  }
   if (!response_writer_.send(client_fd, response))
   {
     return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
@@ -619,8 +607,8 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
         response.body.size(),
         request_started_at,
         connection_outcome_for(connection_behavior),
-        response_trace_id,
-        response_span_id));
+        trace_headers.trace_id,
+        trace_headers.span_id));
   }
 
   return RequestProcessingResult{

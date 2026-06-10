@@ -639,7 +639,7 @@ module Vajra
         return result if trace_context.empty? || !result.respond_to?(:[])
 
         headers = result[1]
-        return result unless headers.respond_to?(:[]=) || headers.respond_to?(:<<)
+        return result unless trace_headers_writable?(headers)
 
         trace_id = trace_context[:trace_id]
         span_id = trace_context[:span_id]
@@ -653,6 +653,15 @@ module Vajra
         result
       end
       private_class_method :attach_trace_context
+
+      def trace_headers_writable?(headers)
+        writer = headers.is_a?(Array) ? :<< : :[]=
+        headers.method(writer)
+        true
+      rescue NameError
+        false
+      end
+      private_class_method :trace_headers_writable?
 
       def record_request_metrics(duration, attributes)
         request_counter, request_duration = TRACE_MUTEX.synchronize do

@@ -1125,6 +1125,44 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(span.status).to eq(:ok)
   end
 
+  it 'omits native HTTP status attributes when no response was sent' do
+    span = native_error_span
+    stub_error_status
+    described_class.send(:write_trace_state, enabled: true, available: true, tracer:, meter: nil, provider: nil)
+    allow(tracer).to receive(:in_span).and_yield(span)
+
+    attributes = described_class.send(
+      :native_request_attributes,
+      method: 'POST',
+      target: '/upload',
+      protocol: 'HTTP/1.1',
+      status: 0,
+      response_sent: false,
+      outcome: 'request_body_error',
+      failure_kind: 'request_body_incomplete'
+    )
+
+    expect(attributes).not_to include('http.response.status_code')
+    expect(attributes).to include(
+      'vajra.response.sent' => false,
+      'vajra.request.outcome' => 'request_body_error'
+    )
+
+    described_class.emit_native_request_span(
+      method: 'POST',
+      target: '/upload',
+      protocol: 'HTTP/1.1',
+      status: 0,
+      duration_nanoseconds: 10,
+      response_sent: false,
+      outcome: 'request_body_error',
+      failure_kind: 'request_body_incomplete',
+      error_message: 'client disconnected'
+    )
+
+    expect(span.attributes).not_to include('http.response.status_code')
+  end
+
   it 'emits native request spans from drained native request events' do
     span = native_error_span
     stub_error_status

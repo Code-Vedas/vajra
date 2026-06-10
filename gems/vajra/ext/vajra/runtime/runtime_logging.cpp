@@ -1835,6 +1835,29 @@ namespace
     }
   }
 
+  Vajra::runtime::RequestObservabilityEvent request_observability_event_from_span(
+      const Vajra::runtime::RequestSpanEvent &event)
+  {
+    Vajra::runtime::RequestObservabilityEvent queued;
+    queued.access.method = event.method;
+    queued.access.target = event.target;
+    queued.access.status_code = event.status_code;
+    queued.access.duration_nanoseconds = event.duration_nanoseconds;
+    queued.access.protocol = event.protocol;
+    queued.access.host = event.host;
+    queued.access.worker_pid = event.worker_pid;
+    queued.access.worker_index = event.worker_index;
+    queued.access.connection_outcome = event.connection_outcome;
+    queued.access.trace_id = event.trace_id;
+    queued.access.span_id = event.span_id;
+    queued.outcome = event.outcome;
+    queued.failure_kind = event.failure_kind;
+    queued.response_sent = event.response_sent;
+    queued.error_message = event.error_message;
+    queued.timestamp = Vajra::runtime::utc_timestamp();
+    return queued;
+  }
+
   void enqueue_runtime_request_span_event(Vajra::runtime::RequestSpanEvent event)
   {
     native_request_observability_events_total.fetch_add(1, std::memory_order_acq_rel);
@@ -1854,6 +1877,10 @@ namespace
     }
 
     const std::lock_guard<std::mutex> lock(request_observability_mutex);
+    if (request_observability_enabled.load(std::memory_order_acquire))
+    {
+      request_observability_events.push_back(request_observability_event_from_span(event));
+    }
     if (native_otlp_export_enabled.load(std::memory_order_acquire))
     {
       native_otlp_span_events.push_back(std::move(event));

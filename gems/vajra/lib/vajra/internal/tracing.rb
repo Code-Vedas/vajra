@@ -236,7 +236,7 @@ module Vajra
         options = { attributes: attributes }
         context = native_parent_context(event)
         in_span(tracer, native_request_span_name(event), options, context) do |span|
-          status = integer_or_nil(event[:status])
+          status = native_response_status(event)
           record_span_response_status(span, status)
           mark_span_success(span) if status && status < 500 && event[:response_sent]
           record_span_error(span, event[:error_message].to_s) unless native_success_event?(event)
@@ -723,7 +723,7 @@ module Vajra
         compact_attributes(
           'http.request.method' => empty_to_nil(event[:method].to_s),
           'url.path' => request_path(event[:target].to_s),
-          'http.response.status_code' => integer_or_nil(event[:status]),
+          'http.response.status_code' => native_response_status(event),
           'server.address' => empty_to_nil(event[:host].to_s),
           'network.protocol.name' => protocol_name,
           'network.protocol.version' => protocol_version,
@@ -736,6 +736,14 @@ module Vajra
         )
       end
       private_class_method :native_request_attributes
+
+      def native_response_status(event)
+        status = integer_or_nil(event[:status])
+        return nil unless event[:response_sent] && status && status >= 100 && status <= 599
+
+        status
+      end
+      private_class_method :native_response_status
 
       def native_traceparent(event)
         trace_id = event[:trace_id].to_s

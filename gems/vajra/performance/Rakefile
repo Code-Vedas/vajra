@@ -823,10 +823,10 @@ module Performance
         'access_combined' => observability_mode('access_combined', config: access_log_config('combined')),
         'access_token' => observability_mode('access_token', config: access_log_config('%m %U %s %D %b %a %H %h %u %r %T %S')),
         'structured_json' => observability_mode('structured_json', config: access_log_config('json').merge(structured_logs: true)),
-        'otel_spans' => observability_mode('otel_spans', config: local_trace),
+        'otel_spans' => observability_mode('otel_spans', config: otlp_trace, traces_exporter: 'otlp'),
         'otel_metrics' => observability_mode('otel_metrics', config: local_trace, metrics_exporter: 'memory'),
-        'otel_all_local' => observability_mode('otel_all_local', config: local_trace.merge(access_log_config('json'), structured_logs: true),
-                                                                 metrics_exporter: 'memory'),
+        'otel_all_local' => observability_mode('otel_all_local', config: otlp_trace.merge(access_log_config('json'), structured_logs: true),
+                                                                 traces_exporter: 'otlp', metrics_exporter: 'memory'),
         'otel_otlp' => observability_mode('otel_otlp', config: otlp_trace, traces_exporter: 'otlp'),
         'otel_all_otlp' => observability_mode('otel_all_otlp', config: otlp_trace.merge(access_log_config('json'), structured_logs: true),
                                                                traces_exporter: 'otlp', metrics_exporter: 'memory')

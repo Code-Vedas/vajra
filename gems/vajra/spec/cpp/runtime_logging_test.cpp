@@ -290,6 +290,46 @@ namespace
       VajraSpecCpp::fail("disabled request observability should still update native counters");
     }
   }
+
+  void test_request_span_events_drain_to_ruby_observability_queue()
+  {
+    Vajra::runtime::set_runtime_request_observability_callback(reinterpret_cast<void *>(1));
+
+    Vajra::runtime::RequestSpanEvent event;
+    event.method = "GET";
+    event.target = "/direct";
+    event.status_code = 204;
+    event.duration_nanoseconds = 1000;
+    event.protocol = "HTTP/1.1";
+    event.host = "example.test";
+    event.outcome = "completed";
+    event.response_sent = true;
+    event.connection_outcome = "keepalive";
+    event.worker_index = 2;
+    event.worker_pid = 1234;
+    event.trace_id = "11111111111111111111111111111111";
+    event.span_id = "2222222222222222";
+
+    Vajra::runtime::emit_runtime_request_span_event(event);
+    std::vector<Vajra::runtime::RequestObservabilityEvent> drained =
+        Vajra::runtime::drain_runtime_request_observability_events(8);
+    Vajra::runtime::set_runtime_request_observability_callback(nullptr);
+
+    if (drained.size() != 1)
+    {
+      VajraSpecCpp::fail("direct request span event should drain to Ruby observability queue");
+    }
+    if (drained[0].access.method != "GET" ||
+        drained[0].access.target != "/direct" ||
+        drained[0].access.status_code != 204 ||
+        drained[0].access.host != "example.test" ||
+        drained[0].access.trace_id != "11111111111111111111111111111111" ||
+        drained[0].outcome != "completed" ||
+        !drained[0].response_sent)
+    {
+      VajraSpecCpp::fail("direct request span event did not preserve Ruby observability fields");
+    }
+  }
 }
 
 void VajraSpecCpp::run_runtime_logging_tests()
@@ -304,4 +344,5 @@ void VajraSpecCpp::run_runtime_logging_tests()
   test_async_logger_reuses_pooled_nodes();
   test_request_observability_queue_drains_enabled_events();
   test_request_observability_disabled_queue_keeps_counters();
+  test_request_span_events_drain_to_ruby_observability_queue();
 }

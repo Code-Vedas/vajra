@@ -1423,6 +1423,35 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(batches).to be_empty
   end
 
+  it 'continues drain thread cleanup when wakeup races a running thread' do
+    thread = Class.new do
+      attr_reader :joined
+
+      def alive?
+        true
+      end
+
+      def wakeup
+        raise ThreadError, 'not sleeping'
+      end
+
+      def join
+        @joined = true
+      end
+    end.new
+    batches = [1, 0]
+    allow(described_class).to receive(:drain_request_observability_batch) { batches.shift || 0 }
+    described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.request_observability_thread = thread }
+
+    expect do
+      described_class.send(:stop_request_observability_drain_thread)
+    end.not_to raise_error
+
+    expect(thread.joined).to be(true)
+    expect(batches).to be_empty
+    expect(described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.request_observability_thread }).to be_nil
+  end
+
   it 'does not join the current thread when stopping drain state' do
     described_class::TRACE_MUTEX.synchronize { described_class::TRACE_STATE.request_observability_thread = Thread.current }
 

@@ -891,7 +891,7 @@ module Vajra
           TRACE_STATE.request_observability_thread
         end
         if thread
-          thread.wakeup if thread.alive?
+          wake_request_observability_drain_thread(thread) if thread.alive?
           thread.join unless thread == Thread.current
         end
         drain_request_observability_batch until drain_request_observability_batch.zero?
@@ -901,6 +901,13 @@ module Vajra
         end
       end
       private_class_method :stop_request_observability_drain_thread
+
+      def wake_request_observability_drain_thread(thread)
+        thread.wakeup
+      rescue ThreadError
+        nil
+      end
+      private_class_method :wake_request_observability_drain_thread
 
       def request_observability_stop?
         TRACE_MUTEX.synchronize { TRACE_STATE.request_observability_stop }

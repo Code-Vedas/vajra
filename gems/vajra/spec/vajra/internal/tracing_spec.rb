@@ -356,6 +356,7 @@ RSpec.describe Vajra::Internal::Tracing do
     described_class.with_request_span(
       'REQUEST_METHOD' => 'POST',
       'PATH_INFO' => '/widgets',
+      'QUERY_STRING' => 'token=secret',
       'rack.url_scheme' => 'http',
       'SERVER_NAME' => 'example.test',
       'SERVER_PORT' => '3000',
@@ -374,6 +375,30 @@ RSpec.describe Vajra::Internal::Tracing do
         'network.protocol.version' => '1.1'
       }
     )
+  end
+
+  it 'marks Rack 5xx response spans as errors' do
+    span = Class.new do
+      attr_reader :attributes
+      attr_accessor :status
+
+      def initialize
+        @attributes = {}
+      end
+
+      def set_attribute(name, value)
+        @attributes[name] = value
+      end
+    end.new
+    stub_trace_with_span(ok_status: :ok, error_status: :error)
+    described_class.send(:write_trace_state, enabled: true, available: true, tracer: tracer, meter: nil, provider: nil)
+    allow(tracer).to receive(:in_span).and_yield(span)
+
+    response = described_class.with_request_span('REQUEST_METHOD' => 'GET') { [503, {}, ['unavailable']] }
+
+    expect(response.first).to eq(503)
+    expect(span.attributes).to include('http.response.status_code' => 503)
+    expect(span.status).to eq([:error, 'HTTP 503'])
   end
 
   it 'passes extracted parent context and status-tagged metrics through request spans' do

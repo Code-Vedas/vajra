@@ -175,7 +175,7 @@ module Vajra
             result = yield
             response_status = response_status_from(result)
             record_span_response_status(span, response_status)
-            mark_span_success(span)
+            mark_span_response_outcome(span, response_status)
             attach_trace_context(result, span)
           rescue StandardError => e
             record_span_exception(span, e)
@@ -423,8 +423,7 @@ module Vajra
           'server.address' => env['SERVER_NAME'],
           'server.port' => integer_or_nil(env['SERVER_PORT']),
           'network.protocol.name' => protocol_name,
-          'network.protocol.version' => protocol_version,
-          'vajra.request.query_string' => empty_to_nil(env['QUERY_STRING'])
+          'network.protocol.version' => protocol_version
         )
       end
       private_class_method :request_attributes
@@ -522,6 +521,13 @@ module Vajra
         span.status = OpenTelemetry::Trace::Status.ok if defined?(OpenTelemetry::Trace::Status)
       end
       private_class_method :mark_span_success
+
+      def mark_span_response_outcome(span, status)
+        return unless status
+
+        status < 500 ? mark_span_success(span) : record_span_error(span, "HTTP #{status}")
+      end
+      private_class_method :mark_span_response_outcome
 
       def record_span_response_status(span, status)
         return unless span && status && span.respond_to?(:set_attribute)

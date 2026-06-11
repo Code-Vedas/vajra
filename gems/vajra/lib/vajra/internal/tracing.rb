@@ -289,9 +289,9 @@ module Vajra
 
       def boolean_value(value, name)
         case value
-        when true, 'true', '1', 'yes', 'on', 'owner', 'vajra'
+        when true, 'true', '1', 'yes', 'on'
           true
-        when false, 'false', '0', 'no', 'off', 'none'
+        when false, 'false', '0', 'no', 'off'
           false
         else
           raise ArgumentError, "invalid #{name}: #{value.inspect}"

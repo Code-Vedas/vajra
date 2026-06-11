@@ -942,6 +942,22 @@ RSpec.describe Vajra::Internal::Tracing do
     end.to raise_error(ArgumentError, /invalid VAJRA_TRACE_ENABLED/)
   end
 
+  it 'keeps Ruby boolean parsing aligned with native runtime environment booleans' do
+    truthy_values = [true, 'true', '1', 'yes', 'on']
+    falsey_values = [false, 'false', '0', 'no', 'off']
+
+    expect(truthy_values.map { |value| described_class.send(:boolean_value, value, 'VAJRA_TRACE_ENABLED') })
+      .to all(be(true))
+    expect(falsey_values.map { |value| described_class.send(:boolean_value, value, 'VAJRA_TRACE_ENABLED') })
+      .to all(be(false))
+
+    %w[owner vajra none].each do |value|
+      expect do
+        described_class.send(:resolve_config, trace_otel_owner: value)
+      end.to raise_error(ArgumentError, /invalid trace_otel_owner/)
+    end
+  end
+
   it 'installs request metric instruments when a meter provider is configured' do
     ENV['OTEL_METRICS_EXPORTER'] = 'otlp'
     instruments = []

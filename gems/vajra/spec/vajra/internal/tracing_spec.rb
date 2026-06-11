@@ -824,6 +824,22 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(described_class.send(:native_tracing_configured?, config)).to be(false)
   end
 
+  it 'uses native tracing only when OTEL traces exporters include OTLP' do
+    otlp_exporter = described_class::TraceConfig.new(
+      endpoint: 'http://127.0.0.1:4318/v1/traces',
+      traces_exporter: ' console, OTLP ',
+      sampler: ''
+    )
+    console_exporter = described_class::TraceConfig.new(
+      endpoint: 'http://127.0.0.1:4318/v1/traces',
+      traces_exporter: 'console,zipkin',
+      sampler: ''
+    )
+
+    expect(described_class.send(:native_tracing_configured?, otlp_exporter)).to be(true)
+    expect(described_class.send(:native_tracing_configured?, console_exporter)).to be(false)
+  end
+
   it 'disables native tracing when owner export is disabled or sampling is always off' do
     disabled_export = described_class::TraceConfig.new(
       endpoint: 'http://127.0.0.1:4318/v1/traces',

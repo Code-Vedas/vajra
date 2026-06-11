@@ -350,11 +350,16 @@ module Vajra
 
       def native_tracing_configured?(config)
         return false if sampler_always_off?(config)
-        return false if config.traces_exporter == 'none'
+        return false unless traces_exporter_enabled?(config.traces_exporter, 'otlp')
 
         config.endpoint.start_with?('http://')
       end
       private_class_method :native_tracing_configured?
+
+      def traces_exporter_enabled?(exporters, expected)
+        exporters.to_s.split(',').map { |exporter| exporter.strip.downcase }.include?(expected)
+      end
+      private_class_method :traces_exporter_enabled?
 
       def sampler_always_off?(config)
         config.sampler.to_s == 'always_off'

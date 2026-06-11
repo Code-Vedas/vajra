@@ -636,27 +636,43 @@ module Vajra
 
       def attach_trace_context(result, span)
         trace_context = current_trace_context(span)
-        return result if trace_context.empty? || !result.respond_to?(:[])
+        return result if trace_context.empty? || !result.respond_to?(:[]) || !result.respond_to?(:[]=)
 
         headers = result[1]
+        return result if headers.frozen?
         return result unless trace_headers_writable?(headers)
 
-        trace_id = trace_context[:trace_id]
-        span_id = trace_context[:span_id]
-        if headers.is_a?(Array)
-          headers << [INTERNAL_TRACE_ID_HEADER, trace_id] if trace_id
-          headers << [INTERNAL_SPAN_ID_HEADER, span_id] if span_id
-        else
-          headers[INTERNAL_TRACE_ID_HEADER] = trace_id if trace_id
-          headers[INTERNAL_SPAN_ID_HEADER] = span_id if span_id
-        end
+        result[1] = headers_with_trace_context(headers, trace_context)
+        result
+      rescue StandardError
         result
       end
       private_class_method :attach_trace_context
 
+      def headers_with_trace_context(headers, trace_context)
+        trace_id = trace_context[:trace_id]
+        span_id = trace_context[:span_id]
+        return headers + trace_header_entries(trace_id, span_id) if headers.is_a?(Array)
+
+        headers.dup.tap do |updated|
+          updated[INTERNAL_TRACE_ID_HEADER] = trace_id if trace_id
+          updated[INTERNAL_SPAN_ID_HEADER] = span_id if span_id
+        end
+      end
+      private_class_method :headers_with_trace_context
+
+      def trace_header_entries(trace_id, span_id)
+        entries = []
+        entries << [INTERNAL_TRACE_ID_HEADER, trace_id] if trace_id
+        entries << [INTERNAL_SPAN_ID_HEADER, span_id] if span_id
+        entries
+      end
+      private_class_method :trace_header_entries
+
       def trace_headers_writable?(headers)
-        writer = headers.is_a?(Array) ? :<< : :[]=
-        headers.method(writer)
+        return true if headers.is_a?(Array)
+
+        headers.method(:[]=)
         true
       rescue NameError
         false

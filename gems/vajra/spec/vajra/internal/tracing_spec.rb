@@ -628,6 +628,47 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(append_only_response[1].entries).to be_empty
   end
 
+  it 'leaves immutable response headers untouched during response correlation' do
+    context = Class.new do
+      def hex_trace_id
+        'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
+      end
+    end.new
+    span = Class.new do
+      define_method(:initialize) { |context| @context = context }
+      define_method(:context) { @context }
+    end.new(context)
+    described_class.send(:write_trace_state, enabled: true, available: true, tracer:, meter: nil, provider: nil)
+    allow(tracer).to receive(:in_span).and_yield(span)
+
+    frozen_hash_headers = {}.freeze
+    frozen_hash_response = described_class.with_request_span('REQUEST_METHOD' => 'GET') { [200, frozen_hash_headers, ['OK']] }
+    frozen_array_headers = [].freeze
+    frozen_array_response = described_class.with_request_span('REQUEST_METHOD' => 'GET') { [200, frozen_array_headers, ['OK']] }
+    rejecting_headers = Class.new do
+      def []=(_key, _value)
+        raise FrozenError, 'immutable'
+      end
+    end.new
+    rejecting_response = described_class.with_request_span('REQUEST_METHOD' => 'GET') { [200, rejecting_headers, ['OK']] }
+    rejecting_result = Class.new do
+      def [](index)
+        index == 1 ? {} : nil
+      end
+
+      def []=(_index, _value)
+        raise FrozenError, 'immutable response'
+      end
+    end.new
+
+    expect do
+      described_class.send(:attach_trace_context, rejecting_result, span)
+    end.not_to raise_error
+    expect(frozen_hash_response[1]).to equal(frozen_hash_headers)
+    expect(frozen_array_response[1]).to equal(frozen_array_headers)
+    expect(rejecting_response[1]).to equal(rejecting_headers)
+  end
+
   it 'emits lifecycle spans when tracing is available' do
     described_class.send(:write_trace_state, enabled: true, available: true, tracer: tracer, meter: nil, provider: nil)
     allow(tracer).to receive(:in_span).and_yield(nil)

@@ -4,6 +4,7 @@
 // LICENSE file in the root directory of this source tree.
 
 #include "runtime/runtime_logging.hpp"
+#include "runtime/traceparent.hpp"
 #include "test_support.hpp"
 #include "test_suites.hpp"
 
@@ -186,6 +187,33 @@ namespace
     }
   }
 
+  void test_traceparent_part_allows_future_version_fields()
+  {
+    const std::string traceparent =
+        "01-11111111111111111111111111111111-2222222222222222-01-future-field";
+
+    if (Vajra::runtime::traceparent_part(traceparent, 1) != "11111111111111111111111111111111" ||
+        Vajra::runtime::traceparent_part(traceparent, 2) != "2222222222222222" ||
+        Vajra::runtime::traceparent_part(traceparent, 3) != "01")
+    {
+      VajraSpecCpp::fail("future traceparent version should allow extra delimited fields");
+    }
+    if (!Vajra::runtime::traceparent_part(
+             "00-11111111111111111111111111111111-2222222222222222-01-extra",
+             1)
+             .empty())
+    {
+      VajraSpecCpp::fail("traceparent version 00 should reject extra fields");
+    }
+    if (!Vajra::runtime::traceparent_part(
+             "01-11111111111111111111111111111111-2222222222222222-01extra",
+             1)
+             .empty())
+    {
+      VajraSpecCpp::fail("future traceparent flags should be followed by a delimiter when extra fields exist");
+    }
+  }
+
   Vajra::runtime::AccessLogEvent sample_access_event(int status)
   {
     Vajra::runtime::AccessLogEvent event;
@@ -341,6 +369,7 @@ void VajraSpecCpp::run_runtime_logging_tests()
   test_tracing_forces_trace_context_need();
   test_active_context_required_follows_availability();
   test_runtime_trace_sampling_uses_ratio_and_parent_flags();
+  test_traceparent_part_allows_future_version_fields();
   test_async_logger_reuses_pooled_nodes();
   test_request_observability_queue_drains_enabled_events();
   test_request_observability_disabled_queue_keeps_counters();

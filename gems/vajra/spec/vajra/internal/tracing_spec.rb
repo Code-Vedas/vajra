@@ -932,19 +932,29 @@ RSpec.describe Vajra::Internal::Tracing do
   end
 
   it 'enables tracing from OTEL_TRACES_EXPORTER and rejects invalid booleans' do
-    ENV['OTEL_TRACES_EXPORTER'] = 'otlp'
+    ENV['OTEL_TRACES_EXPORTER'] = 'OTLP'
 
     config = described_class.send(:resolve_config, {})
 
     expect(config.enabled).to be(true)
+    expect(config.traces_exporter).to eq('otlp')
     expect do
       described_class.send(:boolean_value, 'maybe', 'VAJRA_TRACE_ENABLED')
     end.to raise_error(ArgumentError, /invalid VAJRA_TRACE_ENABLED/)
   end
 
+  it 'does not enable tracing for uppercase OTEL_TRACES_EXPORTER none' do
+    ENV['OTEL_TRACES_EXPORTER'] = 'NONE'
+
+    config = described_class.send(:resolve_config, {})
+
+    expect(config.enabled).to be(false)
+    expect(config.traces_exporter).to eq('none')
+  end
+
   it 'keeps Ruby boolean parsing aligned with native runtime environment booleans' do
-    truthy_values = [true, 'true', '1', 'yes', 'on']
-    falsey_values = [false, 'false', '0', 'no', 'off']
+    truthy_values = [true, 'true', ' TRUE ', '1', 'yes', 'ON']
+    falsey_values = [false, 'false', ' FALSE ', '0', 'no', 'OFF']
 
     expect(truthy_values.map { |value| described_class.send(:boolean_value, value, 'VAJRA_TRACE_ENABLED') })
       .to all(be(true))

@@ -249,7 +249,7 @@ module Vajra
       end
 
       def resolve_config(options)
-        otel_traces_exporter = env_value('OTEL_TRACES_EXPORTER')
+        otel_traces_exporter = normalized_env_value('OTEL_TRACES_EXPORTER')
         otel_endpoint = normalized_otel_traces_endpoint(env_value('OTEL_EXPORTER_OTLP_ENDPOINT'))
         TraceConfig.new(
           enabled: resolve_boolean(options, :trace_enabled, 'VAJRA_TRACE_ENABLED') do
@@ -288,7 +288,8 @@ module Vajra
       private_class_method :resolve_boolean
 
       def boolean_value(value, name)
-        case value
+        normalized_value = value.is_a?(String) ? value.strip.downcase : value
+        case normalized_value
         when true, 'true', '1', 'yes', 'on'
           true
         when false, 'false', '0', 'no', 'off'
@@ -307,6 +308,11 @@ module Vajra
         trimmed.empty? ? nil : trimmed
       end
       private_class_method :env_value
+
+      def normalized_env_value(name)
+        env_value(name)&.downcase
+      end
+      private_class_method :normalized_env_value
 
       def normalized_otel_traces_endpoint(endpoint)
         return nil if endpoint.to_s.empty?

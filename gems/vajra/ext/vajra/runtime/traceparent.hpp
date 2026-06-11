@@ -49,7 +49,23 @@ namespace Vajra
       const std::string version = traceparent.substr(0, first);
       const std::string trace_id = traceparent.substr(first + 1, second - first - 1);
       const std::string span_id = traceparent.substr(second + 1, third - second - 1);
-      const std::string flags = traceparent.substr(third + 1);
+      const std::size_t flags_start = third + 1;
+      const std::size_t flags_end = flags_start + 2;
+      if (flags_end > traceparent.size())
+      {
+        return "";
+      }
+
+      const std::string flags = traceparent.substr(flags_start, 2);
+      if (version == "00" && flags_end != traceparent.size())
+      {
+        return "";
+      }
+      if (version != "00" && flags_end < traceparent.size() && traceparent[flags_end] != '-')
+      {
+        return "";
+      }
+
       if (!traceparent_hex_value(version, 2, false) ||
           !traceparent_hex_value(trace_id, 32, true) ||
           !traceparent_hex_value(span_id, 16, true) ||

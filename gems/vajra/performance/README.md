@@ -49,11 +49,10 @@ The observability modes are:
 - `access_combined`
 - `access_token`
 - `structured_json`
-- `otel_spans`
-- `otel_metrics`
-- `otel_all_local`
-- `otel_otlp`
-- `otel_all_otlp`
+- `otel_spans`: app-owned Ruby OTel SDK spans with an in-memory exporter
+- `otel_all_local`: `otel_spans` plus structured JSON access logging
+- `otel_otlp`: Vajra-owned native OTLP span export to the local drain
+- `otel_all_otlp`: `otel_otlp` plus structured JSON access logging
 
 Set `SOAK_SECONDS=300` to run the same matrix as a practical local soak. The
 default run duration is 20 seconds per server/fixture pair.

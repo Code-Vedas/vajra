@@ -21,8 +21,6 @@ module Performance
     access_combined
     access_token
     structured_json
-    otel_spans
-    otel_all_local
     otel_otlp
     otel_all_otlp
   ].freeze
@@ -373,18 +371,8 @@ module Performance
     def endpoint_helpers
       <<~RUBY
         require 'json'
-        require 'opentelemetry/sdk' if ENV['PERFORMANCE_OTEL_SDK'] == 'memory'
         require 'rack'
         require 'stringio'
-
-        if ENV['PERFORMANCE_OTEL_SDK'] == 'memory'
-          exporter = OpenTelemetry::SDK::Trace::Export::InMemorySpanExporter.new
-          processor = OpenTelemetry::SDK::Trace::Export::SimpleSpanProcessor.new(exporter)
-          OpenTelemetry::SDK.configure do |config|
-            config.service_name = 'vajra-performance'
-            config.add_span_processor processor
-          end
-        end
 
         module PerformanceEndpoint
           module_function
@@ -818,15 +806,12 @@ module Performance
     end
 
     def observability_modes(otlp_endpoint: 'http://127.0.0.1:4318/v1/traces')
-      app_owned_local_trace = {
+      native_otlp_trace = {
         trace_enabled: true,
-        trace_otel_owner: false,
-        trace_service_name: 'vajra-performance'
-      }
-      native_otlp_trace = app_owned_local_trace.merge(
         trace_otel_owner: true,
+        trace_service_name: 'vajra-performance',
         trace_endpoint: otlp_endpoint
-      )
+      }
       {
         'off' => observability_mode('off', config: {}),
         'access_text' => observability_mode('access_text', config: { access_log: 'vajra.access.log' }),
@@ -835,18 +820,14 @@ module Performance
         'access_combined' => observability_mode('access_combined', config: access_log_config('combined')),
         'access_token' => observability_mode('access_token', config: access_log_config('%m %U %s %D %b %a %H %h %u %r %T %S')),
         'structured_json' => observability_mode('structured_json', config: access_log_config('json').merge(structured_logs: true)),
-        'otel_spans' => observability_mode('otel_spans', config: app_owned_local_trace, sdk: 'memory'),
-        'otel_all_local' => observability_mode('otel_all_local', config: app_owned_local_trace.merge(access_log_config('json'), structured_logs: true),
-                                                                 sdk: 'memory'),
         'otel_otlp' => observability_mode('otel_otlp', config: native_otlp_trace, traces_exporter: 'otlp'),
         'otel_all_otlp' => observability_mode('otel_all_otlp', config: native_otlp_trace.merge(access_log_config('json'), structured_logs: true),
                                                                traces_exporter: 'otlp')
       }
     end
 
-    def observability_mode(name, config:, traces_exporter: 'none', metrics_exporter: 'none', sdk: nil)
+    def observability_mode(name, config:, traces_exporter: 'none', metrics_exporter: 'none')
       env = otel_env(traces_exporter, metrics_exporter)
-      env['PERFORMANCE_OTEL_SDK'] = sdk if sdk
       ObservabilityMode.new(name:, config:, env:)
     end
 

@@ -8,9 +8,12 @@
 #include "request/request_processor.hpp"
 #include "response/response_serializer.hpp"
 #include "response/response_writer.hpp"
+#include "runtime/runtime_logging.hpp"
 #include "test_suites.hpp"
 #include "test_support.hpp"
 
+#include <cstdio>
+#include <fstream>
 #include <string>
 #include <sys/socket.h>
 #include <thread>
@@ -78,6 +81,22 @@ namespace VajraSpecCpp
             Vajra::response::Status{200, "OK"},
             {Vajra::response::Header{"Content-Type", "application/octet-stream"}},
             request_context.request_body,
+            Vajra::response::ConnectionBehavior::close};
+      }
+    };
+
+    class TraceHeaderRequestExecutor final : public Vajra::request::RequestExecutor
+    {
+    public:
+      std::optional<Vajra::response::Response> execute(const Vajra::request::RequestContext &) const override
+      {
+        return Vajra::response::Response{
+            Vajra::response::Status{200, "OK"},
+            {
+                Vajra::response::Header{"Content-Type", "text/plain"},
+                Vajra::response::Header{"X-Vajra-Internal-Trace-Id", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+            },
+            "OK",
             Vajra::response::ConnectionBehavior::close};
       }
     };
@@ -1517,6 +1536,89 @@ namespace VajraSpecCpp
         throw;
       }
     }
+
+    void test_request_processor_does_not_mix_partial_internal_trace_context_with_traceparent()
+    {
+      char log_path[] = "/tmp/vajra-access-log-XXXXXX";
+      const int log_fd = mkstemp(log_path);
+      if (log_fd < 0)
+      {
+        fail("mkstemp failed while setting up access log correlation test");
+      }
+      close(log_fd);
+
+      int sockets[2];
+      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
+      {
+        std::remove(log_path);
+        fail("socketpair failed while setting up access log correlation test");
+      }
+
+      FileDescriptorGuard client_socket(sockets[0]);
+      FileDescriptorGuard server_socket(sockets[1]);
+      suppress_sigpipe(client_socket.get());
+      Vajra::runtime::stop_runtime_logging_worker();
+      Vajra::runtime::configure_runtime_logging(false, log_path, "", "json");
+      Vajra::runtime::start_runtime_logging_worker();
+      const auto request_executor = std::make_shared<TraceHeaderRequestExecutor>();
+      const Vajra::request::RequestProcessor processor(
+          Vajra::request::kDefaultMaxRequestHeadBytes,
+          request_executor);
+      std::thread processor_thread = start_request_processor_thread(processor, server_socket);
+
+      try
+      {
+        if (!send_all(
+                client_socket.get(),
+                "GET /trace HTTP/1.1\r\n"
+                "Host: example.test\r\n"
+                "Traceparent: 00-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-cccccccccccccccc-01\r\n"
+                "Connection: close\r\n"
+                "\r\n"))
+        {
+          fail("failed to send request for access log correlation test");
+        }
+
+        const std::string response = read_http_response(client_socket.get());
+        if (response.find("HTTP/1.1 200 OK\r\n") != 0)
+        {
+          fail("trace header executor response did not succeed");
+        }
+        if (response.find("X-Vajra-Internal-Trace-Id:") != std::string::npos)
+        {
+          fail("internal trace header leaked to client response");
+        }
+
+        client_socket.close_if_open();
+        processor_thread.join();
+        Vajra::runtime::stop_runtime_logging_worker();
+        std::ifstream log_file(log_path);
+        const std::string access_log((std::istreambuf_iterator<char>(log_file)), std::istreambuf_iterator<char>());
+        if (access_log.find("\"trace_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"") == std::string::npos)
+        {
+          fail("access log did not preserve app-provided trace id");
+        }
+        if (access_log.find("\"span_id\"") != std::string::npos ||
+            access_log.find("cccccccccccccccc") != std::string::npos)
+        {
+          fail("access log mixed incoming traceparent span id with app-provided trace id");
+        }
+        Vajra::runtime::configure_runtime_logging(false, "/dev/null", "", "text");
+        std::remove(log_path);
+      }
+      catch (...)
+      {
+        client_socket.close_if_open();
+        if (processor_thread.joinable())
+        {
+          processor_thread.join();
+        }
+        Vajra::runtime::stop_runtime_logging_worker();
+        Vajra::runtime::configure_runtime_logging(false, "/dev/null", "", "text");
+        std::remove(log_path);
+        throw;
+      }
+    }
   }
 
   void run_response_tests()
@@ -1556,5 +1658,6 @@ namespace VajraSpecCpp
     test_request_processor_returns_bad_request_when_executor_raises_head_error();
     test_request_processor_returns_internal_server_error_when_executor_response_is_invalid();
     test_request_processor_strips_executor_framing_headers_before_sending();
+    test_request_processor_does_not_mix_partial_internal_trace_context_with_traceparent();
   }
 }

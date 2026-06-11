@@ -175,7 +175,7 @@ namespace
     const ObservedRequestHeaders headers = request_headers_needed(needs)
                                                ? observed_request_headers(request_context.request, needs)
                                                : ObservedRequestHeaders{};
-    const bool use_incoming_trace_context = needs.trace_context && !headers.traceparent.empty();
+    const bool use_incoming_trace_context = needs.trace_context && !headers.traceparent.empty() && trace_id.empty() && span_id.empty();
     const std::size_t worker_index = Vajra::runtime::current_worker_index();
     return Vajra::runtime::AccessLogEvent{
         request_context.request.request_line.method,
@@ -192,8 +192,8 @@ namespace
         getpid(),
         static_cast<int>(worker_index),
         connection_outcome,
-        trace_id.empty() && use_incoming_trace_context ? Vajra::runtime::traceparent_part(headers.traceparent, 1) : trace_id,
-        span_id.empty() && use_incoming_trace_context ? Vajra::runtime::traceparent_part(headers.traceparent, 2) : span_id};
+        use_incoming_trace_context ? Vajra::runtime::traceparent_part(headers.traceparent, 1) : trace_id,
+        use_incoming_trace_context ? Vajra::runtime::traceparent_part(headers.traceparent, 2) : span_id};
   }
 
   Vajra::runtime::AccessLogEvent access_event_for_unparsed_head(

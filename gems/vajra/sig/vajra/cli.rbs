@@ -71,10 +71,15 @@ module Vajra
       def http2_header_table_size: (Integer) -> Integer
       def log_level: (String) -> String
       def access_log: (String?) -> String?
+      def access_log_format: (String) -> String
       def error_log: (String) -> String
       def structured_logs: (?bool) -> bool
       def stats_path: (String) -> String
       def metrics_endpoint: (String) -> String
+      def trace_enabled: (?bool) -> bool
+      def trace_endpoint: (String) -> String
+      def trace_service_name: (String) -> String
+      def trace_otel_owner: (?bool) -> bool
       def pidfile: (String) -> String
       def state_path: (String) -> String
       def control_socket: (String) -> String

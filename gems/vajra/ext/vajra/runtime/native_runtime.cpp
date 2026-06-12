@@ -93,6 +93,29 @@ namespace
     std::chrono::milliseconds duration{50};
   };
 
+  VALUE notify_tracing_after_fork_protected(VALUE)
+  {
+    const ID id_after_fork = rb_intern("after_fork!");
+    const VALUE vajra = rb_const_get(rb_cObject, rb_intern("Vajra"));
+    const VALUE internal = rb_const_get(vajra, rb_intern("Internal"));
+    const VALUE tracing = rb_const_get(internal, rb_intern("Tracing"));
+    if (rb_respond_to(tracing, id_after_fork))
+    {
+      rb_funcall(tracing, id_after_fork, 0);
+    }
+    return Qnil;
+  }
+
+  void notify_tracing_after_fork()
+  {
+    int state = 0;
+    rb_protect(notify_tracing_after_fork_protected, Qnil, &state);
+    if (state != 0)
+    {
+      rb_set_errinfo(Qnil);
+    }
+  }
+
   void handle_signal(int sig)
   {
     if (sig == SIGINT || sig == SIGTERM)
@@ -839,6 +862,7 @@ namespace
     }
 
     close(write_fd);
+    Vajra::runtime::stop_runtime_tracing_worker();
     Vajra::runtime::stop_runtime_logging_worker();
     _exit(exit_code);
   }
@@ -1959,7 +1983,7 @@ void Vajra::runtime::NativeRuntime::clear_worker_runtime()
     debug_logging_.store(false, std::memory_order_release);
   }
 
-  configure_runtime_tracing(false, "", "");
+  configure_runtime_tracing(false, "", "", false, "", "tracecontext,baggage");
   set_runtime_tracing_available(false);
 
   for (const auto &worker_state : worker_states)
@@ -2681,6 +2705,7 @@ void Vajra::runtime::NativeRuntime::run_worker_process(
           1);
     }
     Vajra::runtime::start_runtime_logging_worker();
+    Vajra::runtime::start_runtime_tracing_worker();
 
     auto rack_executor = std::make_shared<Vajra::rack::RackRequestExecutor>(
         std::shared_ptr<const Vajra::rack::RackExecutionTransport>{},
@@ -2778,6 +2803,7 @@ void Vajra::runtime::NativeRuntime::run_worker_process(
       shutdown(control_channel_fd, SHUT_RDWR);
       close_fd_if_open(control_channel_fd);
     }
+    Vajra::runtime::stop_runtime_tracing_worker();
     Vajra::runtime::stop_runtime_logging_worker();
     _exit(0);
   }
@@ -2987,8 +3013,14 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
       recovery_policy_ = RecoveryPolicy{kReplacementFailureLimit};
       debug_logging_.store(debug_logging, std::memory_order_release);
     }
-    configure_runtime_logging(config.structured_logs, config.access_log, config.error_log);
-    configure_runtime_tracing(config.trace_enabled, config.trace_endpoint, config.trace_service_name);
+    configure_runtime_logging(config.structured_logs, config.access_log, config.error_log, config.access_log_format);
+    configure_runtime_tracing(
+        config.trace_enabled,
+        config.trace_endpoint,
+        config.trace_service_name,
+        config.trace_enabled && !config.trace_otel_owner,
+        config.trace_resource_attributes,
+        config.trace_propagators);
     const BootContractResult master_boot_result = BootContract::run(
         BootContractConfig{config.port, config.max_request_head_bytes, kMasterPreloadRuntimeRole});
     BootContract::ensure_ready(master_boot_result);
@@ -3055,6 +3087,7 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
       if (pid == 0)
       {
         rb_thread_atfork();
+        notify_tracing_after_fork();
         close_fd_if_open(worker_spawner_fd_);
         close_fd_if_open(readiness_pipe[0]);
         close_fd_if_open(control_channel[0]);
@@ -3199,6 +3232,7 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
       log_runtime_stop_completed();
     }
     log_runtime_shutdown_complete();
+    Vajra::runtime::stop_runtime_tracing_worker();
     Vajra::runtime::stop_runtime_logging_worker();
   }
   catch (...)
@@ -3212,6 +3246,7 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
       wait_for_worker_exit(live_worker_states);
     }
     clear_worker_runtime();
+    Vajra::runtime::stop_runtime_tracing_worker();
     Vajra::runtime::stop_runtime_logging_worker();
     throw;
   }
@@ -3256,11 +3291,15 @@ void VajraNative::start(
     std::string access_log,
     std::string error_log,
     bool structured_logs,
+    std::string access_log_format,
     std::string stats_path,
     std::string metrics_endpoint,
     bool trace_enabled,
     std::string trace_endpoint,
-    std::string trace_service_name)
+    std::string trace_service_name,
+    bool trace_otel_owner,
+    std::string trace_resource_attributes,
+    std::string trace_propagators)
 {
   Vajra::runtime::NativeRuntime::instance().start(Vajra::runtime::RuntimeConfig{
       std::move(host),
@@ -3280,11 +3319,15 @@ void VajraNative::start(
       std::move(access_log),
       std::move(error_log),
       structured_logs,
+      std::move(access_log_format),
       std::move(stats_path),
       std::move(metrics_endpoint),
       trace_enabled,
       std::move(trace_endpoint),
-      std::move(trace_service_name)});
+      std::move(trace_service_name),
+      trace_otel_owner,
+      std::move(trace_resource_attributes),
+      std::move(trace_propagators)});
 }
 
 void VajraNative::stop()

@@ -13,6 +13,7 @@
 
 #include <exception>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -47,11 +48,15 @@ namespace
           config.access_log,
           config.error_log,
           config.structured_logs,
+          config.access_log_format,
           config.stats_path,
           config.metrics_endpoint,
           config.trace_enabled,
           config.trace_endpoint,
-          config.trace_service_name);
+          config.trace_service_name,
+          config.trace_otel_owner,
+          config.trace_resource_attributes,
+          config.trace_propagators);
     }
     catch (const std::exception &error)
     {
@@ -104,18 +109,78 @@ namespace
     return callback;
   }
 
+  VALUE rb_tracing_native_set_request_observability_callback(VALUE self, VALUE callback)
+  {
+    (void)self;
+    Vajra::runtime::set_runtime_request_observability_callback(reinterpret_cast<void *>(callback));
+    return callback;
+  }
+
+  void hash_set_string(VALUE hash, const char *name, const std::string &value)
+  {
+    rb_hash_aset(hash, ID2SYM(rb_intern(name)), rb_str_new(value.c_str(), static_cast<long>(value.size())));
+  }
+
+  VALUE request_observability_event_to_hash(const Vajra::runtime::RequestObservabilityEvent &queued)
+  {
+    const Vajra::runtime::AccessLogEvent &access = queued.access;
+    VALUE event = rb_hash_new();
+    hash_set_string(event, "method", access.method);
+    hash_set_string(event, "target", access.target);
+    rb_hash_aset(event, ID2SYM(rb_intern("status")), INT2NUM(access.status_code));
+    rb_hash_aset(event, ID2SYM(rb_intern("duration_nanoseconds")), LL2NUM(access.duration_nanoseconds));
+    rb_hash_aset(event, ID2SYM(rb_intern("bytes_written")), ULL2NUM(access.response_body_bytes));
+    hash_set_string(event, "remote_addr", access.remote_address);
+    hash_set_string(event, "protocol", access.protocol);
+    hash_set_string(event, "host", access.host);
+    hash_set_string(event, "user_agent", access.user_agent);
+    hash_set_string(event, "referer", access.referer);
+    hash_set_string(event, "request_id", access.request_id);
+    rb_hash_aset(event, ID2SYM(rb_intern("worker_pid")), INT2NUM(access.worker_pid));
+    rb_hash_aset(event, ID2SYM(rb_intern("worker_index")), INT2NUM(access.worker_index));
+    hash_set_string(event, "connection_outcome", access.connection_outcome);
+    hash_set_string(event, "trace_id", access.trace_id);
+    hash_set_string(event, "span_id", access.span_id);
+    hash_set_string(event, "outcome", queued.outcome);
+    hash_set_string(event, "failure_kind", queued.failure_kind);
+    rb_hash_aset(event, ID2SYM(rb_intern("response_sent")), queued.response_sent ? Qtrue : Qfalse);
+    hash_set_string(event, "error_message", queued.error_message);
+    hash_set_string(event, "timestamp", queued.timestamp);
+    return event;
+  }
+
+  VALUE rb_tracing_native_drain_request_observability_events(VALUE self, VALUE limit)
+  {
+    (void)self;
+    const auto events = Vajra::runtime::drain_runtime_request_observability_events(NUM2SIZET(limit));
+    VALUE list = rb_ary_new_capa(static_cast<long>(events.size()));
+    for (const auto &event : events)
+    {
+      rb_ary_push(list, request_observability_event_to_hash(event));
+    }
+    return list;
+  }
+
   VALUE rb_tracing_native_set_status(
       VALUE self,
       VALUE enabled,
       VALUE available,
       VALUE endpoint,
-      VALUE service_name)
+      VALUE service_name,
+      VALUE active_context_required,
+      VALUE sample_ratio,
+      VALUE resource_attributes,
+      VALUE propagators)
   {
     (void)self;
     Vajra::runtime::configure_runtime_tracing(
         enabled == Qtrue,
         NIL_P(endpoint) ? std::string() : StringValueCStr(endpoint),
-        NIL_P(service_name) ? std::string("vajra") : StringValueCStr(service_name));
+        NIL_P(service_name) ? std::string("vajra") : StringValueCStr(service_name),
+        active_context_required == Qtrue,
+        NIL_P(resource_attributes) ? std::string() : StringValueCStr(resource_attributes),
+        NIL_P(propagators) ? std::string("tracecontext,baggage") : StringValueCStr(propagators));
+    Vajra::runtime::set_runtime_trace_sample_ratio(NUM2DBL(sample_ratio));
     Vajra::runtime::set_runtime_tracing_available(available == Qtrue);
     return Qnil;
   }
@@ -157,7 +222,17 @@ extern "C" void Init_vajra()
       1);
   rb_define_singleton_method(
       mTracing,
+      "__native_set_request_observability_callback__",
+      RUBY_METHOD_FUNC(rb_tracing_native_set_request_observability_callback),
+      1);
+  rb_define_singleton_method(
+      mTracing,
+      "__native_drain_request_observability_events__",
+      RUBY_METHOD_FUNC(rb_tracing_native_drain_request_observability_events),
+      1);
+  rb_define_singleton_method(
+      mTracing,
       "__native_set_tracing_status__",
       RUBY_METHOD_FUNC(rb_tracing_native_set_status),
-      4);
+      8);
 }

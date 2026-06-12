@@ -34,11 +34,15 @@ namespace Vajra
       std::string access_log;
       std::string error_log;
       bool structured_logs;
+      std::string access_log_format;
       std::string stats_path;
       std::string metrics_endpoint;
       bool trace_enabled;
       std::string trace_endpoint;
       std::string trace_service_name;
+      bool trace_otel_owner;
+      std::string trace_resource_attributes;
+      std::string trace_propagators;
     };
 
     class RuntimeConfigLoader final

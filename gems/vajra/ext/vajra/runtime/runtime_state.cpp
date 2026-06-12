@@ -4,6 +4,7 @@
 // LICENSE file in the root directory of this source tree.
 
 #include "runtime/runtime_state.hpp"
+#include "runtime/runtime_logging.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -36,6 +37,32 @@ namespace
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
         .count();
+  }
+
+  const char *worker_lifecycle_state_name(Vajra::runtime::WorkerLifecycleState lifecycle_state)
+  {
+    switch (lifecycle_state)
+    {
+      case Vajra::runtime::WorkerLifecycleState::booting: return "booting";
+      case Vajra::runtime::WorkerLifecycleState::ready: return "ready";
+      case Vajra::runtime::WorkerLifecycleState::stopping: return "stopping";
+      case Vajra::runtime::WorkerLifecycleState::exited: return "exited";
+    }
+    return "unknown";
+  }
+
+  const char *worker_health_state_name(Vajra::runtime::WorkerHealthState state)
+  {
+    switch (state)
+    {
+      case Vajra::runtime::WorkerHealthState::healthy: return "healthy";
+      case Vajra::runtime::WorkerHealthState::busy: return "busy";
+      case Vajra::runtime::WorkerHealthState::overloaded: return "overloaded";
+      case Vajra::runtime::WorkerHealthState::degraded: return "degraded";
+      case Vajra::runtime::WorkerHealthState::suspect: return "suspect";
+      case Vajra::runtime::WorkerHealthState::wedged: return "wedged";
+    }
+    return "unknown";
   }
 
 #if defined(__linux__)
@@ -337,6 +364,11 @@ Vajra::runtime::RuntimeState *Vajra::runtime::current_runtime_state()
 Vajra::runtime::WorkerRuntimeState *Vajra::runtime::current_worker_runtime_state()
 {
   return installed_worker_state;
+}
+
+std::size_t Vajra::runtime::current_worker_index()
+{
+  return installed_worker_index;
 }
 
 void Vajra::runtime::set_runtime_listener_fd(int listener_fd)
@@ -732,6 +764,11 @@ std::string Vajra::runtime::runtime_stats_payload_json()
           << "\"receive_count\":" << total_receives << ','
           << "\"fd_transfer_failures\":" << total_fd_transfer_failures
           << "},"
+          << "\"native_observability\":{"
+          << "\"request_events_total\":" << Vajra::runtime::runtime_native_request_observability_events_total() << ','
+          << "\"request_errors_total\":" << Vajra::runtime::runtime_native_request_observability_errors_total() << ','
+          << "\"admission_rejections_total\":" << Vajra::runtime::runtime_native_request_admission_rejections_total()
+          << "},"
           << "\"health_counts\":{"
           << "\"healthy\":" << healthy << ','
           << "\"busy\":" << busy << ','
@@ -769,6 +806,39 @@ std::string Vajra::runtime::runtime_metrics_payload_text()
             << worker.dispatch_count.load(std::memory_order_acquire) << '\n';
     payload << "vajra_worker_receive_total{worker=\"" << index << "\"} "
             << worker.receive_count.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_completed_requests_total{worker=\"" << index << "\"} "
+            << worker.completed_request_count.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_request_head_nanoseconds_total{worker=\"" << index << "\"} "
+            << worker.request_head_nanoseconds.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_request_parse_nanoseconds_total{worker=\"" << index << "\"} "
+            << worker.request_parse_nanoseconds.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_request_body_nanoseconds_total{worker=\"" << index << "\"} "
+            << worker.request_body_nanoseconds.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_request_nanoseconds_total{worker=\"" << index << "\"} "
+            << worker.request_total_nanoseconds.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_rack_execution_nanoseconds_total{worker=\"" << index << "\"} "
+            << worker.rack_execution_nanoseconds.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_response_write_nanoseconds_total{worker=\"" << index << "\"} "
+            << worker.response_write_nanoseconds.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_local_queue_depth{worker=\"" << index << "\"} "
+            << worker.local_queue_depth.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_lifecycle_state{worker=\"" << index << "\",state=\""
+            << worker_lifecycle_state_name(
+                   static_cast<WorkerLifecycleState>(worker.lifecycle_state.load(std::memory_order_acquire)))
+            << "\"} 1\n";
+    payload << "vajra_worker_health_state{worker=\"" << index << "\",state=\""
+            << worker_health_state_name(static_cast<WorkerHealthState>(worker.health_state.load(std::memory_order_acquire)))
+            << "\"} 1\n";
+    payload << "vajra_worker_replacement_attempts_total{worker=\"" << index << "\"} "
+            << worker.replacement_attempt_count.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_replacement_success_total{worker=\"" << index << "\"} "
+            << worker.replacement_success_count.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_replacement_failure_total{worker=\"" << index << "\"} "
+            << worker.replacement_failure_count.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_timeout_escalations_total{worker=\"" << index << "\"} "
+            << worker.timeout_escalation_count.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_unexpected_exits_total{worker=\"" << index << "\"} "
+            << worker.unexpected_exit_count.load(std::memory_order_acquire) << '\n';
   }
   return payload.str();
 }

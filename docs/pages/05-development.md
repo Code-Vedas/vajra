@@ -1,13 +1,13 @@
 ---
 title: Development
-nav_order: 5
+nav_order: 6
 permalink: /development/
 ---
 
 # Development
 
-This repository follows one canonical package, package-local validation,
-central docs, and repository automation that verifies the whole shape together.
+Vajra development uses one canonical package, package-local checks, central
+docs, and repository automation.
 
 ## Repository Workflow
 
@@ -18,8 +18,7 @@ scripts/ci-install-bundles
 scripts/run-all
 ```
 
-Those scripts coordinate gem validation and docs validation from one shared
-entrypoint.
+Those scripts run the gem and docs checks from one shared entrypoint.
 
 ## Package-Local Commands
 
@@ -34,9 +33,8 @@ bundle exec rbs -I sig validate
 bundle exec rake build
 ```
 
-`bin/rspec` is the general package runner. `bin/rspec-unit` is the fast default
-lane for committed non-integration specs. `bin/rspec-e2e` is the integration
-lane and runs without coverage.
+`bin/rspec` is the general package runner. `bin/rspec-unit` runs unit specs with
+coverage. `bin/rspec-e2e` runs integration specs without coverage.
 
 ## Native Extension Work
 
@@ -50,7 +48,7 @@ bin/rspec-e2e
 ```
 
 Keep the extension sources, load path, executable boot path, and smoke coverage
-aligned in the same change.
+aligned.
 
 ## Performance Test
 
@@ -73,9 +71,9 @@ scripts/ci-install-bundles
 scripts/run-all
 ```
 
-The docs site is a first-class product surface:
+Docs are part of the product surface:
 
-- `docs/` is the source of truth for product documentation
+- `docs/` contains the product documentation
 - package READMEs stay concise and point back to `docs/`
 - update docs whenever commands, paths, ownership boundaries, or runtime
   behavior change
@@ -87,7 +85,7 @@ cd docs
 bundle exec jekyll serve
 ```
 
-For a clean preview of the published site shape:
+For a clean preview of the published site:
 
 ```bash
 cd docs
@@ -101,7 +99,7 @@ The supported public publication target is `https://vajra.codevedas.com`.
 Docs publishing uses the GitHub Pages workflow in
 `.github/workflows/jekyll-gh-pages.yml`.
 
-- shared CI validates the docs build before merge
+- shared CI runs the docs build
 - GitHub Pages deploys the built site artifact
 - `docs/CNAME` records the supported hostname
 - contributors update navigation and cross-links when adding pages

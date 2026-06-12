@@ -2,6 +2,28 @@ detectors:
   ControlParameter:
     exclude:
       - Vajra::CLI::Launcher#app
+  DuplicateMethodCall:
+    exclude:
+      - Vajra::Internal::Tracing#install_metric_instruments
+      - Vajra::Internal::Tracing#in_span
+      - Vajra::Internal::Tracing#stop_request_observability_drain_thread
+  LongParameterList:
+    exclude:
+      - Vajra::Internal::Tracing#in_span
+      - Vajra::Internal::Tracing#resolve_string
+      - Vajra::Internal::Tracing#write_trace_state
+  NilCheck:
+    exclude:
+      - Vajra::CLI::Launcher#normalize_setting_values
+      - Vajra::Internal::Tracing#configured_meter
+      - Vajra::Internal::Tracing#in_span
+      - Vajra::Internal::Tracing#with_request_span
+      - Vajra::Internal::Tracing#empty_to_nil
+      - Vajra::Internal::Tracing#env_value
+      - Vajra::Internal::Tracing#integer_or_nil
+      - Vajra::Internal::Tracing#resolve_boolean
+      - Vajra::Internal::Tracing#resolve_config
+      - Vajra::Internal::Tracing#trace_context_value
   UncommunicativeVariableName:
     accept:
       - e
@@ -14,11 +36,27 @@ detectors:
     max_constants: 10
   UtilityFunction:
     enabled: false
-  NilCheck:
-    enabled: true
+  ManualDispatch:
     exclude:
-      - Vajra::CLI::Launcher#normalize_setting_values
-      - Vajra::Internal::Tracing#with_request_span
+      - Vajra::Internal::Tracing#attach_trace_context
+      - Vajra::Internal::Tracing#build_instrument
+      - Vajra::Internal::Tracing#configured_meter
+      - Vajra::Internal::Tracing#configured_tracer_provider
+      - Vajra::Internal::Tracing#current_span
+      - Vajra::Internal::Tracing#drain_request_observability_batch
+      - Vajra::Internal::Tracing#extract_context
+      - Vajra::Internal::Tracing#install_request_observability_callback
+      - Vajra::Internal::Tracing#in_span
+      - Vajra::Internal::Tracing#mark_span_success
+      - Vajra::Internal::Tracing#record_span_exception
+      - Vajra::Internal::Tracing#record_span_error
+      - Vajra::Internal::Tracing#record_span_response_status
+      - Vajra::Internal::Tracing#response_status_from
+      - Vajra::Internal::Tracing#shutdown!
+      - Vajra::Internal::Tracing#span_attemptable?
+      - Vajra::Internal::Tracing#span_context_for
+      - Vajra::Internal::Tracing#start_request_observability_drain_thread
+      - Vajra::Internal::Tracing#trace_context_value
 exclude_paths:
   - performance/**/*
   - spec/**/*

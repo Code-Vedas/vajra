@@ -35,11 +35,13 @@ namespace
   ID id_access_log;
   ID id_error_log;
   ID id_structured_logs;
+  ID id_access_log_format;
   ID id_stats_path;
   ID id_metrics_endpoint;
   ID id_trace_enabled;
   ID id_trace_endpoint;
   ID id_trace_service_name;
+  ID id_trace_otel_owner;
 
   struct OptionValidationContext
   {
@@ -74,11 +76,13 @@ namespace
         key_id == id_access_log ||
         key_id == id_error_log ||
         key_id == id_structured_logs ||
+        key_id == id_access_log_format ||
         key_id == id_stats_path ||
         key_id == id_metrics_endpoint ||
         key_id == id_trace_enabled ||
         key_id == id_trace_endpoint ||
-        key_id == id_trace_service_name)
+        key_id == id_trace_service_name ||
+        key_id == id_trace_otel_owner)
     {
       return ST_CONTINUE;
     }
@@ -472,11 +476,13 @@ void Vajra::runtime::RuntimeConfigLoader::initialize_ids()
   id_access_log = rb_intern("access_log");
   id_error_log = rb_intern("error_log");
   id_structured_logs = rb_intern("structured_logs");
+  id_access_log_format = rb_intern("access_log_format");
   id_stats_path = rb_intern("stats_path");
   id_metrics_endpoint = rb_intern("metrics_endpoint");
   id_trace_enabled = rb_intern("trace_enabled");
   id_trace_endpoint = rb_intern("trace_endpoint");
   id_trace_service_name = rb_intern("trace_service_name");
+  id_trace_otel_owner = rb_intern("trace_otel_owner");
 }
 
 Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_runtime(VALUE options)
@@ -557,6 +563,11 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       "error_log option",
       "");
   const bool ruby_structured_logs = configured_boolean_from_ruby(options, id_structured_logs, false);
+  const std::string ruby_access_log_format = configured_string_from_ruby(
+      options,
+      id_access_log_format,
+      "access_log_format option",
+      "");
   const std::string ruby_stats_path = configured_string_from_ruby(
       options,
       id_stats_path,
@@ -578,6 +589,7 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       id_trace_service_name,
       "trace_service_name option",
       "vajra");
+  const bool ruby_trace_otel_owner = configured_boolean_from_ruby(options, id_trace_otel_owner, false);
 
   const std::string host = configured_string_from_env("VAJRA_HOST", ruby_host);
   const int port = static_cast<int>(configured_integer_from_env(
@@ -634,12 +646,16 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
   const std::string access_log = configured_string_from_env("VAJRA_ACCESS_LOG", ruby_access_log);
   const std::string error_log = configured_string_from_env("VAJRA_ERROR_LOG", ruby_error_log);
   const bool structured_logs = configured_boolean_from_env("VAJRA_STRUCTURED_LOGS", ruby_structured_logs);
+  const std::string access_log_format = configured_string_from_env("VAJRA_ACCESS_LOG_FORMAT", ruby_access_log_format);
   const std::string stats_path = configured_string_from_env("VAJRA_STATS_PATH", ruby_stats_path);
   const std::string metrics_endpoint = configured_string_from_env("VAJRA_METRICS_ENDPOINT", ruby_metrics_endpoint);
   const bool trace_enabled = configured_boolean_from_env("VAJRA_TRACE_ENABLED", ruby_trace_enabled);
   const std::string trace_endpoint = configured_string_from_env("VAJRA_TRACE_ENDPOINT", ruby_trace_endpoint);
   const std::string trace_service_name =
       configured_string_from_env("VAJRA_TRACE_SERVICE_NAME", ruby_trace_service_name);
+  const bool trace_otel_owner = configured_boolean_from_env("VAJRA_TRACE_OTEL_OWNER", ruby_trace_otel_owner);
+  const std::string trace_resource_attributes = configured_string_from_env("OTEL_RESOURCE_ATTRIBUTES", "");
+  const std::string trace_propagators = configured_string_from_env("OTEL_PROPAGATORS", "tracecontext,baggage");
 
   return RuntimeConfig{
       host,
@@ -659,9 +675,13 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       access_log,
       error_log,
       structured_logs,
+      access_log_format,
       stats_path,
       metrics_endpoint,
       trace_enabled,
       trace_endpoint,
-      trace_service_name};
+      trace_service_name,
+      trace_otel_owner,
+      trace_resource_attributes,
+      trace_propagators};
 }

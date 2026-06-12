@@ -17,6 +17,7 @@ namespace VajraSpecCpp
   void run_server_lifecycle_tests();
   void run_request_head_tests();
   void run_response_tests();
+  void run_runtime_logging_tests();
   void run_worker_execution_pool_tests();
 }
 

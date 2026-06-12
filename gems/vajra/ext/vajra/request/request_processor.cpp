@@ -11,7 +11,9 @@
 #include "response/response_serializer.hpp"
 #include "runtime/runtime_logging.hpp"
 #include "runtime/runtime_state.hpp"
+#include "runtime/traceparent.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <iostream>
 #include <sstream>
@@ -22,6 +24,9 @@
 
 namespace
 {
+  constexpr const char *kInternalTraceIdHeader = "X-Vajra-Internal-Trace-Id";
+  constexpr const char *kInternalSpanIdHeader = "X-Vajra-Internal-Span-Id";
+
   void log_request_error(const std::string &message)
   {
     Vajra::runtime::log_runtime_error(message);
@@ -30,6 +35,218 @@ namespace
   bool header_named(const Vajra::request::ParsedHeader &header, const std::string &expected_name)
   {
     return Vajra::request::ascii_case_insensitive_equal(header.name, expected_name);
+  }
+
+  const char *head_failure_kind_token(Vajra::request::HeadFailureKind kind)
+  {
+    switch (kind)
+    {
+      case Vajra::request::HeadFailureKind::bad_request:
+        return "bad_request";
+      case Vajra::request::HeadFailureKind::header_too_large:
+        return "header_too_large";
+    }
+
+    return "bad_request";
+  }
+
+  struct ObservedRequestHeaders
+  {
+    std::string host;
+    std::string user_agent;
+    std::string referer;
+    std::string request_id;
+    std::string traceparent;
+  };
+
+  bool request_headers_needed(const Vajra::runtime::AccessLogFieldNeeds &needs)
+  {
+    return needs.host ||
+           needs.user_agent ||
+           needs.referer ||
+           needs.request_id ||
+           needs.trace_context;
+  }
+
+  ObservedRequestHeaders observed_request_headers(
+      const Vajra::request::ParsedRequest &request,
+      const Vajra::runtime::AccessLogFieldNeeds &needs)
+  {
+    ObservedRequestHeaders observed;
+    for (const auto &header : request.headers)
+    {
+      if (needs.host && header_named(header, "host"))
+      {
+        observed.host = header.value;
+      }
+      else if (needs.user_agent && header_named(header, "user-agent"))
+      {
+        observed.user_agent = header.value;
+      }
+      else if (needs.referer && header_named(header, "referer"))
+      {
+        observed.referer = header.value;
+      }
+      else if (needs.request_id && header_named(header, "x-request-id"))
+      {
+        observed.request_id = header.value;
+      }
+      else if (needs.trace_context && header_named(header, "traceparent"))
+      {
+        observed.traceparent = header.value;
+      }
+    }
+    return observed;
+  }
+
+  bool internal_trace_header(const Vajra::response::Header &header)
+  {
+    return Vajra::request::ascii_case_insensitive_equal(header.name, "x-vajra-internal-trace-id") ||
+           Vajra::request::ascii_case_insensitive_equal(header.name, "x-vajra-internal-span-id");
+  }
+
+  struct InternalTraceResponseHeaders
+  {
+    std::string trace_id;
+    std::string span_id;
+    bool present = false;
+  };
+
+  InternalTraceResponseHeaders internal_trace_response_headers(const Vajra::response::Response &response)
+  {
+    InternalTraceResponseHeaders headers;
+    for (const auto &header : response.headers)
+    {
+      if (Vajra::request::ascii_case_insensitive_equal(header.name, kInternalTraceIdHeader))
+      {
+        headers.trace_id = header.value;
+        headers.present = true;
+      }
+      else if (Vajra::request::ascii_case_insensitive_equal(header.name, kInternalSpanIdHeader))
+      {
+        headers.span_id = header.value;
+        headers.present = true;
+      }
+    }
+    return headers;
+  }
+
+  void strip_internal_trace_headers(Vajra::response::Response &response)
+  {
+    if (response.headers.empty())
+    {
+      return;
+    }
+
+    const auto first_internal_header = std::find_if(
+        response.headers.begin(),
+        response.headers.end(),
+        [](const Vajra::response::Header &header)
+        {
+          return internal_trace_header(header);
+        });
+    if (first_internal_header == response.headers.end())
+    {
+      return;
+    }
+
+    std::vector<Vajra::response::Header> filtered_headers;
+    filtered_headers.reserve(response.headers.size());
+    for (const auto &header : response.headers)
+    {
+      if (!internal_trace_header(header))
+      {
+        filtered_headers.push_back(header);
+      }
+    }
+    response.headers = std::move(filtered_headers);
+  }
+
+  Vajra::runtime::AccessLogEvent access_event_for(
+      const Vajra::request::RequestContext &request_context,
+      int status_code,
+      std::size_t response_body_bytes,
+      std::chrono::steady_clock::time_point started_at,
+      const std::string &connection_outcome,
+      const std::string &trace_id = "",
+      const std::string &span_id = "")
+  {
+    const Vajra::runtime::AccessLogFieldNeeds needs = Vajra::runtime::access_log_field_needs();
+    const ObservedRequestHeaders headers = request_headers_needed(needs)
+                                               ? observed_request_headers(request_context.request, needs)
+                                               : ObservedRequestHeaders{};
+    const bool use_incoming_trace_context = needs.trace_context && !headers.traceparent.empty() && trace_id.empty() && span_id.empty();
+    const std::size_t worker_index = Vajra::runtime::current_worker_index();
+    return Vajra::runtime::AccessLogEvent{
+        request_context.request.request_line.method,
+        request_context.request.request_line.target,
+        status_code,
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at).count(),
+        response_body_bytes,
+        request_context.socket.remote_address,
+        request_context.request.request_line.version,
+        headers.host,
+        headers.user_agent,
+        headers.referer,
+        headers.request_id,
+        getpid(),
+        static_cast<int>(worker_index),
+        connection_outcome,
+        use_incoming_trace_context ? Vajra::runtime::traceparent_part(headers.traceparent, 1) : trace_id,
+        use_incoming_trace_context ? Vajra::runtime::traceparent_part(headers.traceparent, 2) : span_id};
+  }
+
+  Vajra::runtime::AccessLogEvent access_event_for_unparsed_head(
+      const Vajra::request::SocketContext &socket_context,
+      int status_code,
+      std::size_t response_body_bytes,
+      std::chrono::steady_clock::time_point started_at)
+  {
+    return Vajra::runtime::AccessLogEvent{
+        "",
+        "",
+        status_code,
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at).count(),
+        response_body_bytes,
+        socket_context.remote_address,
+        "",
+        "",
+        "",
+        "",
+        "",
+        getpid(),
+        static_cast<int>(Vajra::runtime::current_worker_index()),
+        "close",
+        "",
+        ""};
+  }
+
+  void emit_native_request_observability(
+      const Vajra::runtime::AccessLogEvent &event,
+      const std::string &outcome,
+      const std::string &failure_kind,
+      bool response_sent,
+      const std::string &error_message)
+  {
+    Vajra::runtime::emit_runtime_request_observability_event(
+        event,
+        outcome,
+        failure_kind,
+        response_sent,
+        error_message);
+  }
+
+  void log_access_event_if_enabled(const Vajra::runtime::AccessLogEvent &event)
+  {
+    if (Vajra::runtime::access_logging_enabled())
+    {
+      Vajra::runtime::log_access_event(event);
+    }
+  }
+
+  std::string connection_outcome_for(Vajra::response::ConnectionBehavior behavior)
+  {
+    return behavior == Vajra::response::ConnectionBehavior::close ? "close" : "keepalive";
   }
 
   bool header_value_contains_token(const std::string &value, const std::string &expected_token)
@@ -146,9 +363,9 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
     bool first_request) const
 {
   HeadReadResult read_result;
+  const auto head_started_at = std::chrono::steady_clock::now();
   try
   {
-    const auto head_started_at = std::chrono::steady_clock::now();
     read_result = request_head_reader_.read(
         client_fd,
         std::move(buffered_bytes),
@@ -160,7 +377,14 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
   }
   catch (const HeadError &error)
   {
-    reject_request_head(client_fd, error);
+    const auto response = response_writer_.request_head_failure_response(error.kind());
+    const bool response_sent = reject_request_head(client_fd, error, response);
+    emit_native_request_observability(
+        access_event_for_unparsed_head(socket_context, response.status.code, response.body.size(), head_started_at),
+        "request_head_error",
+        head_failure_kind_token(error.kind()),
+        response_sent,
+        error.what());
     return RequestProcessingResult{RequestProcessingOutcome::close, "", first_request};
   }
 
@@ -173,6 +397,7 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
   }
 
   RequestWallClockProbe request_wall_clock_probe;
+  const auto request_started_at = std::chrono::steady_clock::now();
   buffered_bytes = std::move(read_result.trailing_bytes);
 
   RequestContext request_context;
@@ -191,7 +416,14 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
   }
   catch (const HeadError &error)
   {
-    reject_request_head(client_fd, error);
+    const auto response = response_writer_.request_head_failure_response(error.kind());
+    const bool response_sent = reject_request_head(client_fd, error, response);
+    emit_native_request_observability(
+        access_event_for_unparsed_head(socket_context, response.status.code, response.body.size(), request_started_at),
+        "request_parse_error",
+        head_failure_kind_token(error.kind()),
+        response_sent,
+        error.what());
     return RequestProcessingResult{RequestProcessingOutcome::close, "", first_request};
   }
 
@@ -208,10 +440,15 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
         return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
       }
       Vajra::runtime::note_worker_request_completed();
-      Vajra::runtime::log_access_event(
-          request_context.request.request_line.method,
-          request_context.request.request_line.target,
-          control_response->status.code);
+      if (Vajra::runtime::access_logging_enabled())
+      {
+        Vajra::runtime::log_access_event(access_event_for(
+            request_context,
+            control_response->status.code,
+            control_response->body.size(),
+            request_started_at,
+            connection_outcome_for(connection_behavior)));
+      }
       return RequestProcessingResult{
           connection_behavior == Vajra::response::ConnectionBehavior::close
               ? RequestProcessingOutcome::close
@@ -282,38 +519,97 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
   }
   catch (const BodyReadIncompleteError &)
   {
+    emit_native_request_observability(
+        access_event_for(request_context, 0, 0, request_started_at, "close"),
+        "request_body_error",
+        "request_body_incomplete",
+        false,
+        "request body read incomplete");
     return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
   }
   catch (const HeadError &error)
   {
-    reject_request_head(client_fd, error);
+    const auto rejection_response = response_writer_.request_head_failure_response(error.kind());
+    const bool response_sent = reject_request_head(client_fd, error, rejection_response);
+    const auto event = access_event_for(
+        request_context,
+        rejection_response.status.code,
+        rejection_response.body.size(),
+        request_started_at,
+        "close");
+    emit_native_request_observability(
+        event,
+        "request_head_error",
+        head_failure_kind_token(error.kind()),
+        response_sent,
+        error.what());
+    log_access_event_if_enabled(event);
     return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
   }
   catch (const QueueCapacityError &error)
   {
-    reject_request_queue_capacity(client_fd, error);
+    const auto rejection_response = response_writer_.queue_capacity_response();
+    const bool response_sent = reject_request_queue_capacity(client_fd, error, rejection_response);
+    const auto event = access_event_for(
+        request_context,
+        rejection_response.status.code,
+        rejection_response.body.size(),
+        request_started_at,
+        "close");
+    emit_native_request_observability(event, "queue_capacity", "queue_capacity", response_sent, error.what());
+    log_access_event_if_enabled(event);
     return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
   }
   catch (const RequestTimeoutError &error)
   {
-    reject_request_timeout(client_fd, error);
+    const auto rejection_response = response_writer_.request_timeout_response();
+    const bool response_sent = reject_request_timeout(client_fd, error, rejection_response);
+    const auto event = access_event_for(
+        request_context,
+        rejection_response.status.code,
+        rejection_response.body.size(),
+        request_started_at,
+        "close");
+    emit_native_request_observability(event, "request_timeout", "request_timeout", response_sent, error.what());
+    log_access_event_if_enabled(event);
     return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
   }
   catch (const std::exception &error)
   {
-    reject_request_execution(client_fd, error);
+    const auto rejection_response = response_writer_.internal_server_error_response();
+    const bool response_sent = reject_request_execution(client_fd, error, rejection_response);
+    const auto event = access_event_for(
+        request_context,
+        rejection_response.status.code,
+        rejection_response.body.size(),
+        request_started_at,
+        "close");
+    emit_native_request_observability(event, "execution_error", "execution_error", response_sent, error.what());
+    log_access_event_if_enabled(event);
     return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
   }
 
+  const InternalTraceResponseHeaders trace_headers = internal_trace_response_headers(response);
+  if (trace_headers.present)
+  {
+    strip_internal_trace_headers(response);
+  }
   if (!response_writer_.send(client_fd, response))
   {
     return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
   }
   Vajra::runtime::note_worker_request_completed();
-  Vajra::runtime::log_access_event(
-      request_context.request.request_line.method,
-      request_context.request.request_line.target,
-      response.status.code);
+  if (Vajra::runtime::access_logging_enabled())
+  {
+    Vajra::runtime::log_access_event(access_event_for(
+        request_context,
+        response.status.code,
+        response.body.size(),
+        request_started_at,
+        connection_outcome_for(connection_behavior),
+        trace_headers.trace_id,
+        trace_headers.span_id));
+  }
 
   return RequestProcessingResult{
       connection_behavior == Vajra::response::ConnectionBehavior::close
@@ -358,36 +654,46 @@ Vajra::response::Response Vajra::request::RequestProcessor::response_for(
   return *response;
 }
 
-void Vajra::request::RequestProcessor::reject_request_head(int client_fd, const HeadError &error) const
+bool Vajra::request::RequestProcessor::reject_request_head(
+    int client_fd,
+    const HeadError &error,
+    const Vajra::response::Response &response) const
 {
   response_writer_.log_request_head_error(error);
-  (void)response_writer_.send(client_fd, response_writer_.request_head_failure_response(error.kind()));
+  return response_writer_.send(client_fd, response);
 }
 
-void Vajra::request::RequestProcessor::reject_request_execution(int client_fd, const std::exception &error) const
+bool Vajra::request::RequestProcessor::reject_request_execution(
+    int client_fd,
+    const std::exception &error,
+    const Vajra::response::Response &response) const
 {
   std::ostringstream message;
   message << "request execution failed: client_fd=" << client_fd << " error=" << error.what();
   log_request_error(message.str());
-  (void)response_writer_.send(client_fd, response_writer_.internal_server_error_response());
+  return response_writer_.send(client_fd, response);
 }
 
-void Vajra::request::RequestProcessor::reject_request_queue_capacity(
+bool Vajra::request::RequestProcessor::reject_request_queue_capacity(
     int client_fd,
-    const QueueCapacityError &error) const
+    const QueueCapacityError &error,
+    const Vajra::response::Response &response) const
 {
   std::ostringstream message;
   message << "request queue capacity reached: client_fd=" << client_fd << " error=" << error.what();
   log_request_error(message.str());
-  (void)response_writer_.send(client_fd, response_writer_.queue_capacity_response());
+  return response_writer_.send(client_fd, response);
 }
 
-void Vajra::request::RequestProcessor::reject_request_timeout(int client_fd, const RequestTimeoutError &error) const
+bool Vajra::request::RequestProcessor::reject_request_timeout(
+    int client_fd,
+    const RequestTimeoutError &error,
+    const Vajra::response::Response &response) const
 {
   std::ostringstream message;
   message << "request timed out: client_fd=" << client_fd << " error=" << error.what();
   log_request_error(message.str());
-  (void)response_writer_.send(client_fd, response_writer_.request_timeout_response());
+  return response_writer_.send(client_fd, response);
 }
 
 Vajra::response::ConnectionBehavior Vajra::request::RequestProcessor::connection_behavior_for(

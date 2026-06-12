@@ -802,7 +802,7 @@ module Performance
       return unless drain
 
       drain.server.close
-      drain.thread.join(1)
+      drain.thread.join
     end
 
     def observability_modes(otlp_endpoint: 'http://127.0.0.1:4318/v1/traces')

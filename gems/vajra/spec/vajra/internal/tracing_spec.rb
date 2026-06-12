@@ -9,6 +9,22 @@ require 'spec_helper'
 
 RSpec.describe Vajra::Internal::Tracing do
   let(:tracer) { Object.new }
+  let(:trace_env_keys) do
+    %w[
+      VAJRA_TRACE_ENABLED
+      VAJRA_TRACE_ENDPOINT
+      VAJRA_TRACE_SERVICE_NAME
+      VAJRA_TRACE_OTEL_OWNER
+      OTEL_SERVICE_NAME
+      OTEL_EXPORTER_OTLP_ENDPOINT
+      OTEL_TRACES_EXPORTER
+      OTEL_METRICS_EXPORTER
+      OTEL_PROPAGATORS
+      OTEL_RESOURCE_ATTRIBUTES
+      OTEL_TRACES_SAMPLER
+      OTEL_TRACES_SAMPLER_ARG
+    ]
+  end
 
   def stub_open_telemetry_classes(provider:)
     open_telemetry_module = Module.new
@@ -75,6 +91,16 @@ RSpec.describe Vajra::Internal::Tracing do
     stub_const('OpenTelemetry::Trace', trace_module)
   end
 
+  around do |example|
+    trace_env = trace_env_keys.index_with { |name| ENV.fetch(name, nil) }
+    trace_env_keys.each { |name| ENV.delete(name) }
+    example.run
+  ensure
+    trace_env.each do |name, original_value|
+      original_value.nil? ? ENV.delete(name) : ENV[name] = original_value
+    end
+  end
+
   before do
     described_class.send(:stop_request_observability_drain_thread)
     described_class::TRACE_MUTEX.synchronize do
@@ -106,18 +132,6 @@ RSpec.describe Vajra::Internal::Tracing do
     described_class::TRACE_MUTEX.synchronize do
       described_class::TRACE_STATE.warning_emitted = false
     end
-    ENV.delete('VAJRA_TRACE_ENABLED')
-    ENV.delete('VAJRA_TRACE_ENDPOINT')
-    ENV.delete('VAJRA_TRACE_SERVICE_NAME')
-    ENV.delete('VAJRA_TRACE_OTEL_OWNER')
-    ENV.delete('OTEL_SERVICE_NAME')
-    ENV.delete('OTEL_EXPORTER_OTLP_ENDPOINT')
-    ENV.delete('OTEL_TRACES_EXPORTER')
-    ENV.delete('OTEL_METRICS_EXPORTER')
-    ENV.delete('OTEL_PROPAGATORS')
-    ENV.delete('OTEL_RESOURCE_ATTRIBUTES')
-    ENV.delete('OTEL_TRACES_SAMPLER')
-    ENV.delete('OTEL_TRACES_SAMPLER_ARG')
   end
 
   it 'disables tracing cleanly when trace_enabled is false' do

@@ -42,15 +42,91 @@ module Vajra
         String | Integer | bool
       ]
 
+      type native_request_event_key =
+        :method |
+        :target |
+        :status |
+        :duration_nanoseconds |
+        :bytes_written |
+        :remote_addr |
+        :protocol |
+        :host |
+        :user_agent |
+        :referer |
+        :request_id |
+        :worker_pid |
+        :worker_index |
+        :connection_outcome |
+        :trace_id |
+        :span_id |
+        :outcome |
+        :failure_kind |
+        :response_sent |
+        :error_message |
+        :timestamp
+
+      type native_request_event = Hash[
+        native_request_event_key,
+        String | Integer | bool | nil
+      ]
+
       interface _Tracer
         def in_span: [T] (String, attributes: Hash[String, String | Integer | bool]) { () -> T } -> T
+      end
+
+      interface _TelemetryProvider
+        def tracer: (String) -> _Tracer?
+        def force_flush: () -> void
+        def shutdown: () -> void
+      end
+
+      interface _MeterProvider
+        def meter: (String) -> _Meter?
+      end
+
+      type metric_instrument = _AddInstrument | _RecordInstrument
+
+      interface _Meter
+        def create_counter: (String, ?unit: String) -> metric_instrument?
+        def create_histogram: (String, ?unit: String) -> metric_instrument?
+        def create_up_down_counter: (String, ?unit: String) -> metric_instrument?
+      end
+
+      interface _AddInstrument
+        def add: (Numeric, attributes: Hash[String, String | Integer | bool]) -> void
+      end
+
+      interface _RecordInstrument
+        def record: (Numeric, attributes: Hash[String, String | Integer | bool]) -> void
+      end
+
+      class TraceConfig
+        attr_accessor enabled: bool
+        attr_accessor endpoint: String
+        attr_accessor service_name: String
+        attr_accessor otel_owner: bool
+        attr_accessor traces_exporter: String
+        attr_accessor metrics_exporter: String
+        attr_accessor propagators: String
+        attr_accessor resource_attributes: String
+        attr_accessor sampler: String
+        attr_accessor sampler_arg: String
       end
 
       class TraceState
         attr_accessor enabled: bool
         attr_accessor available: bool
         attr_accessor tracer: _Tracer?
+        attr_accessor meter: _Meter?
+        attr_accessor provider: _TelemetryProvider?
         attr_accessor warning_emitted: bool
+        attr_accessor request_counter: metric_instrument?
+        attr_accessor request_duration: metric_instrument?
+        attr_accessor active_requests: metric_instrument?
+        attr_accessor metric_instruments: Hash[Symbol, metric_instrument?]
+        attr_accessor request_observability_thread: Thread?
+        attr_accessor request_observability_stop: bool
+        attr_accessor propagators: String
       end
 
       TRACE_MUTEX: Thread::Mutex
@@ -59,8 +135,11 @@ module Vajra
       def self.install_from_start_options!: (start_options) -> bool
       def self.with_request_span: [T] (Hash[String, rack_env_value]) { () -> T } -> T
       def self.emit_lifecycle_span: (lifecycle_event) -> nil
-      def self.__native_set_tracing_status__: (bool, bool, String, String) -> nil
+      def self.emit_native_request_span: (native_request_event) -> void
+      def self.__native_set_tracing_status__: (bool, bool, String, String, bool, Float, String, String) -> nil
       def self.__native_set_lifecycle_callback__: ((Method | Proc)? callback) -> ((Method | Proc)?)
+      def self.__native_set_request_observability_callback__: ((Method | Proc)? callback) -> ((Method | Proc)?)
+      def self.__native_drain_request_observability_events__: (Integer limit) -> Array[native_request_event]
     end
   end
 end

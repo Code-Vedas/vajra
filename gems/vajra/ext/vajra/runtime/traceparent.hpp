@@ -47,6 +47,11 @@ namespace Vajra
       }
 
       const std::string version = traceparent.substr(0, first);
+      if (version == "ff" || version == "FF")
+      {
+        return "";
+      }
+
       const std::string trace_id = traceparent.substr(first + 1, second - first - 1);
       const std::string span_id = traceparent.substr(second + 1, third - second - 1);
       const std::size_t flags_start = third + 1;

@@ -212,6 +212,13 @@ namespace
     {
       VajraSpecCpp::fail("future traceparent flags should be followed by a delimiter when extra fields exist");
     }
+    if (!Vajra::runtime::traceparent_part(
+             "ff-11111111111111111111111111111111-2222222222222222-01",
+             1)
+             .empty())
+    {
+      VajraSpecCpp::fail("traceparent version ff should be rejected");
+    }
   }
 
   Vajra::runtime::AccessLogEvent sample_access_event(int status)

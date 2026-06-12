@@ -93,14 +93,16 @@ RSpec.describe Vajra::Internal::Tracing do
 
   around do |example|
     saved_trace_env = {}
-    trace_env_keys.each do |name|
-      saved_trace_env[name] = ENV.fetch(name, nil)
-      ENV.delete(name)
-    end
-    example.run
-  ensure
-    saved_trace_env.each do |name, original_value|
-      original_value.nil? ? ENV.delete(name) : ENV[name] = original_value
+    begin
+      trace_env_keys.each do |name|
+        saved_trace_env[name] = ENV.fetch(name, nil)
+        ENV.delete(name)
+      end
+      example.run
+    ensure
+      saved_trace_env.each do |name, original_value|
+        original_value.nil? ? ENV.delete(name) : ENV[name] = original_value
+      end
     end
   end
 

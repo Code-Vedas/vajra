@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <string>
+#include <vector>
 
 namespace Vajra
 {
@@ -25,11 +26,26 @@ namespace Vajra
       std::size_t max_connections;
       std::size_t socket_queue_capacity;
       std::size_t max_request_head_bytes;
+      std::size_t max_request_body_bytes;
+      std::size_t max_keepalive_requests;
       std::size_t request_timeout_seconds;
       int request_head_timeout_seconds;
       int first_data_timeout_seconds;
+      int request_body_timeout_seconds;
       int persistent_timeout_seconds;
       int worker_timeout_seconds;
+      bool tls;
+      std::string tls_certificate;
+      std::string tls_private_key;
+      std::string tls_ca_certificate;
+      std::string tls_verify_mode;
+      std::string tls_min_version;
+      std::vector<std::string> alpn_protocols;
+      bool http2;
+      std::size_t http2_max_concurrent_streams;
+      std::size_t http2_initial_window_size;
+      std::size_t http2_max_frame_size;
+      std::size_t http2_header_table_size;
       std::string log_level;
       std::string access_log;
       std::string error_log;

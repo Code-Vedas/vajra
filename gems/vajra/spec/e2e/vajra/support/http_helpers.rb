@@ -533,6 +533,10 @@ module VajraE2EHttpHelpers
   def packaged_app_command_request_result_on_port(files:, command:, request:, port:, env: {}, timeout: 15)
     with_packaged_app(files:) do |app_root|
       managed_popen2e(app_root_bundle_env.merge(env), *command, chdir: app_root) do |_stdin, output, wait_thread|
+        startup_output = []
+        selected_port = wait_for_banner(output, captured_lines: startup_output)
+        raise "expected packaged app to listen on #{port}, got #{selected_port}" unless selected_port == port
+
         response = wait_for_http_response(
           port,
           request,
@@ -541,9 +545,9 @@ module VajraE2EHttpHelpers
           timeout:,
           request_label: 'packaged_app_command_request_result_on_port'
         )
-        status = stop_process(wait_thread)
+        status = stop_process(wait_thread, timeout:)
 
-        { exitstatus: status.exitstatus, response:, output: output.read, port: }
+        { exitstatus: status.exitstatus, response:, output: "#{startup_output.join}#{output.read}", port: selected_port }
       ensure
         cleanup_process(wait_thread, output)
       end
@@ -580,9 +584,16 @@ module VajraE2EHttpHelpers
     loop do
       raise "#{request_label} exited early: #{process_diagnostics(wait_thread, output)}" unless wait_thread.alive?
 
-      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, port)
-      socket.write(request)
-      return read_raw_http_response(socket, wait_thread:, output:, request_label:)
+      socket = nil
+      begin
+        socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, port)
+        socket.write(request)
+        response = read_raw_http_response(socket, wait_thread:, output:, request_label:)
+        wait_for_socket_close(socket)
+        return response
+      ensure
+        socket&.close unless socket&.closed?
+      end
     rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH, Errno::ECONNRESET, EOFError, Timeout::Error
       if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
         raise Timeout::Error, "#{request_label} timed out: #{process_diagnostics(wait_thread, output)}"

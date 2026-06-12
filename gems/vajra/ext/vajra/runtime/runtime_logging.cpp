@@ -8,8 +8,12 @@
 
 #if __has_include("ruby.h")
 #include "ruby.h"
-#include "ruby/thread.h"
+#include "ruby/debug.h"
 #define VAJRA_RUNTIME_HAS_RUBY 1
+#endif
+
+#ifdef VAJRA_RUNTIME_HAS_RUBY
+#include "runtime/ruby_support.hpp"
 #endif
 
 #include <algorithm>
@@ -40,18 +44,6 @@
 #include <vector>
 #include <unistd.h>
 
-std::string Vajra::runtime::utc_timestamp()
-{
-  const auto now = std::chrono::system_clock::now();
-  const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
-  std::tm utc_time{};
-  gmtime_r(&now_time, &utc_time);
-
-  std::ostringstream timestamp;
-  timestamp << std::put_time(&utc_time, "%Y-%m-%dT%H:%M:%SZ");
-  return timestamp.str();
-}
-
 std::string Vajra::runtime::runtime_environment_name()
 {
   if (const char *rails_env = std::getenv("RAILS_ENV"); rails_env != nullptr && rails_env[0] != '\0')
@@ -73,8 +65,57 @@ bool Vajra::runtime::debug_logging_enabled(const std::string &log_level)
 
 namespace
 {
+  constexpr std::size_t kInitialLogNodeBlockSize = 1024;
+  constexpr std::size_t kMaxLogNodeBlockSize = 8192;
+  constexpr std::size_t kMaxLogNodeBlocks = 4;
+
   struct LoggingConfig
   {
+    class ConfiguredLogFd
+    {
+    public:
+      explicit ConfiguredLogFd(int fallback_fd) : fd_(fallback_fd), fallback_fd_(fallback_fd) {}
+      ConfiguredLogFd(const ConfiguredLogFd &) = delete;
+      ConfiguredLogFd &operator=(const ConfiguredLogFd &) = delete;
+
+      ~ConfiguredLogFd()
+      {
+        close_owned();
+      }
+
+      int get() const
+      {
+        return fd_;
+      }
+
+      void reset_to_fallback()
+      {
+        close_owned();
+        fd_ = fallback_fd_;
+        owned_ = false;
+      }
+
+      void reset_to_owned(int fd)
+      {
+        close_owned();
+        fd_ = fd;
+        owned_ = true;
+      }
+
+    private:
+      void close_owned()
+      {
+        if (owned_ && fd_ >= 0)
+        {
+          close(fd_);
+        }
+      }
+
+      int fd_;
+      int fallback_fd_;
+      bool owned_ = false;
+    };
+
     bool structured_logs = false;
     bool trace_enabled = false;
     bool trace_available = false;
@@ -90,10 +131,8 @@ namespace
     std::string trace_propagators = "tracecontext,baggage";
     bool tracecontext_propagator = true;
     Vajra::runtime::AccessLogFieldNeeds access_field_needs;
-    int access_log_fd = STDOUT_FILENO;
-    int error_log_fd = STDERR_FILENO;
-    bool close_access_log_fd = false;
-    bool close_error_log_fd = false;
+    ConfiguredLogFd access_log_fd{STDOUT_FILENO};
+    ConfiguredLogFd error_log_fd{STDERR_FILENO};
   };
 
   enum class LogEventKind
@@ -127,6 +166,10 @@ namespace
 
   struct AsyncLoggerState
   {
+    // Request threads only acquire/reuse LogNode instances and publish them to the
+    // single logger thread. The logger thread owns formatting, fd writes, and
+    // returning nodes to the pool, so steady-state logging avoids per-request heap
+    // allocation while preserving lossless FIFO ordering.
     std::mutex mutex;
     std::condition_variable condition;
     std::condition_variable drained;
@@ -141,7 +184,7 @@ namespace
     std::atomic<LogNode *> free_head{nullptr};
     std::mutex pool_mutex;
     std::vector<LogNodeBlock> blocks;
-    std::size_t next_block_size = 4096;
+    std::size_t next_block_size = kInitialLogNodeBlockSize;
     bool structured_logs = false;
     bool access_log_disabled = false;
     std::string access_log_format;
@@ -174,7 +217,11 @@ namespace
   std::atomic<std::uint64_t> native_request_observability_events_total{0};
   std::atomic<std::uint64_t> native_request_observability_errors_total{0};
   std::atomic<std::uint64_t> native_request_admission_rejections_total{0};
-  constexpr std::size_t kNativeOtlpBatchSize = 4096;
+  std::atomic<std::uint64_t> native_request_observability_events_dropped_total{0};
+  std::atomic<std::uint64_t> native_otlp_span_events_dropped_total{0};
+  constexpr std::size_t kNativeOtlpBatchSize = 128;
+  constexpr std::size_t kMaxRequestObservabilityQueuedEvents = 2048;
+  constexpr std::size_t kMaxNativeOtlpQueuedSpans = 256;
   constexpr auto kNativeOtlpFlushInterval = std::chrono::milliseconds(25);
 
   struct NativeOtlpEndpoint
@@ -223,9 +270,8 @@ namespace
     {
       const std::size_t comma = propagators.find(',', cursor);
       std::string token = trim_copy(propagators.substr(cursor, comma == std::string::npos ? std::string::npos : comma - cursor));
-      std::transform(token.begin(), token.end(), token.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-      });
+      std::transform(token.begin(), token.end(), token.begin(), [](unsigned char ch)
+                     { return static_cast<char>(std::tolower(ch)); });
       if (token == "tracecontext")
       {
         return true;
@@ -305,13 +351,16 @@ namespace
 #ifdef VAJRA_RUNTIME_HAS_RUBY
   VALUE runtime_lifecycle_callback = Qnil;
   VALUE runtime_request_observability_callback = Qnil;
+#ifdef POSTPONED_JOB_HANDLE_INVALID
+  rb_postponed_job_handle_t lifecycle_callback_job_handle = POSTPONED_JOB_HANDLE_INVALID;
+#endif
 
   struct LifecycleCallbackContext
   {
     VALUE callback = Qnil;
     std::string event_name;
     std::size_t worker_index = 0;
-    pid_t pid = -1;
+    pid_t pid = 0;
     std::string lifecycle_state;
     std::string health_state;
     std::string recovery_state;
@@ -320,8 +369,123 @@ namespace
     bool terminal_replacement_failure = false;
     bool replacement_needed = false;
     int exit_detail = 0;
-    std::string timestamp;
+    std::string error_message;
   };
+  std::mutex lifecycle_callback_queue_mutex;
+  std::deque<std::unique_ptr<LifecycleCallbackContext>> lifecycle_callback_queue;
+
+  VALUE protected_emit_lifecycle_callback(VALUE protected_data)
+  {
+    auto *inner_context = reinterpret_cast<LifecycleCallbackContext *>(protected_data);
+    VALUE event = rb_hash_new();
+    rb_hash_aset(event, ID2SYM(rb_intern("event")), rb_str_new_cstr(inner_context->event_name.c_str()));
+    rb_hash_aset(event, ID2SYM(rb_intern("worker_index")), ULL2NUM(inner_context->worker_index));
+    rb_hash_aset(event, ID2SYM(rb_intern("pid")), INT2NUM(inner_context->pid));
+    rb_hash_aset(
+        event,
+        ID2SYM(rb_intern("lifecycle_state")),
+        rb_str_new_cstr(inner_context->lifecycle_state.c_str()));
+    rb_hash_aset(event, ID2SYM(rb_intern("health_state")), rb_str_new_cstr(inner_context->health_state.c_str()));
+    rb_hash_aset(
+        event,
+        ID2SYM(rb_intern("recovery_state")),
+        rb_str_new_cstr(inner_context->recovery_state.c_str()));
+    rb_hash_aset(event, ID2SYM(rb_intern("available")), inner_context->available ? Qtrue : Qfalse);
+    rb_hash_aset(
+        event,
+        ID2SYM(rb_intern("exit_classification")),
+        rb_str_new_cstr(inner_context->exit_classification.c_str()));
+    rb_hash_aset(
+        event,
+        ID2SYM(rb_intern("terminal_replacement_failure")),
+        inner_context->terminal_replacement_failure ? Qtrue : Qfalse);
+    rb_hash_aset(
+        event,
+        ID2SYM(rb_intern("replacement_needed")),
+        inner_context->replacement_needed ? Qtrue : Qfalse);
+    rb_hash_aset(event, ID2SYM(rb_intern("exit_detail")), INT2NUM(inner_context->exit_detail));
+    rb_funcall(inner_context->callback, rb_intern("call"), 1, event);
+    return Qnil;
+  }
+
+  void emit_lifecycle_callback_with_error_capture(LifecycleCallbackContext &context)
+  {
+    int state = 0;
+    rb_protect(protected_emit_lifecycle_callback, reinterpret_cast<VALUE>(&context), &state);
+    if (state == 0)
+    {
+      return;
+    }
+
+    VALUE message = Qnil;
+    int message_state = 0;
+    message = rb_protect(Vajra::runtime::protected_format_ruby_exception_message, Qnil, &message_state);
+    rb_set_errinfo(Qnil);
+    if (message_state == 0 && !NIL_P(message))
+    {
+      context.error_message = StringValueCStr(message);
+    }
+    else
+    {
+      context.error_message = "Ruby exception";
+    }
+  }
+
+  void report_lifecycle_callback_error(const std::string &error_message)
+  {
+    if (!error_message.empty())
+    {
+      std::cerr << "[Vajra][error] lifecycle telemetry callback failed: " << error_message << std::endl;
+    }
+  }
+
+  void postponed_lifecycle_callback(void *data)
+  {
+    (void)data;
+    for (;;)
+    {
+      std::unique_ptr<LifecycleCallbackContext> context;
+      {
+        const std::lock_guard<std::mutex> lock(lifecycle_callback_queue_mutex);
+        if (lifecycle_callback_queue.empty())
+        {
+          return;
+        }
+        context = std::move(lifecycle_callback_queue.front());
+        lifecycle_callback_queue.pop_front();
+      }
+      emit_lifecycle_callback_with_error_capture(*context);
+      report_lifecycle_callback_error(context->error_message);
+    }
+  }
+
+  bool enqueue_lifecycle_callback(LifecycleCallbackContext context)
+  {
+#ifdef POSTPONED_JOB_HANDLE_INVALID
+    rb_postponed_job_handle_t handle = POSTPONED_JOB_HANDLE_INVALID;
+#endif
+    {
+      const std::lock_guard<std::mutex> lock(lifecycle_callback_queue_mutex);
+#ifdef POSTPONED_JOB_HANDLE_INVALID
+      handle = lifecycle_callback_job_handle;
+      if (handle == POSTPONED_JOB_HANDLE_INVALID)
+      {
+        return false;
+      }
+#endif
+      lifecycle_callback_queue.push_back(std::make_unique<LifecycleCallbackContext>(std::move(context)));
+    }
+#ifdef POSTPONED_JOB_HANDLE_INVALID
+    rb_postponed_job_trigger(handle);
+#else
+    const int registered = rb_postponed_job_register(0, postponed_lifecycle_callback, nullptr);
+    if (registered == 0)
+    {
+      return false;
+    }
+#endif
+    return true;
+  }
 
 #endif
 
@@ -329,14 +493,14 @@ namespace
   {
     switch (lifecycle_state)
     {
-      case Vajra::runtime::WorkerLifecycleState::booting:
-        return "booting";
-      case Vajra::runtime::WorkerLifecycleState::ready:
-        return "ready";
-      case Vajra::runtime::WorkerLifecycleState::stopping:
-        return "stopping";
-      case Vajra::runtime::WorkerLifecycleState::exited:
-        return "exited";
+    case Vajra::runtime::WorkerLifecycleState::booting:
+      return "booting";
+    case Vajra::runtime::WorkerLifecycleState::ready:
+      return "ready";
+    case Vajra::runtime::WorkerLifecycleState::stopping:
+      return "stopping";
+    case Vajra::runtime::WorkerLifecycleState::exited:
+      return "exited";
     }
 
     return "unknown";
@@ -346,18 +510,18 @@ namespace
   {
     switch (classification)
     {
-      case Vajra::runtime::WorkerExitClassification::none:
-        return "none";
-      case Vajra::runtime::WorkerExitClassification::expected_shutdown:
-        return "expected_shutdown";
-      case Vajra::runtime::WorkerExitClassification::exit_before_ready:
-        return "exit_before_ready";
-      case Vajra::runtime::WorkerExitClassification::unexpected_status:
-        return "unexpected_status";
-      case Vajra::runtime::WorkerExitClassification::unexpected_signal:
-        return "unexpected_signal";
-      case Vajra::runtime::WorkerExitClassification::unexpected_exit:
-        return "unexpected_exit";
+    case Vajra::runtime::WorkerExitClassification::none:
+      return "none";
+    case Vajra::runtime::WorkerExitClassification::expected_shutdown:
+      return "expected_shutdown";
+    case Vajra::runtime::WorkerExitClassification::exit_before_ready:
+      return "exit_before_ready";
+    case Vajra::runtime::WorkerExitClassification::unexpected_status:
+      return "unexpected_status";
+    case Vajra::runtime::WorkerExitClassification::unexpected_signal:
+      return "unexpected_signal";
+    case Vajra::runtime::WorkerExitClassification::unexpected_exit:
+      return "unexpected_exit";
     }
 
     return "unknown";
@@ -367,18 +531,18 @@ namespace
   {
     switch (state)
     {
-      case Vajra::runtime::WorkerHealthState::healthy:
-        return "healthy";
-      case Vajra::runtime::WorkerHealthState::busy:
-        return "busy";
-      case Vajra::runtime::WorkerHealthState::overloaded:
-        return "overloaded";
-      case Vajra::runtime::WorkerHealthState::degraded:
-        return "degraded";
-      case Vajra::runtime::WorkerHealthState::suspect:
-        return "suspect";
-      case Vajra::runtime::WorkerHealthState::wedged:
-        return "wedged";
+    case Vajra::runtime::WorkerHealthState::healthy:
+      return "healthy";
+    case Vajra::runtime::WorkerHealthState::busy:
+      return "busy";
+    case Vajra::runtime::WorkerHealthState::overloaded:
+      return "overloaded";
+    case Vajra::runtime::WorkerHealthState::degraded:
+      return "degraded";
+    case Vajra::runtime::WorkerHealthState::suspect:
+      return "suspect";
+    case Vajra::runtime::WorkerHealthState::wedged:
+      return "wedged";
     }
 
     return "unknown";
@@ -388,18 +552,18 @@ namespace
   {
     switch (state)
     {
-      case Vajra::runtime::WorkerRecoveryState::none:
-        return "none";
-      case Vajra::runtime::WorkerRecoveryState::draining:
-        return "draining";
-      case Vajra::runtime::WorkerRecoveryState::terminating:
-        return "terminating";
-      case Vajra::runtime::WorkerRecoveryState::replacing:
-        return "replacing";
-      case Vajra::runtime::WorkerRecoveryState::rejoin_pending:
-        return "rejoin_pending";
-      case Vajra::runtime::WorkerRecoveryState::terminal_failure:
-        return "terminal_failure";
+    case Vajra::runtime::WorkerRecoveryState::none:
+      return "none";
+    case Vajra::runtime::WorkerRecoveryState::draining:
+      return "draining";
+    case Vajra::runtime::WorkerRecoveryState::terminating:
+      return "terminating";
+    case Vajra::runtime::WorkerRecoveryState::replacing:
+      return "replacing";
+    case Vajra::runtime::WorkerRecoveryState::rejoin_pending:
+      return "rejoin_pending";
+    case Vajra::runtime::WorkerRecoveryState::terminal_failure:
+      return "terminal_failure";
     }
 
     return "unknown";
@@ -413,33 +577,33 @@ namespace
     {
       switch (character)
       {
-        case '\\':
-          escaped << "\\\\";
-          break;
-        case '"':
-          escaped << "\\\"";
-          break;
-        case '\n':
-          escaped << "\\n";
-          break;
-        case '\r':
-          escaped << "\\r";
-          break;
-        case '\t':
-          escaped << "\\t";
-          break;
-        default:
-          if (std::isprint(character))
-          {
-            escaped << static_cast<char>(character);
-          }
-          else
-          {
-            escaped << "\\u00" << std::hex << std::setw(2) << std::setfill('0')
-                    << static_cast<int>(character)
-                    << std::dec << std::setfill(' ');
-          }
-          break;
+      case '\\':
+        escaped << "\\\\";
+        break;
+      case '"':
+        escaped << "\\\"";
+        break;
+      case '\n':
+        escaped << "\\n";
+        break;
+      case '\r':
+        escaped << "\\r";
+        break;
+      case '\t':
+        escaped << "\\t";
+        break;
+      default:
+        if (std::isprint(character))
+        {
+          escaped << static_cast<char>(character);
+        }
+        else
+        {
+          escaped << "\\u00" << std::hex << std::setw(2) << std::setfill('0')
+                  << static_cast<int>(character)
+                  << std::dec << std::setfill(' ');
+        }
+        break;
       }
     }
     escaped << '"';
@@ -453,30 +617,30 @@ namespace
     {
       switch (character)
       {
-        case '\\':
-          escaped << "\\\\";
-          break;
-        case '\n':
-          escaped << "\\n";
-          break;
-        case '\r':
-          escaped << "\\r";
-          break;
-        case '\t':
-          escaped << "\\t";
-          break;
-        default:
-          if (std::isprint(character))
-          {
-            escaped << static_cast<char>(character);
-          }
-          else
-          {
-            escaped << "\\u00" << std::hex << std::setw(2) << std::setfill('0')
-                    << static_cast<int>(character)
-                    << std::dec << std::setfill(' ');
-          }
-          break;
+      case '\\':
+        escaped << "\\\\";
+        break;
+      case '\n':
+        escaped << "\\n";
+        break;
+      case '\r':
+        escaped << "\\r";
+        break;
+      case '\t':
+        escaped << "\\t";
+        break;
+      default:
+        if (std::isprint(character))
+        {
+          escaped << static_cast<char>(character);
+        }
+        else
+        {
+          escaped << "\\u00" << std::hex << std::setw(2) << std::setfill('0')
+                  << static_cast<int>(character)
+                  << std::dec << std::setfill(' ');
+        }
+        break;
       }
     }
     return escaped.str();
@@ -581,16 +745,6 @@ namespace
     return cached_timestamp;
   }
 
-  void close_configured_fd(int &fd, bool &should_close, int fallback_fd)
-  {
-    if (should_close && fd >= 0)
-    {
-      close(fd);
-    }
-    fd = fallback_fd;
-    should_close = false;
-  }
-
   std::string dash_if_empty(const std::string &value)
   {
     return value.empty() ? "-" : value;
@@ -609,24 +763,24 @@ namespace
   {
     switch (token)
     {
-      case 'h':
-        needs.host = true;
-        return;
-      case 'u':
-        needs.user_agent = true;
-        return;
-      case 'r':
-        needs.referer = true;
-        return;
-      case 'i':
-        needs.request_id = true;
-        return;
-      case 'T':
-      case 'S':
-        needs.trace_context = true;
-        return;
-      default:
-        return;
+    case 'h':
+      needs.host = true;
+      return;
+    case 'u':
+      needs.user_agent = true;
+      return;
+    case 'r':
+      needs.referer = true;
+      return;
+    case 'i':
+      needs.request_id = true;
+      return;
+    case 'T':
+    case 'S':
+      needs.trace_context = true;
+      return;
+    default:
+      return;
     }
   }
 
@@ -679,7 +833,7 @@ namespace
 
   void install_reopen_signal_handler()
   {
-    struct sigaction action {};
+    struct sigaction action{};
     action.sa_handler = signal_reopen_handler;
     sigemptyset(&action.sa_mask);
     action.sa_flags = SA_RESTART;
@@ -704,7 +858,7 @@ namespace
       {
         warning_message = "unable to reopen access_log at " + escaped_log_value(logging_config.access_log_path) +
                           "; keeping previous access log sink";
-        next_access_fd = logging_config.access_log_fd;
+        next_access_fd = logging_config.access_log_fd.get();
       }
     }
 
@@ -723,21 +877,17 @@ namespace
         }
         warning_message.append("unable to reopen error_log at " + escaped_log_value(logging_config.error_log_path) +
                                "; keeping previous error log sink");
-        next_error_fd = logging_config.error_log_fd;
+        next_error_fd = logging_config.error_log_fd.get();
       }
     }
 
     if (next_close_access_fd)
     {
-      close_configured_fd(logging_config.access_log_fd, logging_config.close_access_log_fd, STDOUT_FILENO);
-      logging_config.access_log_fd = next_access_fd;
-      logging_config.close_access_log_fd = true;
+      logging_config.access_log_fd.reset_to_owned(next_access_fd);
     }
     if (next_close_error_fd)
     {
-      close_configured_fd(logging_config.error_log_fd, logging_config.close_error_log_fd, STDERR_FILENO);
-      logging_config.error_log_fd = next_error_fd;
-      logging_config.close_error_log_fd = true;
+      logging_config.error_log_fd.reset_to_owned(next_error_fd);
     }
     return next_close_access_fd || next_close_error_fd;
   }
@@ -754,9 +904,9 @@ namespace
       std::lock_guard<std::mutex> lock(logging_mutex);
       if (reopen_configured_logs_locked(warning_message))
       {
-        async_logger.access_log_fd = logging_config.access_log_fd;
-        async_logger.error_log_fd = logging_config.error_log_fd;
-        async_logger.runtime_log_fd = logging_config.error_log_path.empty() ? STDOUT_FILENO : logging_config.error_log_fd;
+        async_logger.access_log_fd = logging_config.access_log_fd.get();
+        async_logger.error_log_fd = logging_config.error_log_fd.get();
+        async_logger.runtime_log_fd = logging_config.error_log_path.empty() ? STDOUT_FILENO : logging_config.error_log_fd.get();
       }
     }
     if (!warning_message.empty())
@@ -785,23 +935,40 @@ namespace
   {
     switch (token)
     {
-      case 'm': return event.method;
-      case 'U': return event.target;
-      case 's': return std::to_string(event.status_code);
-      case 'b': return std::to_string(event.response_body_bytes);
-      case 'a': return event.remote_address;
-      case 'H': return event.protocol;
-      case 'h': return event.host;
-      case 'u': return event.user_agent;
-      case 'r': return event.referer;
-      case 'i': return event.request_id;
-      case 'D': return std::to_string(event.duration_nanoseconds);
-      case 'p': return std::to_string(event.worker_pid);
-      case 'w': return std::to_string(event.worker_index);
-      case 'c': return event.connection_outcome;
-      case 'T': return event.trace_id;
-      case 'S': return event.span_id;
-      default: return std::string(1, token);
+    case 'm':
+      return event.method;
+    case 'U':
+      return event.target;
+    case 's':
+      return std::to_string(event.status_code);
+    case 'b':
+      return std::to_string(event.response_body_bytes);
+    case 'a':
+      return event.remote_address;
+    case 'H':
+      return event.protocol;
+    case 'h':
+      return event.host;
+    case 'u':
+      return event.user_agent;
+    case 'r':
+      return event.referer;
+    case 'i':
+      return event.request_id;
+    case 'D':
+      return std::to_string(event.duration_nanoseconds);
+    case 'p':
+      return std::to_string(event.worker_pid);
+    case 'w':
+      return std::to_string(event.worker_index);
+    case 'c':
+      return event.connection_outcome;
+    case 'T':
+      return event.trace_id;
+    case 'S':
+      return event.span_id;
+    default:
+      return std::string(1, token);
     }
   }
 
@@ -952,7 +1119,14 @@ namespace
     {
       release_log_node(&block.nodes[index]);
     }
-    async_logger.next_block_size = std::min<std::size_t>(async_logger.next_block_size * 2, 65'536);
+    async_logger.next_block_size = std::min<std::size_t>(async_logger.next_block_size * 2, kMaxLogNodeBlockSize);
+  }
+
+  void reset_log_node_pool_locked()
+  {
+    async_logger.free_head.store(nullptr, std::memory_order_release);
+    async_logger.blocks.clear();
+    async_logger.next_block_size = kInitialLogNodeBlockSize;
   }
 
   LogNode *acquire_log_node()
@@ -978,6 +1152,10 @@ namespace
         std::lock_guard<std::mutex> lock(async_logger.pool_mutex);
         if (async_logger.free_head.load(std::memory_order_acquire) == nullptr)
         {
+          if (async_logger.blocks.size() >= kMaxLogNodeBlocks)
+          {
+            return nullptr;
+          }
           add_log_node_block_locked(async_logger.next_block_size);
         }
       }
@@ -988,18 +1166,18 @@ namespace
   {
     switch (event.kind)
     {
-      case LogEventKind::runtime:
-        write_line_fd(async_logger.runtime_log_fd, event.line);
-        return;
-      case LogEventKind::error:
-        write_line_fd(async_logger.error_log_fd, event.line);
-        return;
-      case LogEventKind::access:
-        if (!async_logger.access_log_disabled)
-        {
-          write_line_fd(async_logger.access_log_fd, event.line.empty() ? formatted_access_line(event) : event.line);
-        }
-        return;
+    case LogEventKind::runtime:
+      write_line_fd(async_logger.runtime_log_fd, event.line);
+      return;
+    case LogEventKind::error:
+      write_line_fd(async_logger.error_log_fd, event.line);
+      return;
+    case LogEventKind::access:
+      if (!async_logger.access_log_disabled)
+      {
+        write_line_fd(async_logger.access_log_fd, event.line.empty() ? formatted_access_line(event) : event.line);
+      }
+      return;
     }
   }
 
@@ -1007,18 +1185,18 @@ namespace
   {
     switch (event.kind)
     {
-      case LogEventKind::runtime:
-        append_line(runtime_buffer, event.line);
-        return;
-      case LogEventKind::error:
-        append_line(error_buffer, event.line);
-        return;
-      case LogEventKind::access:
-        if (!async_logger.access_log_disabled)
-        {
-          append_line(access_buffer, event.line.empty() ? formatted_access_line(event) : event.line);
-        }
-        return;
+    case LogEventKind::runtime:
+      append_line(runtime_buffer, event.line);
+      return;
+    case LogEventKind::error:
+      append_line(error_buffer, event.line);
+      return;
+    case LogEventKind::access:
+      if (!async_logger.access_log_disabled)
+      {
+        append_line(access_buffer, event.line.empty() ? formatted_access_line(event) : event.line);
+      }
+      return;
     }
   }
 
@@ -1092,10 +1270,9 @@ namespace
         }
 
         std::unique_lock<std::mutex> lock(async_logger.mutex);
-        async_logger.condition.wait_for(lock, std::chrono::milliseconds(1), [] {
-          return async_logger.stopping.load(std::memory_order_acquire) ||
-                 async_logger.pending.load(std::memory_order_acquire) > 0;
-        });
+        async_logger.condition.wait_for(lock, std::chrono::milliseconds(1), []
+                                        { return async_logger.stopping.load(std::memory_order_acquire) ||
+                                                 async_logger.pending.load(std::memory_order_acquire) > 0; });
         continue;
       }
 
@@ -1160,9 +1337,8 @@ namespace
     {
       return;
     }
-    async_logger.drained.wait(lock, [] {
-      return async_logger.pending.load(std::memory_order_acquire) == 0 && async_logger.in_flight == 0;
-    });
+    async_logger.drained.wait(lock, []
+                              { return async_logger.pending.load(std::memory_order_acquire) == 0 && async_logger.in_flight == 0; });
   }
 
   void flush_runtime_streams()
@@ -1176,44 +1352,6 @@ namespace
   {
     return structured_logs_enabled.load(std::memory_order_acquire);
   }
-
-#ifdef VAJRA_RUNTIME_HAS_RUBY
-  VALUE invoke_runtime_lifecycle_callback(VALUE payload)
-  {
-    auto *callback_context = reinterpret_cast<LifecycleCallbackContext *>(payload);
-    VALUE event = rb_hash_new();
-    rb_hash_aset(event, ID2SYM(rb_intern("event")), rb_str_new_cstr(callback_context->event_name.c_str()));
-    rb_hash_aset(event, ID2SYM(rb_intern("worker_index")), ULL2NUM(callback_context->worker_index));
-    rb_hash_aset(event, ID2SYM(rb_intern("pid")), INT2NUM(callback_context->pid));
-    rb_hash_aset(event, ID2SYM(rb_intern("lifecycle_state")), rb_str_new_cstr(callback_context->lifecycle_state.c_str()));
-    rb_hash_aset(event, ID2SYM(rb_intern("health_state")), rb_str_new_cstr(callback_context->health_state.c_str()));
-    rb_hash_aset(event, ID2SYM(rb_intern("recovery_state")), rb_str_new_cstr(callback_context->recovery_state.c_str()));
-    rb_hash_aset(event, ID2SYM(rb_intern("available")), callback_context->available ? Qtrue : Qfalse);
-    rb_hash_aset(event, ID2SYM(rb_intern("exit_classification")), rb_str_new_cstr(callback_context->exit_classification.c_str()));
-    rb_hash_aset(
-        event,
-        ID2SYM(rb_intern("terminal_replacement_failure")),
-        callback_context->terminal_replacement_failure ? Qtrue : Qfalse);
-    rb_hash_aset(event, ID2SYM(rb_intern("replacement_needed")), callback_context->replacement_needed ? Qtrue : Qfalse);
-    rb_hash_aset(event, ID2SYM(rb_intern("exit_detail")), INT2NUM(callback_context->exit_detail));
-    rb_hash_aset(event, ID2SYM(rb_intern("timestamp")), rb_str_new_cstr(callback_context->timestamp.c_str()));
-    return rb_funcall(callback_context->callback, rb_intern("call"), 1, event);
-  }
-
-  void *emit_lifecycle_callback_with_gvl(void *data)
-  {
-    auto *context = reinterpret_cast<LifecycleCallbackContext *>(data);
-    if (NIL_P(context->callback))
-    {
-      return nullptr;
-    }
-
-    int state = 0;
-    rb_protect(invoke_runtime_lifecycle_callback, reinterpret_cast<VALUE>(context), &state);
-    return nullptr;
-  }
-
-#endif
 
   void emit_runtime_lifecycle_callback(
       const char *event_name,
@@ -1238,22 +1376,31 @@ namespace
     {
       return;
     }
+    LifecycleCallbackContext context{
+        callback,
+        event_name,
+        worker_index,
+        pid,
+        worker_lifecycle_state_name(lifecycle_state),
+        worker_health_state_name(health_state),
+        worker_recovery_state_name(recovery_state),
+        available,
+        worker_exit_classification_name(exit_classification),
+        terminal_replacement_failure,
+        replacement_needed,
+        exit_detail,
+        ""};
+    if (context.event_name == "worker_ready")
+    {
+      emit_lifecycle_callback_with_error_capture(context);
+      report_lifecycle_callback_error(context.error_message);
+      return;
+    }
 
-    LifecycleCallbackContext context;
-    context.callback = callback;
-    context.event_name = event_name;
-    context.worker_index = worker_index;
-    context.pid = pid;
-    context.lifecycle_state = worker_lifecycle_state_name(lifecycle_state);
-    context.health_state = worker_health_state_name(health_state);
-    context.recovery_state = worker_recovery_state_name(recovery_state);
-    context.available = available;
-    context.exit_classification = worker_exit_classification_name(exit_classification);
-    context.terminal_replacement_failure = terminal_replacement_failure;
-    context.replacement_needed = replacement_needed;
-    context.exit_detail = exit_detail;
-    context.timestamp = Vajra::runtime::utc_timestamp();
-    rb_thread_call_with_gvl(emit_lifecycle_callback_with_gvl, &context);
+    if (!enqueue_lifecycle_callback(std::move(context)))
+    {
+      std::cerr << "[Vajra][error] lifecycle telemetry callback could not be queued" << std::endl;
+    }
 #else
     (void)event_name;
     (void)worker_index;
@@ -1351,33 +1498,33 @@ namespace
       const auto byte = static_cast<unsigned char>(ch);
       switch (ch)
       {
-        case '"':
-          out += "\\\"";
-          break;
-        case '\\':
-          out += "\\\\";
-          break;
-        case '\n':
-          out += "\\n";
-          break;
-        case '\r':
-          out += "\\r";
-          break;
-        case '\t':
-          out += "\\t";
-          break;
-        default:
-          if (byte < 0x20)
-          {
-            out += "\\u00";
-            constexpr char hex[] = "0123456789abcdef";
-            out.push_back(hex[(byte >> 4) & 0x0f]);
-            out.push_back(hex[byte & 0x0f]);
-          }
-          else
-          {
-            out.push_back(ch);
-          }
+      case '"':
+        out += "\\\"";
+        break;
+      case '\\':
+        out += "\\\\";
+        break;
+      case '\n':
+        out += "\\n";
+        break;
+      case '\r':
+        out += "\\r";
+        break;
+      case '\t':
+        out += "\\t";
+        break;
+      default:
+        if (byte < 0x20)
+        {
+          out += "\\u00";
+          constexpr char hex[] = "0123456789abcdef";
+          out.push_back(hex[(byte >> 4) & 0x0f]);
+          out.push_back(hex[byte & 0x0f]);
+        }
+        else
+        {
+          out.push_back(ch);
+        }
       }
     }
     out.push_back('"');
@@ -1515,7 +1662,8 @@ namespace
       append_json_escaped(out, event.span_id);
     }
     out += ",\"name\":";
-    append_json_escaped(out, event.lifecycle_span ? "vajra." + event.event_name : event.method.empty() ? std::string("HTTP request") : event.method);
+    append_json_escaped(out, event.lifecycle_span ? "vajra." + event.event_name : event.method.empty() ? std::string("HTTP request")
+                                                                                                       : event.method);
     out += ",\"kind\":";
     out += event.lifecycle_span ? "1" : "2";
     out += ",\"startTimeUnixNano\":";
@@ -1681,6 +1829,42 @@ namespace
     return drained;
   }
 
+  bool enqueue_request_observability_event_locked(Vajra::runtime::RequestObservabilityEvent event)
+  {
+    if (request_observability_events.size() >= kMaxRequestObservabilityQueuedEvents)
+    {
+      native_request_observability_events_dropped_total.fetch_add(1, std::memory_order_acq_rel);
+      return false;
+    }
+    request_observability_events.push_back(std::move(event));
+    return true;
+  }
+
+  bool enqueue_native_otlp_span_event_locked(Vajra::runtime::RequestSpanEvent event)
+  {
+    if (native_otlp_span_events.size() >= kMaxNativeOtlpQueuedSpans)
+    {
+      native_otlp_span_events_dropped_total.fetch_add(1, std::memory_order_acq_rel);
+      return false;
+    }
+    native_otlp_span_events.push_back(std::move(event));
+    if (native_otlp_span_events.size() >= kNativeOtlpBatchSize)
+    {
+      request_span_condition.notify_one();
+    }
+    return true;
+  }
+
+  void clear_request_observability_events_locked()
+  {
+    std::deque<Vajra::runtime::RequestObservabilityEvent>().swap(request_observability_events);
+  }
+
+  void clear_native_otlp_span_events_locked()
+  {
+    std::deque<Vajra::runtime::RequestSpanEvent>().swap(native_otlp_span_events);
+  }
+
   void native_otlp_export_loop()
   {
     while (true)
@@ -1690,10 +1874,9 @@ namespace
       std::string resource_attributes;
       {
         std::unique_lock<std::mutex> lock(request_observability_mutex);
-        request_span_condition.wait_for(lock, kNativeOtlpFlushInterval, [] {
-          return native_otlp_span_events.size() >= kNativeOtlpBatchSize ||
-                 native_otlp_exporter.stopping.load(std::memory_order_acquire);
-        });
+        request_span_condition.wait_for(lock, kNativeOtlpFlushInterval, []
+                                        { return native_otlp_span_events.size() >= kNativeOtlpBatchSize ||
+                                                 native_otlp_exporter.stopping.load(std::memory_order_acquire); });
         if (native_otlp_span_events.empty() && native_otlp_exporter.stopping.load(std::memory_order_acquire))
         {
           break;
@@ -1722,6 +1905,10 @@ namespace
     if (!parsed)
     {
       native_otlp_export_enabled.store(false, std::memory_order_release);
+      {
+        const std::lock_guard<std::mutex> queue_lock(request_observability_mutex);
+        clear_native_otlp_span_events_locked();
+      }
       return;
     }
     std::lock_guard<std::mutex> lock(native_otlp_exporter.mutex);
@@ -1741,6 +1928,10 @@ namespace
       native_otlp_exporter.stopping.store(false, std::memory_order_release);
       native_otlp_exporter.running.store(false, std::memory_order_release);
       native_otlp_exporter.owner_pid.store(-1, std::memory_order_release);
+      {
+        const std::lock_guard<std::mutex> queue_lock(request_observability_mutex);
+        clear_native_otlp_span_events_locked();
+      }
     }
     native_otlp_exporter.endpoint = *parsed;
     native_otlp_exporter.service_name = service_name.empty() ? "vajra" : service_name;
@@ -1771,6 +1962,10 @@ namespace
     if (worker.joinable())
     {
       worker.join();
+    }
+    {
+      const std::lock_guard<std::mutex> queue_lock(request_observability_mutex);
+      clear_native_otlp_span_events_locked();
     }
   }
 
@@ -1808,15 +2003,11 @@ namespace
       queued.response_sent = response_sent;
       queued.error_message = error_message;
       queued.timestamp = Vajra::runtime::utc_timestamp();
-      request_observability_events.push_back(std::move(queued));
+      enqueue_request_observability_event_locked(std::move(queued));
     }
     if (native_otlp_export_enabled.load(std::memory_order_acquire))
     {
-      native_otlp_span_events.push_back(span);
-      if (native_otlp_span_events.size() >= kNativeOtlpBatchSize)
-      {
-        request_span_condition.notify_one();
-      }
+      enqueue_native_otlp_span_event_locked(span);
     }
   }
 
@@ -1864,15 +2055,11 @@ namespace
     const std::lock_guard<std::mutex> lock(request_observability_mutex);
     if (request_observability_enabled.load(std::memory_order_acquire))
     {
-      request_observability_events.push_back(request_observability_event_from_span(event));
+      enqueue_request_observability_event_locked(request_observability_event_from_span(event));
     }
     if (native_otlp_export_enabled.load(std::memory_order_acquire))
     {
-      native_otlp_span_events.push_back(std::move(event));
-      if (native_otlp_span_events.size() >= kNativeOtlpBatchSize)
-      {
-        request_span_condition.notify_one();
-      }
+      enqueue_native_otlp_span_event_locked(std::move(event));
     }
   }
 
@@ -1910,11 +2097,7 @@ namespace
     span.exit_detail = exit_detail;
 
     const std::lock_guard<std::mutex> lock(request_observability_mutex);
-    native_otlp_span_events.push_back(std::move(span));
-    if (native_otlp_span_events.size() >= kNativeOtlpBatchSize)
-    {
-      request_span_condition.notify_one();
-    }
+    enqueue_native_otlp_span_event_locked(std::move(span));
   }
 
   void write_runtime_line(const std::string &line)
@@ -1928,7 +2111,7 @@ namespace
     int fd = STDOUT_FILENO;
     {
       std::lock_guard<std::mutex> lock(logging_mutex);
-      fd = logging_config.error_log_path.empty() ? STDOUT_FILENO : logging_config.error_log_fd;
+      fd = logging_config.error_log_path.empty() ? STDOUT_FILENO : logging_config.error_log_fd.get();
     }
     write_line_fd(fd, line);
   }
@@ -1944,7 +2127,7 @@ namespace
     int fd = STDERR_FILENO;
     {
       std::lock_guard<std::mutex> lock(logging_mutex);
-      fd = logging_config.error_log_fd;
+      fd = logging_config.error_log_fd.get();
     }
     write_line_fd(fd, line);
   }
@@ -1964,7 +2147,7 @@ namespace
       {
         return;
       }
-      fd = logging_config.access_log_fd;
+      fd = logging_config.access_log_fd.get();
     }
     write_line_fd(fd, line);
   }
@@ -1980,8 +2163,8 @@ void Vajra::runtime::configure_runtime_logging(
   stop_runtime_logging_worker();
   install_reopen_signal_handler();
   std::lock_guard<std::mutex> lock(logging_mutex);
-  close_configured_fd(logging_config.access_log_fd, logging_config.close_access_log_fd, STDOUT_FILENO);
-  close_configured_fd(logging_config.error_log_fd, logging_config.close_error_log_fd, STDERR_FILENO);
+  logging_config.access_log_fd.reset_to_fallback();
+  logging_config.error_log_fd.reset_to_fallback();
   logging_config.structured_logs = structured_logs;
   logging_config.access_log_path = access_log;
   logging_config.error_log_path = error_log;
@@ -1997,8 +2180,7 @@ void Vajra::runtime::configure_runtime_logging(
     const int access_fd = open_log_fd(access_log);
     if (access_fd >= 0)
     {
-      logging_config.access_log_fd = access_fd;
-      logging_config.close_access_log_fd = true;
+      logging_config.access_log_fd.reset_to_owned(access_fd);
     }
     else
     {
@@ -2010,8 +2192,7 @@ void Vajra::runtime::configure_runtime_logging(
     const int error_fd = open_log_fd(error_log);
     if (error_fd >= 0)
     {
-      logging_config.error_log_fd = error_fd;
-      logging_config.close_error_log_fd = true;
+      logging_config.error_log_fd.reset_to_owned(error_fd);
     }
     else
     {
@@ -2101,17 +2282,25 @@ void Vajra::runtime::set_runtime_trace_sample_ratio(double sample_ratio)
 
 void Vajra::runtime::start_runtime_logging_worker()
 {
-  LoggingConfig config_snapshot;
+  struct LoggingWorkerConfigSnapshot
+  {
+    bool structured_logs = false;
+    bool access_log_disabled = false;
+    std::string access_log_format;
+    std::string error_log_path;
+    int access_log_fd = STDOUT_FILENO;
+    int error_log_fd = STDERR_FILENO;
+  };
+
+  LoggingWorkerConfigSnapshot config_snapshot;
   {
     const std::lock_guard<std::mutex> lock(logging_mutex);
     config_snapshot.structured_logs = logging_config.structured_logs;
     config_snapshot.access_log_disabled = logging_config.access_log_disabled;
     config_snapshot.access_log_format = logging_config.access_log_format;
-    config_snapshot.access_field_needs = logging_config.access_field_needs;
-    config_snapshot.access_log_path = logging_config.access_log_path;
     config_snapshot.error_log_path = logging_config.error_log_path;
-    config_snapshot.access_log_fd = logging_config.access_log_fd;
-    config_snapshot.error_log_fd = logging_config.error_log_fd;
+    config_snapshot.access_log_fd = logging_config.access_log_fd.get();
+    config_snapshot.error_log_fd = logging_config.error_log_fd.get();
   }
 
   std::lock_guard<std::mutex> lock(async_logger.mutex);
@@ -2128,6 +2317,10 @@ void Vajra::runtime::start_runtime_logging_worker()
     async_logger.in_flight = 0;
     async_logger.pending.store(0, std::memory_order_release);
     delete_async_logger_queue();
+    {
+      std::lock_guard<std::mutex> pool_lock(async_logger.pool_mutex);
+      reset_log_node_pool_locked();
+    }
   }
 
   LogNode *stub = acquire_log_node();
@@ -2178,6 +2371,10 @@ void Vajra::runtime::stop_runtime_logging_worker()
     async_logger.in_flight = 0;
     async_logger.pending.store(0, std::memory_order_release);
     delete_async_logger_queue();
+    {
+      std::lock_guard<std::mutex> pool_lock(async_logger.pool_mutex);
+      reset_log_node_pool_locked();
+    }
     async_logger.owner_pid.store(-1, std::memory_order_release);
   }
 }
@@ -2290,14 +2487,27 @@ bool Vajra::runtime::access_logging_enabled()
 void Vajra::runtime::set_runtime_lifecycle_callback(void *callback)
 {
 #ifdef VAJRA_RUNTIME_HAS_RUBY
+  const VALUE callback_value = reinterpret_cast<VALUE>(callback);
   static bool callback_rooted = false;
   if (!callback_rooted)
   {
     rb_global_variable(&runtime_lifecycle_callback);
     callback_rooted = true;
   }
-  const std::lock_guard<std::mutex> lock(logging_mutex);
-  runtime_lifecycle_callback = reinterpret_cast<VALUE>(callback);
+  {
+    const std::lock_guard<std::mutex> lock(logging_mutex);
+    runtime_lifecycle_callback = callback_value;
+  }
+  if (!NIL_P(callback_value))
+  {
+#ifdef POSTPONED_JOB_HANDLE_INVALID
+    const std::lock_guard<std::mutex> lock(lifecycle_callback_queue_mutex);
+    if (lifecycle_callback_job_handle == POSTPONED_JOB_HANDLE_INVALID)
+    {
+      lifecycle_callback_job_handle = rb_postponed_job_preregister(0, postponed_lifecycle_callback, nullptr);
+    }
+#endif
+  }
 #else
   (void)callback;
 #endif
@@ -2306,17 +2516,32 @@ void Vajra::runtime::set_runtime_lifecycle_callback(void *callback)
 void Vajra::runtime::set_runtime_request_observability_callback(void *callback)
 {
 #ifdef VAJRA_RUNTIME_HAS_RUBY
+  const VALUE callback_value = reinterpret_cast<VALUE>(callback);
+  const bool enabled = !NIL_P(callback_value);
   static bool callback_rooted = false;
   if (!callback_rooted)
   {
     rb_global_variable(&runtime_request_observability_callback);
     callback_rooted = true;
   }
-  const std::lock_guard<std::mutex> lock(logging_mutex);
-  runtime_request_observability_callback = reinterpret_cast<VALUE>(callback);
-  request_observability_enabled.store(!NIL_P(runtime_request_observability_callback), std::memory_order_release);
+  {
+    const std::lock_guard<std::mutex> lock(logging_mutex);
+    runtime_request_observability_callback = callback_value;
+    request_observability_enabled.store(enabled, std::memory_order_release);
+  }
+  if (!enabled)
+  {
+    const std::lock_guard<std::mutex> queue_lock(request_observability_mutex);
+    clear_request_observability_events_locked();
+  }
 #else
-  request_observability_enabled.store(callback != nullptr, std::memory_order_release);
+  const bool enabled = callback != nullptr;
+  request_observability_enabled.store(enabled, std::memory_order_release);
+  if (!enabled)
+  {
+    const std::lock_guard<std::mutex> queue_lock(request_observability_mutex);
+    clear_request_observability_events_locked();
+  }
 #endif
 }
 
@@ -2473,20 +2698,20 @@ void Vajra::runtime::log_unexpected_worker_exit(
 {
   switch (exit_classification)
   {
-    case WorkerExitClassification::unexpected_status:
-      write_runtime_line("worker process exited unexpectedly with status " + std::to_string(exit_detail));
-      flush_runtime_streams();
-      return;
-    case WorkerExitClassification::unexpected_signal:
-      write_runtime_line("worker process exited unexpectedly due to signal " + std::to_string(exit_detail));
-      flush_runtime_streams();
-      return;
-    case WorkerExitClassification::unexpected_exit:
-      write_runtime_line("worker process exited unexpectedly");
-      flush_runtime_streams();
-      return;
-    default:
-      return;
+  case WorkerExitClassification::unexpected_status:
+    write_runtime_line("worker process exited unexpectedly with status " + std::to_string(exit_detail));
+    flush_runtime_streams();
+    return;
+  case WorkerExitClassification::unexpected_signal:
+    write_runtime_line("worker process exited unexpectedly due to signal " + std::to_string(exit_detail));
+    flush_runtime_streams();
+    return;
+  case WorkerExitClassification::unexpected_exit:
+    write_runtime_line("worker process exited unexpectedly");
+    flush_runtime_streams();
+    return;
+  default:
+    return;
   }
 }
 
@@ -2587,6 +2812,16 @@ std::uint64_t Vajra::runtime::runtime_native_request_observability_errors_total(
 std::uint64_t Vajra::runtime::runtime_native_request_admission_rejections_total()
 {
   return native_request_admission_rejections_total.load(std::memory_order_acquire);
+}
+
+std::uint64_t Vajra::runtime::runtime_native_request_observability_events_dropped_total()
+{
+  return native_request_observability_events_dropped_total.load(std::memory_order_acquire);
+}
+
+std::uint64_t Vajra::runtime::runtime_native_otlp_span_events_dropped_total()
+{
+  return native_otlp_span_events_dropped_total.load(std::memory_order_acquire);
 }
 
 void Vajra::runtime::emit_runtime_request_observability_event(

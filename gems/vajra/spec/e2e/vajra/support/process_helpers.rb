@@ -186,8 +186,8 @@ module VajraE2EProcessHelpers
     end
   end
 
-  def wait_for_socket_close(socket)
-    Timeout.timeout(1) do
+  def wait_for_socket_close(socket, timeout: 1)
+    Timeout.timeout(timeout) do
       socket.read == ''
     end
   rescue Timeout::Error
@@ -200,9 +200,10 @@ module VajraE2EProcessHelpers
     followup_chunks: [],
     port: disposable_listener_port,
     signal: 'INT',
-    exit_timeout: 2
+    exit_timeout: 2,
+    env: {}
   )
-    managed_popen2e(vajra_env(port:), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+    managed_popen2e(vajra_env(port:).merge(env), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
       startup_output = []
       selected_port = wait_for_banner(output, captured_lines: startup_output)
 
@@ -213,8 +214,10 @@ module VajraE2EProcessHelpers
 
       signal_process_group(wait_thread, signal)
       immediate_output = wait_for_graceful_shutdown_banner(output, wait_thread)
-      socket_closed = wait_for_socket_close(socket)
-      status = wait_for_exit(wait_thread, timeout: exit_timeout)
+      shutdown_deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + exit_timeout
+      socket_closed = wait_for_socket_close(socket, timeout: exit_timeout)
+      remaining_exit_timeout = [shutdown_deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC), 0.1].max
+      status = wait_for_exit(wait_thread, timeout: remaining_exit_timeout)
 
       {
         exitstatus: status.exitstatus,

@@ -48,7 +48,8 @@ namespace Vajra
     public:
       void validate(const std::string &request_line, const RequestLineTokens &tokens) const
       {
-        if (request_line.substr(tokens.second_space + 1) != "HTTP/1.1")
+        const std::string version = request_line.substr(tokens.second_space + 1);
+        if (version != "HTTP/1.1" && version != "HTTP/1.0")
         {
           throw bad_request_error("invalid HTTP version");
         }

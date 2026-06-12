@@ -4,6 +4,7 @@ require 'fileutils'
 require 'etc'
 require 'json'
 require 'net/http'
+require 'openssl'
 require 'socket'
 require 'time'
 require 'timeout'
@@ -24,17 +25,48 @@ module Performance
     otel_otlp
     otel_all_otlp
   ].freeze
+  DEFAULT_PROTOCOL_MODES = %w[
+    vajra_http1
+    vajra_tls_http1
+    vajra_tls_http2
+    vajra_h2c_prior
+    vajra_h2c_upgrade
+    vajra_tls_http2_upload
+    vajra_h2c_upload
+    vajra_tls_http2_concurrent_streams
+    vajra_h2c_concurrent_streams
+    vajra_tls_http1_keepalive
+    vajra_http1_hijack_echo
+    vajra_tls_http1_hijack_echo
+    vajra_http1_hijack_backpressure
+    vajra_tls_http1_hijack_backpressure
+    vajra_tls_http2_small_mixed
+    vajra_h2c_extended_connect_echo
+    vajra_tls_http2_extended_connect_echo
+    vajra_h2c_websocket_echo
+    vajra_tls_http2_websocket_echo
+    vajra_h2c_tunnel_backpressure
+    vajra_tls_http2_tunnel_backpressure
+  ].freeze
   DURATION_SECONDS = 20
   OBSERVABILITY_FIXTURE = 'rack'
   OBSERVABILITY_DURATION_SECONDS = 5
   RSS_SAMPLE_INTERVAL_SECONDS = 1
   VUS = 20
   ROUTES = [
+    ['head', '/text'],
     ['get', '/text'],
     ['get', '/json'],
+    ['get', '/headers'],
     ['post', '/json'],
+    ['post', '/json-large'],
     ['post', '/form'],
-    ['post', '/upload']
+    ['post', '/upload'],
+    ['post', '/upload-large'],
+    ['post', '/raw-small'],
+    ['post', '/raw-large'],
+    ['post', '/stream-read'],
+    ['post', '/line-read']
   ].freeze
 
   Handle = Struct.new(:fixture, :server, :pid, :url, :mode, keyword_init: true)
@@ -49,9 +81,11 @@ module Performance
 
       summaries = run_main_profile(run_root, options)
       observability_summaries = run_observability(run_root, options)
+      protocol_summaries = run_protocol_profile(run_root, options)
       print_results(summaries)
       print_observability_results(observability_summaries)
-      write_session_summary(run_root, options, summaries, observability_summaries)
+      print_protocol_results(protocol_summaries)
+      write_session_summary(run_root, options, summaries, observability_summaries, protocol_summaries)
     end
 
     def run_main
@@ -61,7 +95,7 @@ module Performance
 
       summaries = run_main_profile(run_root, options)
       print_results(summaries)
-      write_session_summary(run_root, options, summaries, [])
+      write_session_summary(run_root, options, summaries, [], [])
     end
 
     def run_observability_profile
@@ -71,7 +105,17 @@ module Performance
 
       observability_summaries = run_observability(run_root, options)
       print_observability_results(observability_summaries)
-      write_session_summary(run_root, options, [], observability_summaries)
+      write_session_summary(run_root, options, [], observability_summaries, [])
+    end
+
+    def run_protocol
+      options = config
+      run_root = run_root_path
+      puts "[performance] output=#{run_root}"
+
+      protocol_summaries = run_protocol_profile(run_root, options)
+      print_protocol_results(protocol_summaries)
+      write_session_summary(run_root, options, [], [], protocol_summaries)
     end
 
     def run_main_profile(run_root, options)
@@ -90,7 +134,8 @@ module Performance
     def config
       {
         servers: ENV.fetch('SERVERS', DEFAULT_SERVERS.join(',')).split(',').map(&:strip).reject(&:empty?),
-        fixtures: DEFAULT_FIXTURES,
+        fixtures: ENV.fetch('FIXTURES', DEFAULT_FIXTURES.join(',')).split(',').map(&:strip).reject(&:empty?),
+        protocol_modes: ENV.fetch('PROTOCOL_MODES', DEFAULT_PROTOCOL_MODES.join(',')).split(',').map(&:strip).reject(&:empty?),
         worker_count: Integer(ENV.fetch('WORKER_COUNT', '1')),
         thread_count: Integer(ENV.fetch('THREAD_COUNT', '4')),
         soak_seconds: Integer(ENV.fetch('SOAK_SECONDS', '0')),
@@ -114,16 +159,17 @@ module Performance
 
       log_path = File.join(fixture_root, "#{server}.log")
       pid = Process.spawn(env, *command_for(server, port, options), chdir: fixture_root, pgroup: true, out: log_path, err: log_path)
-      handle = Handle.new(fixture:, server:, pid:, url: "http://127.0.0.1:#{port}", mode: observability_mode&.name)
+      scheme = observability_mode&.config&.fetch(:tls, false) ? 'https' : 'http'
+      handle = Handle.new(fixture:, server:, pid:, url: "#{scheme}://127.0.0.1:#{port}", mode: observability_mode&.name)
       wait_until_ready(handle)
       puts "[performance] #{handle_label(handle)}: ready"
       handle
     end
 
-    def run_k6(fixture_root, handle, options, duration: duration_seconds(options))
+    def run_k6(fixture_root, handle, options, duration: duration_seconds(options), script_source: nil)
       script_path = File.join(fixture_root, "#{handle.server}.k6.js")
       summary_path = File.join(fixture_root, "#{handle.server}.summary.json")
-      File.write(script_path, k6_script(handle.url, duration))
+      File.write(script_path, script_source || k6_script(handle.url, duration))
 
       rss_sampler = start_rss_sampler(handle)
       rss_sampler = run_k6_load(fixture_root, handle, summary_path, script_path, rss_sampler)
@@ -162,6 +208,7 @@ module Performance
     def k6_script(url, duration)
       <<~JS
         import http from 'k6/http';
+        import { Counter, Trend } from 'k6/metrics';
 
         export const options = {
           scenarios: {
@@ -172,6 +219,7 @@ module Performance
               gracefulStop: '0s'
             }
           },
+          insecureSkipTLSVerify: true,
           noConnectionReuse: #{ENV.fetch('NO_CONNECTION_REUSE', '0') == '1'},
           summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
           thresholds: {
@@ -181,31 +229,852 @@ module Performance
 
         const baseUrl = #{url.to_json};
         const traceHeaders = { 'X-Trace-Id': 'performance-k6' };
-        const uploadFile = http.file('vajra performance file payload\\n', 'payload.txt', 'text/plain');
+        const requestParams = (route, headers = {}) => ({
+          headers: { ...traceHeaders, ...headers },
+          tags: { route }
+        });
+        const routeNames = [
+          'head_text',
+          'get_text',
+          'get_json',
+          'get_headers',
+          'post_json',
+          'post_json_large',
+          'post_form',
+          'post_upload',
+          'post_upload_large',
+          'post_raw_small',
+          'post_raw_large',
+          'post_stream_read',
+          'post_line_read'
+        ];
+        const routeDurations = Object.fromEntries(
+          routeNames.map((route) => [route, new Trend(`route_${route}_duration`, true)])
+        );
+        const routeRequests = Object.fromEntries(
+          routeNames.map((route) => [route, new Counter(`route_${route}_requests`)])
+        );
+        const record = (route, response) => {
+          routeRequests[route].add(1);
+          routeDurations[route].add(response.timings.duration);
+          return response;
+        };
+        const tinyUploadFile = http.file('vajra performance file payload\\n', 'payload.txt', 'text/plain');
+        const largeUploadFile = http.file('u'.repeat(512 * 1024), 'large-payload.bin', 'application/octet-stream');
+        const smallRawBody = 'small raw body payload\\n';
+        const largeRawBody = 'r'.repeat(512 * 1024);
+        const streamingBody = 's'.repeat(256 * 1024);
+        const lineBody = Array.from({ length: 512 }, (_, index) => `line-${index}-` + 'x'.repeat(64)).join('\\n') + '\\n';
+        const largeJsonBody = JSON.stringify({
+          source: 'k6',
+          kind: 'large-json',
+          payload: 'j'.repeat(128 * 1024)
+        });
 
         export default function () {
-          switch ((__ITER + __VU) % 5) {
+          switch ((__ITER + __VU) % 13) {
             case 0:
-              http.get(`${baseUrl}/text`, { headers: traceHeaders });
+              record('head_text', http.head(`${baseUrl}/text`, requestParams('head_text')));
               break;
             case 1:
-              http.get(`${baseUrl}/json`, { headers: { ...traceHeaders, Accept: 'application/json' } });
+              record('get_text', http.get(`${baseUrl}/text`, requestParams('get_text')));
               break;
             case 2:
-              http.post(`${baseUrl}/json`, JSON.stringify({ source: 'k6', value: 42 }), {
-                headers: { ...traceHeaders, 'Content-Type': 'application/json' }
-              });
+              record('get_json', http.get(`${baseUrl}/json`, requestParams('get_json', { Accept: 'application/json' })));
               break;
             case 3:
-              http.post(`${baseUrl}/form`, { name: 'vajra', kind: 'multipart-form', file: uploadFile }, { headers: traceHeaders });
+              record('get_headers', http.get(`${baseUrl}/headers`, {
+                ...requestParams('get_headers', {
+                  'X-Request-Id': `k6-${__VU}-${__ITER}`,
+                  'User-Agent': 'vajra-performance-k6'
+                })
+              }));
+              break;
+            case 4:
+              record('post_json', http.post(`${baseUrl}/json`, JSON.stringify({ source: 'k6', value: 42 }), {
+                ...requestParams('post_json', { 'Content-Type': 'application/json' })
+              }));
+              break;
+            case 5:
+              record('post_json_large', http.post(`${baseUrl}/json-large`, largeJsonBody, {
+                ...requestParams('post_json_large', { 'Content-Type': 'application/json' })
+              }));
+              break;
+            case 6:
+              record('post_form', http.post(`${baseUrl}/form`, { name: 'vajra', kind: 'urlencoded-form' }, requestParams('post_form')));
+              break;
+            case 7:
+              record('post_upload', http.post(`${baseUrl}/upload`, { file: tinyUploadFile }, requestParams('post_upload')));
+              break;
+            case 8:
+              record('post_upload_large', http.post(`${baseUrl}/upload-large`, { file: largeUploadFile }, requestParams('post_upload_large')));
+              break;
+            case 9:
+              record('post_raw_small', http.post(`${baseUrl}/raw-small`, smallRawBody, {
+                ...requestParams('post_raw_small', { 'Content-Type': 'application/octet-stream' })
+              }));
+              break;
+            case 10:
+              record('post_raw_large', http.post(`${baseUrl}/raw-large`, largeRawBody, {
+                ...requestParams('post_raw_large', { 'Content-Type': 'application/octet-stream' })
+              }));
+              break;
+            case 11:
+              record('post_stream_read', http.post(`${baseUrl}/stream-read`, streamingBody, {
+                ...requestParams('post_stream_read', { 'Content-Type': 'application/octet-stream' })
+              }));
               break;
             default:
-              http.post(`${baseUrl}/upload`, { file: uploadFile }, { headers: traceHeaders });
+              record('post_line_read', http.post(`${baseUrl}/line-read`, lineBody, {
+                ...requestParams('post_line_read', { 'Content-Type': 'text/plain' })
+              }));
               break;
           }
         }
       JS
     end
+
+    def protocol_k6_script(url, duration, mode_name)
+      case mode_name
+      when 'vajra_tls_http1_keepalive'
+        protocol_k6_keepalive_script(url, duration)
+      when 'vajra_tls_http2_upload'
+        protocol_k6_upload_script(url, duration)
+      when 'vajra_tls_http2_small_mixed'
+        protocol_k6_small_mixed_script(url, duration)
+      else
+        k6_script(url, duration)
+      end
+    end
+
+    def protocol_k6_keepalive_script(url, duration)
+      <<~JS
+        import http from 'k6/http';
+        export const options = {
+          scenarios: { steady: { executor: 'constant-vus', vus: #{VUS}, duration: '#{duration}s', gracefulStop: '0s' } },
+          insecureSkipTLSVerify: true,
+          noConnectionReuse: false,
+          summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
+          thresholds: { http_req_failed: ['rate==0'] }
+        };
+        const baseUrl = #{url.to_json};
+        export default function () {
+          http.get(`${baseUrl}/text`, { tags: { route: 'tls_http1_keepalive_text' } });
+        }
+      JS
+    end
+
+    def protocol_k6_upload_script(url, duration)
+      <<~JS
+        import http from 'k6/http';
+        export const options = {
+          scenarios: { steady: { executor: 'constant-vus', vus: #{VUS}, duration: '#{duration}s', gracefulStop: '0s' } },
+          insecureSkipTLSVerify: true,
+          summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
+          thresholds: { http_req_failed: ['rate==0'] }
+        };
+        const baseUrl = #{url.to_json};
+        const body = 's'.repeat(256 * 1024);
+        export default function () {
+          http.post(`${baseUrl}/stream-read`, body, {
+            headers: { 'Content-Type': 'application/octet-stream' },
+            tags: { route: 'tls_http2_upload_stream_read' }
+          });
+        }
+      JS
+    end
+
+    def protocol_k6_small_mixed_script(url, duration)
+      <<~JS
+        import http from 'k6/http';
+        export const options = {
+          scenarios: { steady: { executor: 'constant-vus', vus: #{VUS}, duration: '#{duration}s', gracefulStop: '0s' } },
+          insecureSkipTLSVerify: true,
+          summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
+          thresholds: { http_req_failed: ['rate==0'] }
+        };
+        const baseUrl = #{url.to_json};
+        export default function () {
+          if ((__ITER + __VU) % 3 === 0) {
+            http.get(`${baseUrl}/text`, { tags: { route: 'tls_http2_small_get_text' } });
+          } else if ((__ITER + __VU) % 3 === 1) {
+            http.get(`${baseUrl}/json`, { tags: { route: 'tls_http2_small_get_json' } });
+          } else {
+            http.post(`${baseUrl}/raw-small`, 'small raw body payload\\n', {
+              headers: { 'Content-Type': 'application/octet-stream' },
+              tags: { route: 'tls_http2_small_post_raw' }
+            });
+          }
+        }
+      JS
+    end
+
+    def run_custom_protocol_driver(fixture_root, handle, options, mode_name)
+      driver_path = File.join(fixture_root, "#{mode_name}.driver.rb")
+      summary_path = File.join(fixture_root, "#{mode_name}.summary.json")
+      File.write(driver_path, protocol_driver_script(handle.url, duration_seconds(options), mode_name, summary_path))
+
+      rss_sampler = start_rss_sampler(handle)
+      log_path = File.join(fixture_root, "#{mode_name}.driver.log")
+      puts "[performance] #{handle_label(handle)}: protocol-driver"
+      system(RbConfig.ruby, driver_path, out: log_path, err: log_path) ||
+        raise("protocol driver failed for #{handle.fixture}/#{handle.server}/#{mode_name}")
+      stop_rss_sampler(rss_sampler)
+      stats_snapshot = snapshot_vajra_stats(fixture_root, handle)
+      summary = summarize_protocol_driver(
+        fixture_root,
+        handle.fixture,
+        handle.server,
+        mode_name,
+        JSON.parse(File.read(summary_path)),
+        rss_sampler.fetch(:samples),
+        options,
+        stats_snapshot
+      )
+      File.write(File.join(fixture_root, "#{mode_name}.run-summary.json"), JSON.pretty_generate(summary))
+      summary
+    ensure
+      stop_rss_sampler(rss_sampler) if rss_sampler&.fetch(:thread)&.alive?
+    end
+
+    def summarize_protocol_driver(fixture_root, fixture, server, mode_name, payload, rss_samples, options, stats_snapshot)
+      requests_per_second = payload.fetch('requests_per_second').to_f
+      {
+        fixture:,
+        server:,
+        mode: mode_name,
+        requests_per_second:,
+        requests: payload.fetch('requests').to_i,
+        error_rate: payload.fetch('error_rate').to_f,
+        p95_ms: payload.fetch('p95_ms').to_f,
+        p99_ms: payload.fetch('p99_ms').to_f,
+        route_metrics: payload.fetch('route_metrics', {}),
+        requests_per_core: requests_per_second / options.fetch(:cpu_cores),
+        rss_bytes: rss_summary(rss_samples),
+        rss_samples:,
+        access_log_bytes: access_log_bytes(fixture_root),
+        stats: stats_snapshot
+      }
+    end
+
+    # rubocop:disable Metrics/MethodLength
+    def protocol_driver_script(url, duration, mode_name, summary_path)
+      <<~'RUBY'
+        require 'base64'
+        require 'digest'
+        require 'json'
+        require 'openssl'
+        require 'socket'
+        require 'timeout'
+        require 'uri'
+
+        URL = URI(ARGV.fetch(0, __URL__))
+        MODE = __MODE__
+        DURATION = __DURATION__
+        VUS = __VUS__
+        SUMMARY_PATH = __SUMMARY_PATH__
+        PAYLOAD = 's'.b * (256 * 1024)
+        TUNNEL_PAYLOAD = 't'.b * (16 * 1024)
+        TUNNEL_BACKPRESSURE_REPEAT = 80
+        TUNNEL_BACKPRESSURE_WINDOW = 256 * 1024
+        HIJACK_ECHO_PAYLOAD = 'ping'.b
+        HIJACK_BACKPRESSURE_PAYLOAD = 'h'.b * (16 * 1024)
+        HIJACK_BACKPRESSURE_REPEAT = 80
+        HIJACK_OPERATION_PAUSE_SECONDS = 0.001
+        STREAMS_PER_CONNECTION = 512
+        STREAM_WAVE_SIZE = 64
+        H2_INITIAL_WINDOW = 65_535
+        H2_DATA = 0
+        H2_HEADERS = 1
+        H2_RST_STREAM = 3
+        H2_SETTINGS = 4
+        H2_GOAWAY = 7
+        H2_WINDOW_UPDATE = 8
+
+        def h2_integer(value, prefix_bits, prefix_value)
+          prefix_max = (1 << prefix_bits) - 1
+          return [prefix_value | value].pack('C') if value < prefix_max
+          bytes = [prefix_value | prefix_max]
+          value -= prefix_max
+          while value >= 128
+            bytes << ((value % 128) + 128)
+            value /= 128
+          end
+          bytes << value
+          bytes.pack('C*')
+        end
+
+        def h2_string(value)
+          h2_integer(value.bytesize, 7, 0) + value
+        end
+
+        def h2_literal_header(name, value)
+          "\x00".b + h2_string(name) + h2_string(value)
+        end
+
+        def h2_headers(*pairs)
+          pairs.each_with_object(+"".b) { |(name, value), block| block << h2_literal_header(name, value) }
+        end
+
+        def h2_frame(type, flags, stream_id, payload)
+          [payload.bytesize].pack('N')[1, 3] + [type, flags, stream_id & 0x7fff_ffff].pack('CCN') + payload
+        end
+
+        def h2_read_frame(socket)
+          header = socket.read(9)
+          raise 'HTTP/2 frame header missing' unless header&.bytesize == 9
+          a, b, c = header.byteslice(0, 3).bytes
+          length = (a << 16) | (b << 8) | c
+          type, flags, stream_id = header.byteslice(3, 6).unpack('CCN')
+          payload = length.zero? ? ''.b : socket.read(length)
+          raise 'HTTP/2 frame payload missing' unless payload&.bytesize == length
+          { length: length, type: type, flags: flags, stream_id: stream_id & 0x7fff_ffff, payload: payload }
+        end
+
+        def h2_ack_settings(socket, frame)
+          socket.write(h2_frame(H2_SETTINGS, 0x1, 0, '')) if frame[:type] == H2_SETTINGS && frame[:flags].nobits?(0x1)
+        end
+
+        def h2_window_update(socket, stream_id, byte_count)
+          return if byte_count.zero?
+
+          payload = [byte_count].pack('N')
+          socket.write(h2_frame(H2_WINDOW_UPDATE, 0, 0, payload))
+          socket.write(h2_frame(H2_WINDOW_UPDATE, 0, stream_id, payload)) if stream_id.positive?
+        end
+
+        def h2_read_server_settings(socket)
+          Timeout.timeout(5) do
+            loop do
+              frame = h2_read_frame(socket)
+              h2_ack_settings(socket, frame)
+              break if frame[:type] == H2_SETTINGS && frame[:flags].nobits?(0x1)
+            end
+          end
+        end
+
+        def h2_open_tls
+          tcp = TCPSocket.new(URL.host, URL.port)
+          context = OpenSSL::SSL::SSLContext.new
+          context.verify_mode = OpenSSL::SSL::VERIFY_NONE
+          context.alpn_protocols = ['h2']
+          ssl = OpenSSL::SSL::SSLSocket.new(tcp, context)
+          ssl.hostname = URL.host if ssl.respond_to?(:hostname=)
+          ssl.sync_close = true
+          ssl.connect
+          raise "ALPN did not negotiate h2: #{ssl.alpn_protocol.inspect}" unless ssl.alpn_protocol == 'h2'
+          ssl
+        end
+
+        def h2_open_plain
+          TCPSocket.new(URL.host, URL.port)
+        end
+
+        def http1_open_tls
+          tcp = TCPSocket.new(URL.host, URL.port)
+          context = OpenSSL::SSL::SSLContext.new
+          context.verify_mode = OpenSSL::SSL::VERIFY_NONE
+          context.alpn_protocols = ['http/1.1']
+          ssl = OpenSSL::SSL::SSLSocket.new(tcp, context)
+          ssl.hostname = URL.host if ssl.respond_to?(:hostname=)
+          ssl.sync_close = true
+          ssl.connect
+          raise "ALPN did not negotiate HTTP/1.1: #{ssl.alpn_protocol.inspect}" if ssl.alpn_protocol && ssl.alpn_protocol != 'http/1.1'
+          ssl
+        end
+
+        def http1_open_plain
+          TCPSocket.new(URL.host, URL.port)
+        end
+
+        def http1_read_until(socket, marker)
+          data = +''
+          Timeout.timeout(5) do
+            until data.end_with?(marker)
+              chunk = socket.read(1)
+              raise EOFError, "HTTP/1 hijack response closed before #{marker.inspect}" unless chunk
+
+              data << chunk
+            end
+          end
+          data
+        end
+
+        def http1_read_bytes(socket, expected_bytes)
+          data = +''.b
+          Timeout.timeout(5) do
+            while data.bytesize < expected_bytes
+              chunk = socket.read(expected_bytes - data.bytesize)
+              raise "HTTP/1 hijack body closed early: expected_bytes=#{expected_bytes} actual_bytes=#{data.bytesize}" unless chunk
+              data << chunk
+            end
+          end
+          data
+        end
+
+        def h2_preface(socket, initial_window_size: nil, connection_window_size: nil)
+          settings = +''
+          settings << [4, initial_window_size].pack('nN') if initial_window_size
+          socket.write("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" + h2_frame(H2_SETTINGS, 0, 0, settings))
+          return unless connection_window_size && connection_window_size > H2_INITIAL_WINDOW
+
+          h2_window_update(socket, 0, connection_window_size - H2_INITIAL_WINDOW)
+        end
+
+        def h2_read_responses(socket, expected, started_at_by_stream)
+          bodies = Hash.new { |hash, key| hash[key] = +''.b }
+          closed = {}
+          latencies = {}
+          Timeout.timeout(5) do
+            until expected.all? { |stream_id, _| closed[stream_id] }
+              frame = h2_read_frame(socket)
+              h2_ack_settings(socket, frame)
+              raise "stream #{frame[:stream_id]} reset" if frame[:type] == H2_RST_STREAM
+              if frame[:type] == H2_GOAWAY
+                last_stream_id = frame[:payload].byteslice(0, 4).unpack1('N') & 0x7fff_ffff
+                error_code = frame[:payload].byteslice(4, 4).unpack1('N')
+                raise "goaway last_stream_id=#{last_stream_id} error_code=#{error_code}"
+              end
+              next unless expected.key?(frame[:stream_id])
+              if frame[:type] == H2_DATA
+                bodies[frame[:stream_id]] << frame[:payload]
+                h2_window_update(socket, frame[:stream_id], frame[:payload].bytesize)
+              end
+              next unless (frame[:type] == H2_DATA || frame[:type] == H2_HEADERS) && frame[:flags].anybits?(0x1)
+
+              closed[frame[:stream_id]] = true
+              started_at = started_at_by_stream.fetch(frame[:stream_id])
+              latencies[frame[:stream_id]] = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1000.0
+            end
+          end
+          expected.each do |stream_id, body|
+            next if bodies[stream_id] == body
+
+            actual = bodies[stream_id]
+            raise "unexpected body for stream #{stream_id}: expected_bytes=#{body.bytesize} actual_bytes=#{actual.bytesize} expected_sha256=#{Digest::SHA256.hexdigest(body)} actual_sha256=#{Digest::SHA256.hexdigest(actual)}"
+          end
+          expected.keys.map { |stream_id| latencies.fetch(stream_id) }
+        end
+
+        def h2_validate_repeated_payload!(payload, pattern, received)
+          offset = 0
+          while offset < payload.bytesize
+            pattern_offset = (received + offset) % pattern.bytesize
+            byte_count = [pattern.bytesize - pattern_offset, payload.bytesize - offset].min
+            actual = payload.byteslice(offset, byte_count)
+            expected = pattern.byteslice(pattern_offset, byte_count)
+            raise "unexpected repeated payload at byte #{received + offset}" unless actual == expected
+
+            offset += byte_count
+          end
+        end
+
+        def h2_read_repeated_response(socket, stream_id, pattern, repeat_count, started_at)
+          expected_bytes = pattern.bytesize * repeat_count
+          received = 0
+          latency = nil
+          Timeout.timeout(5) do
+            until latency
+              frame = h2_read_frame(socket)
+              h2_ack_settings(socket, frame)
+              raise "stream #{frame[:stream_id]} reset" if frame[:type] == H2_RST_STREAM
+              if frame[:type] == H2_GOAWAY
+                last_stream_id = frame[:payload].byteslice(0, 4).unpack1('N') & 0x7fff_ffff
+                error_code = frame[:payload].byteslice(4, 4).unpack1('N')
+                raise "goaway last_stream_id=#{last_stream_id} error_code=#{error_code}"
+              end
+              next unless frame[:stream_id] == stream_id
+
+              if frame[:type] == H2_DATA
+                byte_count = frame[:payload].bytesize
+                actual_bytes = received + byte_count
+                raise "unexpected body for stream #{stream_id}: expected_bytes=#{expected_bytes} actual_bytes=#{actual_bytes}" if actual_bytes > expected_bytes
+
+                h2_validate_repeated_payload!(frame[:payload], pattern, received)
+                received = actual_bytes
+                h2_window_update(socket, stream_id, byte_count)
+              end
+              next unless (frame[:type] == H2_DATA || frame[:type] == H2_HEADERS) && frame[:flags].anybits?(0x1)
+
+              raise "unexpected body for stream #{stream_id}: expected_bytes=#{expected_bytes} actual_bytes=#{received}" unless received == expected_bytes
+
+              latency = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1000.0
+            end
+          end
+          [latency]
+        end
+
+        def h2_get_headers(path)
+          h2_headers(
+            [':method', 'GET'],
+            [':scheme', URL.scheme == 'https' ? 'https' : 'http'],
+            [':authority', URL.host],
+            [':path', path]
+          )
+        end
+
+        def h2_post_headers(path, length)
+          h2_headers(
+            [':method', 'POST'],
+            [':scheme', URL.scheme == 'https' ? 'https' : 'http'],
+            [':authority', URL.host],
+            [':path', path],
+            ['content-type', 'application/octet-stream'],
+            ['content-length', length.to_s]
+          )
+        end
+
+        def h2_connect_headers(path, protocol)
+          h2_headers(
+            [':method', 'CONNECT'],
+            [':scheme', URL.scheme == 'https' ? 'https' : 'http'],
+            [':authority', URL.host],
+            [':path', path],
+            [':protocol', protocol]
+          )
+        end
+
+        def run_h2_prior
+          socket = h2_open_plain
+          h2_preface(socket)
+          h2_read_server_settings(socket)
+          completed = 0
+          latencies = []
+          while completed < STREAMS_PER_CONNECTION
+            expected = {}
+            started_at_by_stream = {}
+            STREAM_WAVE_SIZE.times do |offset|
+              index = completed + offset
+              stream_id = index * 2 + 1
+              expected[stream_id] = 'vajra performance text'
+              started_at_by_stream[stream_id] = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+              socket.write(h2_frame(H2_HEADERS, 0x5, stream_id, h2_get_headers('/text')))
+            end
+            latencies.concat(h2_read_responses(socket, expected, started_at_by_stream))
+            completed += expected.size
+          end
+          latencies
+        ensure
+          socket&.close
+        end
+
+        def run_h2_upload_stream(socket, stream_id)
+          started_at_by_stream = { stream_id => Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+          socket.write(h2_frame(H2_HEADERS, 0x4, stream_id, h2_post_headers('/stream-read', PAYLOAD.bytesize)))
+          offset = 0
+          while offset < PAYLOAD.bytesize
+            byte_count = [16 * 1024, PAYLOAD.bytesize - offset].min
+            flags = offset + byte_count >= PAYLOAD.bytesize ? 0x1 : 0
+            socket.write(h2_frame(H2_DATA, flags, stream_id, PAYLOAD.byteslice(offset, byte_count)))
+            offset += byte_count
+          end
+          h2_read_responses(socket, { stream_id => JSON.generate({ bytes: PAYLOAD.bytesize, chunks: 32, kind: 'stream-read' }) }, started_at_by_stream)
+        rescue StandardError => e
+          raise "#{e.message} while waiting for h2 upload stream #{stream_id}"
+        end
+
+        def run_h2_upload(tls: false)
+          socket = tls ? h2_open_tls : h2_open_plain
+          h2_preface(socket)
+          h2_read_server_settings(socket)
+          run_h2_upload_stream(socket, 1)
+        ensure
+          socket&.close
+        end
+
+        def run_h2_upload_persistent_until(deadline)
+          socket = h2_open_plain
+          h2_preface(socket)
+          h2_read_server_settings(socket)
+          next_stream_id = 1
+          while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+            yield run_h2_upload_stream(socket, next_stream_id)
+            next_stream_id += 2
+          end
+        ensure
+          socket&.close
+        end
+
+        def run_h2_tunnel_stream(socket, stream_id, websocket:, backpressure:)
+          payload = backpressure ? TUNNEL_PAYLOAD : 'ping'.b
+          protocol = websocket ? 'websocket' : 'echo'
+          path = backpressure ? '/tunnel-backpressure' : (websocket ? '/websocket' : '/tunnel')
+          prefix = websocket ? 'ws:' : 'tunnel:'
+          expected = prefix + payload
+          started_at_by_stream = { stream_id => Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+          socket.write(h2_frame(H2_HEADERS, 0x4, stream_id, h2_connect_headers(path, protocol)))
+          socket.write(h2_frame(H2_DATA, 0x1, stream_id, payload))
+          return h2_read_repeated_response(socket, stream_id, expected, TUNNEL_BACKPRESSURE_REPEAT, started_at_by_stream.fetch(stream_id)) if backpressure
+
+          h2_read_responses(socket, { stream_id => expected }, started_at_by_stream)
+        rescue StandardError => e
+          raise "#{e.message} while waiting for h2 tunnel stream #{stream_id}"
+        end
+
+        def run_h2_tunnel_persistent_until(deadline, tls:, websocket:, backpressure:)
+          socket = tls ? h2_open_tls : h2_open_plain
+          if backpressure && tls
+            h2_preface(
+              socket,
+              initial_window_size: TUNNEL_BACKPRESSURE_WINDOW,
+              connection_window_size: TUNNEL_BACKPRESSURE_WINDOW
+            )
+          else
+            h2_preface(socket)
+          end
+          h2_read_server_settings(socket)
+          next_stream_id = 1
+          while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+            yield run_h2_tunnel_stream(socket, next_stream_id, websocket: websocket, backpressure: backpressure)
+            next_stream_id += 2
+          end
+        ensure
+          socket&.close
+        end
+
+        def h2_tunnel_mode?(mode)
+          mode.end_with?('_extended_connect_echo') ||
+            mode.end_with?('_websocket_echo') ||
+            mode.end_with?('_tunnel_backpressure')
+        end
+
+        def http1_hijack_mode?(mode)
+          mode.end_with?('_hijack_echo') ||
+            mode.end_with?('_hijack_backpressure')
+        end
+
+        def run_http1_hijack(tls:, backpressure:)
+          attempts = 0
+          socket = nil
+          begin
+            attempts += 1
+            socket = tls ? http1_open_tls : http1_open_plain
+            payload = backpressure ? HIJACK_BACKPRESSURE_PAYLOAD : HIJACK_ECHO_PAYLOAD
+            response_chunk = 'hijack:' + payload
+            expected_repeats = backpressure ? HIJACK_BACKPRESSURE_REPEAT : 1
+            expected_bytes = response_chunk.bytesize * expected_repeats
+            path = backpressure ? '/hijack-backpressure' : '/hijack-echo'
+            started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            socket.write(
+              "GET #{path} HTTP/1.1\r\n" \
+              "Host: #{URL.host}\r\n" \
+              "Connection: close\r\n" \
+              "\r\n"
+            )
+            head = http1_read_until(socket, "\r\n\r\n")
+            raise "HTTP/1 hijack response failed: #{head.inspect}" unless head.start_with?("HTTP/1.1 200 OK\r\n")
+            body = http1_read_bytes(socket, expected_bytes)
+            if backpressure
+              h2_validate_repeated_payload!(body, response_chunk, 0)
+            elsif body != response_chunk
+              raise "unexpected HTTP/1 hijack body: expected_bytes=#{response_chunk.bytesize} actual_bytes=#{body.bytesize}"
+            end
+            [(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1000.0]
+          rescue EOFError, Errno::ECONNRESET, OpenSSL::SSL::SSLError
+            socket&.close
+            retry if attempts < 3
+
+            raise
+          end
+        ensure
+          socket&.close
+        end
+
+        def run_h2_concurrent(tls: false)
+          socket = tls ? h2_open_tls : h2_open_plain
+          h2_preface(socket)
+          h2_read_server_settings(socket)
+          completed = 0
+          latencies = []
+          while completed < STREAMS_PER_CONNECTION
+            expected = {}
+            started_at_by_stream = {}
+            STREAM_WAVE_SIZE.times do |offset|
+              index = completed + offset
+              stream_id = index * 2 + 1
+              path = index.even? ? '/text' : '/json'
+              expected[stream_id] = path == '/text' ? 'vajra performance text' : JSON.generate({ fixture: 'performance', kind: 'json' })
+              started_at_by_stream[stream_id] = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+              socket.write(h2_frame(H2_HEADERS, 0x5, stream_id, h2_get_headers(path)))
+            end
+            latencies.concat(h2_read_responses(socket, expected, started_at_by_stream))
+            completed += expected.size
+          end
+          latencies
+        ensure
+          socket&.close
+        end
+
+        def run_h2c_upgrade
+          socket = h2_open_plain
+          settings = Base64.urlsafe_encode64([4, 65_535].pack('nN'), padding: false)
+          socket.write(
+            "GET /text HTTP/1.1\r\n" \
+            "Host: #{URL.host}\r\n" \
+            "Connection: Upgrade, HTTP2-Settings\r\n" \
+            "Upgrade: h2c\r\n" \
+            "HTTP2-Settings: #{settings}\r\n" \
+            "\r\n"
+          )
+          head = +''
+          head << socket.read(1) until head.include?("\r\n\r\n")
+          raise "h2c upgrade failed: #{head.inspect}" unless head.start_with?("HTTP/1.1 101 Switching Protocols\r\n")
+          socket.write(h2_frame(H2_SETTINGS, 0, 0, ''))
+          completed = 0
+          latencies = []
+          expected = { 1 => 'vajra performance text' }
+          started_at_by_stream = { 1 => Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+          (STREAM_WAVE_SIZE - 1).times do |index|
+            stream_id = index * 2 + 3
+            expected[stream_id] = 'vajra performance text'
+            started_at_by_stream[stream_id] = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            socket.write(h2_frame(H2_HEADERS, 0x5, stream_id, h2_get_headers('/text')))
+          end
+          latencies.concat(h2_read_responses(socket, expected, started_at_by_stream))
+          completed += expected.size
+          while completed < STREAMS_PER_CONNECTION
+            expected = {}
+            started_at_by_stream = {}
+            STREAM_WAVE_SIZE.times do |offset|
+              index = completed + offset
+              stream_id = index * 2 + 1
+              expected[stream_id] = 'vajra performance text'
+              started_at_by_stream[stream_id] = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+              socket.write(h2_frame(H2_HEADERS, 0x5, stream_id, h2_get_headers('/text')))
+            end
+            latencies.concat(h2_read_responses(socket, expected, started_at_by_stream))
+            completed += expected.size
+          end
+          latencies
+        ensure
+          socket&.close
+        end
+
+        latencies = []
+        errors = 0
+        requests = 0
+        mutex = Mutex.new
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + DURATION
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        driver_vus = http1_hijack_mode?(MODE) ? 1 : VUS
+        threads = Array.new(driver_vus) do
+          Thread.new do
+            if MODE == 'vajra_h2c_upload'
+              begin
+                run_h2_upload_persistent_until(deadline) do |operation_latencies|
+                  mutex.synchronize do
+                    latencies.concat(operation_latencies)
+                    requests += operation_latencies.length
+                  end
+                end
+              rescue StandardError => e
+                if Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+                  mutex.synchronize { errors += 1 }
+                  warn e.full_message
+                end
+              end
+              next
+            end
+
+            if h2_tunnel_mode?(MODE)
+              begin
+                run_h2_tunnel_persistent_until(
+                  deadline,
+                  tls: MODE.start_with?('vajra_tls_http2'),
+                  websocket: MODE.end_with?('_websocket_echo'),
+                  backpressure: MODE.end_with?('_tunnel_backpressure')
+                ) do |operation_latencies|
+                  mutex.synchronize do
+                    latencies.concat(operation_latencies)
+                    requests += operation_latencies.length
+                  end
+                  sleep(HIJACK_OPERATION_PAUSE_SECONDS)
+                end
+              rescue StandardError => e
+                mutex.synchronize { errors += 1 }
+                warn e.full_message
+              end
+              next
+            end
+
+            if http1_hijack_mode?(MODE)
+              begin
+                while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+                  operation_latencies = run_http1_hijack(
+                    tls: MODE.start_with?('vajra_tls_http1'),
+                    backpressure: MODE.end_with?('_hijack_backpressure')
+                  )
+                  mutex.synchronize do
+                    latencies.concat(operation_latencies)
+                    requests += operation_latencies.length
+                  end
+                end
+              rescue StandardError => e
+                mutex.synchronize { errors += 1 }
+                warn e.full_message
+              end
+              next
+            end
+
+            while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+              operation_latencies = []
+              begin
+                case MODE
+                when 'vajra_h2c_prior'
+                  operation_latencies = run_h2_prior
+                when 'vajra_h2c_upgrade'
+                  operation_latencies = run_h2c_upgrade
+                when 'vajra_tls_http2_concurrent_streams'
+                  operation_latencies = run_h2_concurrent(tls: true)
+                when 'vajra_h2c_concurrent_streams'
+                  operation_latencies = run_h2_concurrent(tls: false)
+                else
+                  raise "unknown protocol mode: #{MODE}"
+                end
+                mutex.synchronize do
+                  latencies.concat(operation_latencies)
+                  requests += operation_latencies.length
+                end
+              rescue StandardError => e
+                mutex.synchronize { errors += [operation_latencies.length, 1].max }
+                warn e.full_message
+              end
+            end
+          end
+        end
+        threads.each(&:join)
+        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+        sorted = latencies.sort
+        percentile = lambda do |p|
+          next 0.0 if sorted.empty?
+          sorted[[(sorted.length * p).ceil - 1, 0].max]
+        end
+        File.write(SUMMARY_PATH, JSON.pretty_generate({
+          requests_per_second: requests / elapsed,
+          requests: requests,
+          error_rate: requests.zero? ? 100.0 : (errors.to_f / (requests + errors)) * 100.0,
+          p95_ms: percentile.call(0.95),
+          p99_ms: percentile.call(0.99),
+          route_metrics: {
+            MODE => {
+              requests: requests,
+              requests_per_second: requests / elapsed,
+              p95_ms: percentile.call(0.95),
+              p99_ms: percentile.call(0.99),
+              driver: http1_hijack_mode?(MODE) ? 'custom_http1_hijack' : 'custom_h2',
+              latency_scope: http1_hijack_mode?(MODE) ? 'per_hijack_completion' : 'per_stream_completion'
+            }
+          }
+        }))
+        exit(errors.zero? ? 0 : 1)
+      RUBY
+        .gsub('__URL__', url.to_json)
+        .gsub('__MODE__', mode_name.to_json)
+        .gsub('__DURATION__', duration.to_i.to_s)
+        .gsub('__VUS__', VUS.to_i.to_s)
+        .gsub('__SUMMARY_PATH__', summary_path.to_json)
+    end
+    # rubocop:enable Metrics/MethodLength
 
     def summarize_k6(fixture, server, summary, rss_samples, options)
       metrics = summary.fetch('metrics')
@@ -218,14 +1087,77 @@ module Performance
         error_rate: metric_value(metrics, 'http_req_failed', 'rate') * 100.0,
         p95_ms: metric_value(metrics, 'http_req_duration', 'p(95)'),
         p99_ms: metric_value(metrics, 'http_req_duration', 'p(99)'),
+        route_metrics: route_metrics(metrics),
         requests_per_core: requests_per_second / options.fetch(:cpu_cores),
         rss_bytes: rss_summary(rss_samples),
         rss_samples:
       }
     end
 
+    def route_metrics(metrics)
+      metrics.each_with_object({}) do |(metric_name, metric_payload), routes|
+        next if handle_legacy_route_metric(routes, metric_name, metric_payload)
+
+        route = tagged_metric_value(metric_name, 'route')
+        next unless route
+
+        append_tagged_route_metric(routes[route] ||= {}, metric_name, metric_payload)
+      end
+    end
+
+    def handle_legacy_route_metric(routes, metric_name, metric_payload)
+      match = metric_name.match(/\Aroute_(.+)_(duration|requests)\z/)
+      return unless match
+
+      route_payload = routes[match[1]] ||= {}
+      match[2] == 'requests' ? append_route_request_metrics(route_payload, metric_payload) : append_route_duration_metrics(route_payload, metric_payload)
+      :handled
+    end
+
+    def append_tagged_route_metric(route_payload, metric_name, metric_payload)
+      case metric_name.split('{', 2).first
+      when 'http_reqs'
+        append_route_request_metrics(route_payload, metric_payload)
+      when 'http_req_duration'
+        append_route_duration_metrics(route_payload, metric_payload)
+      when 'http_req_sending'
+        route_payload[:sending_avg_ms] = metric_value_from_payload(metric_payload, 'avg')
+        route_payload[:sending_p95_ms] = metric_value_from_payload(metric_payload, 'p(95)')
+      when 'http_req_waiting'
+        route_payload[:waiting_avg_ms] = metric_value_from_payload(metric_payload, 'avg')
+        route_payload[:waiting_p95_ms] = metric_value_from_payload(metric_payload, 'p(95)')
+      end
+    end
+
+    def append_route_request_metrics(route_payload, metric_payload)
+      route_payload[:requests] = metric_value_from_payload(metric_payload, 'count').to_i
+      route_payload[:requests_per_second] = metric_value_from_payload(metric_payload, 'rate')
+    end
+
+    def append_route_duration_metrics(route_payload, metric_payload)
+      route_payload[:avg_ms] = metric_value_from_payload(metric_payload, 'avg')
+      route_payload[:p95_ms] = metric_value_from_payload(metric_payload, 'p(95)')
+      route_payload[:p99_ms] = metric_value_from_payload(metric_payload, 'p(99)')
+      route_payload[:max_ms] = metric_value_from_payload(metric_payload, 'max')
+    end
+
+    def tagged_metric_value(metric_name, tag_name)
+      tags = metric_name[/\{(.+)\}\z/, 1]
+      return nil unless tags
+
+      tags.split(',').each do |tag|
+        key, value = tag.split(':', 2)
+        return value if key == tag_name
+      end
+      nil
+    end
+
     def metric_value(metrics, metric, key)
       metric_payload = metrics.fetch(metric)
+      metric_value_from_payload(metric_payload, key)
+    end
+
+    def metric_value_from_payload(metric_payload, key)
       values = metric_payload.fetch('values', metric_payload)
       values.fetch(key, 0).to_f
     end
@@ -245,6 +1177,18 @@ module Performance
 
       puts
       puts 'vajra observability profile'
+      summaries.group_by { |summary| summary.fetch(:fixture) }.each do |fixture, fixture_summaries|
+        puts
+        puts fixture
+        print_table(observability_headers, fixture_summaries.map { |summary| observability_row(summary) })
+      end
+    end
+
+    def print_protocol_results(summaries)
+      return if summaries.empty?
+
+      puts
+      puts 'vajra protocol profile'
       summaries.group_by { |summary| summary.fetch(:fixture) }.each do |fixture, fixture_summaries|
         puts
         puts fixture
@@ -292,7 +1236,7 @@ module Performance
       ]
     end
 
-    def write_session_summary(run_root, options, summaries, observability_summaries)
+    def write_session_summary(run_root, options, summaries, observability_summaries, protocol_summaries)
       payload = {
         generated_at: Time.now.utc.iso8601,
         duration_seconds: duration_seconds(options),
@@ -306,9 +1250,12 @@ module Performance
         observability_fixture: OBSERVABILITY_FIXTURE,
         observability_duration_seconds: OBSERVABILITY_DURATION_SECONDS,
         observability_modes: DEFAULT_OBSERVABILITY_MODES,
+        protocol_modes: options.fetch(:protocol_modes),
+        workload_routes: ROUTES,
         results: summaries
       }
       payload[:observability_results] = observability_summaries unless observability_summaries.empty?
+      payload[:protocol_results] = protocol_summaries unless protocol_summaries.empty?
       File.write(File.join(run_root, 'summary.json'), JSON.pretty_generate(payload))
     end
 
@@ -332,7 +1279,12 @@ module Performance
 
     def send_request(handle)
       uri = URI("#{handle.url}/text")
-      response = Net::HTTP.get_response(uri)
+      http = Net::HTTP.new(uri.host, uri.port)
+      if uri.scheme == 'https'
+        http.use_ssl = true
+        http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+      end
+      response = http.get(uri.request_uri)
       response.code.to_i == 200
     rescue StandardError
       false
@@ -378,19 +1330,60 @@ module Performance
           module_function
 
           def call(env)
+            if (stream = env['vajra.http2.stream'])
+              stream.accept(200, 'content-type' => 'application/octet-stream')
+              payload = stream.read.to_s
+              prefix = env['vajra.http2.websocket'] ? 'ws:' : 'tunnel:'
+              response_chunk = prefix + payload
+              if env['PATH_INFO'] == '/tunnel-backpressure'
+                80.times { stream.write(response_chunk) }
+              else
+                stream.write(response_chunk)
+              end
+              stream.close
+              return [200, {}, []]
+            end
+
+            if env['REQUEST_METHOD'] == 'GET' && %w[/hijack-echo /hijack-backpressure].include?(env['PATH_INFO'])
+              return hijack_response(env, backpressure: env['PATH_INFO'] == '/hijack-backpressure')
+            end
+
             request = Rack::Request.new(env)
             case [request.request_method, request.path_info]
+            when ['HEAD', '/text']
+              head_text_response
             when ['GET', '/text']
               text_response
             when ['GET', '/json']
               json_response({ fixture: 'performance', kind: 'json' })
+            when ['GET', '/headers']
+              json_response({
+                request_id: env['HTTP_X_REQUEST_ID'],
+                user_agent: env['HTTP_USER_AGENT'],
+                trace_id: env['HTTP_X_TRACE_ID']
+              })
             when ['POST', '/json']
-              json_response({ received: JSON.parse(read_body(env)), kind: 'json' })
+              body = read_body(env)
+              json_response({ bytes: body.bytesize, received: JSON.parse(body), kind: 'json' })
+            when ['POST', '/json-large']
+              body = read_body(env)
+              payload = JSON.parse(body)
+              json_response({ bytes: body.bytesize, payload_bytes: payload.fetch('payload', '').bytesize, kind: 'json-large' })
             when ['POST', '/form']
-              params = multipart_params(env)
+              params = form_params(env)
               json_response({ name: params['name'], kind: params['kind'], file: file_metadata(params['file']) })
             when ['POST', '/upload']
               json_response({ file: file_metadata(multipart_params(env)['file']) })
+            when ['POST', '/upload-large']
+              json_response({ file: file_metadata(multipart_params(env)['file']) })
+            when ['POST', '/raw-small']
+              json_response({ bytes: read_body(env).bytesize, kind: 'raw-small' })
+            when ['POST', '/raw-large']
+              json_response({ bytes: read_body(env).bytesize, kind: 'raw-large' })
+            when ['POST', '/stream-read']
+              json_response(streaming_body_metadata(env))
+            when ['POST', '/line-read']
+              json_response(line_body_metadata(env))
             else
               [404, { 'content-type' => 'text/plain' }, ['not found']]
             end
@@ -402,8 +1395,31 @@ module Performance
             [200, { 'content-type' => 'text/plain' }, ['vajra performance text']]
           end
 
+          def head_text_response
+            [200, { 'content-type' => 'text/plain' }, []]
+          end
+
           def json_response(payload)
             [200, { 'content-type' => 'application/json' }, [JSON.generate(payload)]]
+          end
+
+          def hijack_response(env, backpressure:)
+            io = env.fetch('rack.hijack').call
+            io.sync = true if io.respond_to?(:sync=)
+            payload = backpressure ? 'h'.b * (16 * 1024) : 'ping'.b
+            response_chunk = "hijack:\#{payload}"
+            content_length = response_chunk.bytesize * (backpressure ? 80 : 1)
+            io.write "HTTP/1.1 200 OK\\r\\n"
+            io.write "Content-Length: \#{content_length}\\r\\n"
+            io.write "Connection: close\\r\\n"
+            io.write "\\r\\n"
+            if backpressure
+              80.times { io.write(response_chunk) }
+            else
+              io.write(response_chunk)
+            end
+            io.close
+            [200, {}, []]
           end
 
           def read_body(env)
@@ -411,6 +1427,32 @@ module Performance
 
             input = env.fetch('rack.input')
             input.read.to_s
+          end
+
+          def form_params(env)
+            Rack::Request.new(env).POST
+          end
+
+          def streaming_body_metadata(env)
+            input = env.fetch('rack.input')
+            chunks = 0
+            bytes = 0
+            while (chunk = input.read(8192))
+              chunks += 1
+              bytes += chunk.bytesize
+            end
+            { bytes: bytes, chunks: chunks, kind: 'stream-read' }
+          end
+
+          def line_body_metadata(env)
+            input = env.fetch('rack.input')
+            lines = 0
+            bytes = 0
+            while (line = input.gets)
+              lines += 1
+              bytes += line.bytesize
+            end
+            { bytes: bytes, lines: lines, kind: 'line-read' }
           end
 
           def multipart_params(env)
@@ -470,11 +1512,17 @@ module Performance
       case style
       when :rack
         ROUTES.map { |verb, path| "          #{verb} '#{path}', to: PerformanceEndpoint" }.join("\n")
+      when :rails, :hanami
+        routes_without_head.map { |verb, path| "          #{verb} '#{path}', to: PerformanceEndpoint" }.join("\n")
       when :sinatra
         ROUTES.map { |verb, path| "          #{verb}('#{path}') { dispatch_endpoint }" }.join("\n")
       else
         raise ArgumentError, "unknown route style: #{style}"
       end
+    end
+
+    def routes_without_head
+      ROUTES.filter_map { |verb, path| [verb, path] unless verb == 'head' }
     end
 
     def rack_app
@@ -499,7 +1547,7 @@ module Performance
 
         #{endpoint_helpers}
 
-        class PerformanceRailsApp < Rails::Application
+        performance_rails_app = Class.new(Rails::Application) do
           config.root = __dir__
           config.eager_load = false
           config.secret_key_base = 'performance'
@@ -510,14 +1558,14 @@ module Performance
           config.middleware.delete Rack::Runtime
         end
 
-        PerformanceRailsApp.initialize!
-        PerformanceRailsApp.routes.draw do
-        #{endpoint_routes(:rack)}
+        performance_rails_app.initialize!
+        performance_rails_app.routes.draw do
+        #{endpoint_routes(:rails)}
         end
 
         #{access_logger_setup}
 
-        run PerformanceRailsApp
+        run performance_rails_app
       RUBY
     end
 
@@ -531,6 +1579,10 @@ module Performance
 
         class PerformanceRodaApp < Roda
           route do |r|
+            if r.env['REQUEST_METHOD'] == 'HEAD' && r.path_info == '/text'
+              dispatch_endpoint(r.env)
+            end
+
             r.on 'text' do
               r.get { dispatch_endpoint(r.env) }
             end
@@ -538,10 +1590,31 @@ module Performance
               r.get { dispatch_endpoint(r.env) }
               r.post { dispatch_endpoint(r.env) }
             end
+            r.on 'headers' do
+              r.get { dispatch_endpoint(r.env) }
+            end
+            r.on 'json-large' do
+              r.post { dispatch_endpoint(r.env) }
+            end
             r.on 'form' do
               r.post { dispatch_endpoint(r.env) }
             end
             r.on 'upload' do
+              r.post { dispatch_endpoint(r.env) }
+            end
+            r.on 'upload-large' do
+              r.post { dispatch_endpoint(r.env) }
+            end
+            r.on 'raw-small' do
+              r.post { dispatch_endpoint(r.env) }
+            end
+            r.on 'raw-large' do
+              r.post { dispatch_endpoint(r.env) }
+            end
+            r.on 'stream-read' do
+              r.post { dispatch_endpoint(r.env) }
+            end
+            r.on 'line-read' do
               r.post { dispatch_endpoint(r.env) }
             end
           end
@@ -598,7 +1671,7 @@ module Performance
         #{endpoint_helpers}
 
         app = Hanami::Router.new do
-        #{endpoint_routes(:rack)}
+        #{endpoint_routes(:hanami)}
         end
 
         #{access_logger_setup}
@@ -611,20 +1684,37 @@ module Performance
 
     def vajra_config(observability_mode: nil)
       mode_config = observability_mode&.config || {}
-      lines = [
+      lines = vajra_base_config_lines(mode_config) + vajra_trace_config_lines(mode_config) + [
+        integer_config_line(:max_keepalive_requests, mode_config.fetch(:max_keepalive_requests, nil)),
+        boolean_config_line(:tls, mode_config.fetch(:tls, nil)),
+        string_config_line(:tls_certificate, mode_config.fetch(:tls_certificate, nil)),
+        string_config_line(:tls_private_key, mode_config.fetch(:tls_private_key, nil)),
+        string_config_line(:tls_verify_mode, mode_config.fetch(:tls_verify_mode, nil)),
+        array_config_line(:alpn_protocols, mode_config.fetch(:alpn_protocols, nil)),
+        boolean_config_line(:http2, mode_config.fetch(:http2, nil)),
+        'end'
+      ]
+      "#{lines.compact.join("\n")}\n"
+    end
+
+    def vajra_base_config_lines(mode_config)
+      [
         'Vajra.configure do |config|',
         '  config.rackup "config.ru"',
         vajra_access_log_config_line(mode_config),
         string_config_line(:access_log_format, mode_config.fetch(:access_log_format, nil)),
         boolean_config_line(:structured_logs, mode_config.fetch(:structured_logs, ENV.fetch('STRUCTURED_LOGS', '0') == '1')),
-        '  config.stats_path "/__vajra/stats"',
+        '  config.stats_path "/__vajra/stats"'
+      ]
+    end
+
+    def vajra_trace_config_lines(mode_config)
+      [
         boolean_config_line(:trace_enabled, mode_config.fetch(:trace_enabled, nil)),
         boolean_config_line(:trace_otel_owner, mode_config.fetch(:trace_otel_owner, nil)),
         string_config_line(:trace_endpoint, mode_config.fetch(:trace_endpoint, nil)),
-        string_config_line(:trace_service_name, mode_config.fetch(:trace_service_name, nil)),
-        'end'
+        string_config_line(:trace_service_name, mode_config.fetch(:trace_service_name, nil))
       ]
-      "#{lines.compact.join("\n")}\n"
     end
 
     def vajra_access_log_config_line(mode_config)
@@ -645,12 +1735,29 @@ module Performance
       "  config.#{name}"
     end
 
+    def integer_config_line(name, value)
+      return nil if value.nil?
+
+      "  config.#{name} #{Integer(value)}"
+    end
+
+    def array_config_line(name, value)
+      return nil if value.nil?
+
+      "  config.#{name} #{value.inspect}"
+    end
+
     def snapshot_vajra_stats(fixture_root, handle)
       uri = URI(handle.url)
       uri.path = '/__vajra/stats'
       uri.query = nil
       started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      response = Net::HTTP.get_response(uri)
+      http = Net::HTTP.new(uri.host, uri.port)
+      if uri.scheme == 'https'
+        http.use_ssl = true
+        http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+      end
+      response = http.get(uri.request_uri)
       duration_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1000.0
       return {} unless response.is_a?(Net::HTTPSuccess)
 
@@ -764,6 +1871,132 @@ module Performance
       end
     ensure
       stop_otlp_drain(otlp_drain)
+    end
+
+    def run_protocol_profile(run_root, options)
+      options.fetch(:protocol_modes).map do |mode_name|
+        handle = nil
+        mode_root = File.join(run_root, OBSERVABILITY_FIXTURE, 'protocol', mode_name)
+        FileUtils.mkdir_p(mode_root)
+        cert_path, key_path = write_self_signed_certificate(mode_root)
+        mode = protocol_modes(cert_path:, key_path:, options:).fetch(mode_name)
+        write_fixture(OBSERVABILITY_FIXTURE, mode_root, observability_mode: mode)
+        handle = start_server(OBSERVABILITY_FIXTURE, 'vajra', mode_root, options, observability_mode: mode)
+        if custom_protocol_driver?(mode_name)
+          run_custom_protocol_driver(mode_root, handle, options, mode_name)
+        else
+          run_k6(
+            mode_root,
+            handle,
+            options,
+            script_source: protocol_k6_script(handle.url, duration_seconds(options), mode_name)
+          )
+        end
+      rescue StandardError => e
+        raise "[performance] #{OBSERVABILITY_FIXTURE}/vajra/#{mode_name}: failed (#{e.message})"
+      ensure
+        stop_process_group(handle.pid) if handle
+      end
+    end
+
+    def protocol_modes(cert_path:, key_path:, options:)
+      keepalive_cap = options.fetch(:soak_seconds).positive? ? 50_000 : nil
+      tls_http1 = {
+        tls: true,
+        tls_certificate: cert_path,
+        tls_private_key: key_path,
+        tls_verify_mode: 'none',
+        alpn_protocols: ['http/1.1']
+      }
+      tls_http1[:max_keepalive_requests] = keepalive_cap if keepalive_cap
+      tls_http2 = tls_http1.merge(
+        http2: true,
+        alpn_protocols: %w[h2 http/1.1]
+      )
+      plaintext_http1 = {}
+      plaintext_http1[:max_keepalive_requests] = keepalive_cap if keepalive_cap
+      h2c = { http2: true }
+      h2c[:max_keepalive_requests] = keepalive_cap if keepalive_cap
+      {
+        'vajra_http1' => observability_mode('vajra_http1', config: plaintext_http1),
+        'vajra_tls_http1' => observability_mode('vajra_tls_http1', config: tls_http1),
+        'vajra_tls_http2' => observability_mode('vajra_tls_http2', config: tls_http2),
+        'vajra_h2c_prior' => observability_mode('vajra_h2c_prior', config: h2c),
+        'vajra_h2c_upgrade' => observability_mode('vajra_h2c_upgrade', config: h2c),
+        'vajra_tls_http2_upload' => observability_mode('vajra_tls_http2_upload', config: tls_http2),
+        'vajra_h2c_upload' => observability_mode('vajra_h2c_upload', config: h2c),
+        'vajra_tls_http2_concurrent_streams' => observability_mode('vajra_tls_http2_concurrent_streams', config: tls_http2),
+        'vajra_h2c_concurrent_streams' => observability_mode('vajra_h2c_concurrent_streams', config: h2c),
+        'vajra_tls_http1_keepalive' => observability_mode('vajra_tls_http1_keepalive', config: tls_http1),
+        'vajra_http1_hijack_echo' => observability_mode('vajra_http1_hijack_echo', config: plaintext_http1),
+        'vajra_tls_http1_hijack_echo' => observability_mode('vajra_tls_http1_hijack_echo', config: tls_http1),
+        'vajra_http1_hijack_backpressure' => observability_mode('vajra_http1_hijack_backpressure', config: plaintext_http1),
+        'vajra_tls_http1_hijack_backpressure' => observability_mode('vajra_tls_http1_hijack_backpressure', config: tls_http1),
+        'vajra_tls_http2_small_mixed' => observability_mode('vajra_tls_http2_small_mixed', config: tls_http2),
+        'vajra_h2c_extended_connect_echo' => observability_mode('vajra_h2c_extended_connect_echo', config: h2c),
+        'vajra_tls_http2_extended_connect_echo' => observability_mode('vajra_tls_http2_extended_connect_echo', config: tls_http2),
+        'vajra_h2c_websocket_echo' => observability_mode('vajra_h2c_websocket_echo', config: h2c),
+        'vajra_tls_http2_websocket_echo' => observability_mode('vajra_tls_http2_websocket_echo', config: tls_http2),
+        'vajra_h2c_tunnel_backpressure' => observability_mode('vajra_h2c_tunnel_backpressure', config: h2c),
+        'vajra_tls_http2_tunnel_backpressure' => observability_mode('vajra_tls_http2_tunnel_backpressure', config: tls_http2)
+      }
+    end
+
+    def custom_protocol_driver?(mode_name)
+      %w[
+        vajra_h2c_prior
+        vajra_h2c_upgrade
+        vajra_h2c_upload
+        vajra_http1_hijack_echo
+        vajra_tls_http1_hijack_echo
+        vajra_http1_hijack_backpressure
+        vajra_tls_http1_hijack_backpressure
+        vajra_tls_http2_concurrent_streams
+        vajra_h2c_concurrent_streams
+        vajra_h2c_extended_connect_echo
+        vajra_tls_http2_extended_connect_echo
+        vajra_h2c_websocket_echo
+        vajra_tls_http2_websocket_echo
+        vajra_h2c_tunnel_backpressure
+        vajra_tls_http2_tunnel_backpressure
+      ].include?(mode_name)
+    end
+
+    def write_self_signed_certificate(root)
+      key = OpenSSL::PKey::RSA.new(2048)
+      cert = self_signed_certificate(key)
+      cert_path = File.join(root, 'server.crt')
+      key_path = File.join(root, 'server.key')
+      File.write(cert_path, cert.to_pem)
+      File.write(key_path, key.to_pem)
+      [cert_path, key_path]
+    end
+
+    def self_signed_certificate(key)
+      cert = unsigned_self_signed_certificate(key)
+      add_self_signed_certificate_extensions(cert)
+      cert.sign(key, OpenSSL::Digest.new('SHA256'))
+      cert
+    end
+
+    def unsigned_self_signed_certificate(key)
+      cert = OpenSSL::X509::Certificate.new
+      cert.version = 2
+      cert.serial = 1
+      cert.subject = OpenSSL::X509::Name.parse('/CN=localhost')
+      cert.issuer = cert.subject
+      cert.public_key = key.public_key
+      cert.not_before = Time.now.utc - 60
+      cert.not_after = Time.now.utc + 3600
+      cert
+    end
+
+    def add_self_signed_certificate_extensions(cert)
+      extension_factory = OpenSSL::X509::ExtensionFactory.new
+      extension_factory.subject_certificate = cert
+      extension_factory.issuer_certificate = cert
+      cert.add_extension(extension_factory.create_extension('subjectAltName', 'DNS:localhost,IP:127.0.0.1'))
+      cert.add_extension(extension_factory.create_extension('basicConstraints', 'CA:FALSE', true))
     end
 
     def start_otlp_drain
@@ -901,7 +2134,7 @@ module Performance
 end
 
 namespace :performance do
-  desc 'Run main and observability performance profiles'
+  desc 'Run main, observability, and protocol performance profiles'
   task :run do
     Performance.run
   end
@@ -914,6 +2147,11 @@ namespace :performance do
   desc 'Run the Vajra observability performance profile'
   task :observability do
     Performance.run_observability_profile
+  end
+
+  desc 'Run the Vajra TLS and HTTP/2 performance profile'
+  task :protocol do
+    Performance.run_protocol
   end
 end
 

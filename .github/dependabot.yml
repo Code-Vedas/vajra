@@ -14,6 +14,10 @@ updates:
     schedule:
       interval: daily
   - package-ecosystem: bundler
+    directory: /gems/vajra/performance
+    schedule:
+      interval: daily
+  - package-ecosystem: bundler
     directory: /docs
     schedule:
       interval: daily

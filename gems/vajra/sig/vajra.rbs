@@ -7,6 +7,10 @@ module Vajra
   class Error < StandardError
   end
 
+  module NativeExtension
+    def self.load!: (?loader: Proc, ?extension_path: String) -> bool
+  end
+
   VERSION: String
 
   def self.header: () -> String
@@ -19,26 +23,41 @@ module Vajra
     ?host: String,
     ?port: Integer,
     ?workers: Integer,
-    ?threads: [Integer] | [Integer, Integer],
+    ?threads: [Integer, Integer],
     ?max_connections: Integer,
     ?socket_queue_capacity: Integer,
     ?max_request_head_bytes: Integer,
+    ?max_request_body_bytes: Integer,
     ?request_timeout: Integer,
     ?first_data_timeout: Integer,
     ?persistent_timeout: Integer,
+    ?max_keepalive_requests: Integer,
     ?worker_timeout: Integer,
     ?request_head_timeout: Integer,
+    ?request_body_timeout: Integer,
+    ?tls: bool,
+    ?tls_certificate: String,
+    ?tls_private_key: String,
+    ?tls_ca_certificate: String,
+    ?tls_verify_mode: String,
+    ?tls_min_version: String,
+    ?alpn_protocols: Array[String],
+    ?http2: bool,
+    ?http2_max_concurrent_streams: Integer,
+    ?http2_initial_window_size: Integer,
+    ?http2_max_frame_size: Integer,
+    ?http2_header_table_size: Integer,
     ?log_level: String,
     ?access_log: String?,
-    ?error_log: String?,
-    ?structured_logs: bool?,
-    ?access_log_format: String?,
-    ?stats_path: String?,
-    ?metrics_endpoint: String?,
-    ?trace_enabled: bool?,
-    ?trace_endpoint: String?,
-    ?trace_service_name: String?,
-    ?trace_otel_owner: bool?
+    ?error_log: String,
+    ?structured_logs: bool,
+    ?access_log_format: String,
+    ?stats_path: String,
+    ?metrics_endpoint: String,
+    ?trace_enabled: bool,
+    ?trace_endpoint: String,
+    ?trace_service_name: String,
+    ?trace_otel_owner: bool
   ) -> nil
   def self.stop: () -> nil
 end

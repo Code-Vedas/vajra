@@ -8,40 +8,91 @@
 #include "runtime/runtime_state.hpp"
 
 #include <chrono>
+#include <array>
 #include <cerrno>
 #include <cstring>
 #include <iostream>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 
 namespace
 {
-#ifdef MSG_NOSIGNAL
-  constexpr int kSendFlags = MSG_NOSIGNAL;
-#else
-  constexpr int kSendFlags = 0;
-#endif
 }
 
 void Vajra::response::ResponseWriter::prepare_client_socket(int client_fd)
 {
-#ifdef SO_NOSIGPIPE
   int opt = 1;
-  if (setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt)) < 0)
-  {
-    std::cerr << "setsockopt(SO_NOSIGPIPE) failed: " << std::strerror(errno) << std::endl;
-  }
-#else
-  (void)client_fd;
+#ifdef TCP_NODELAY
+  (void)setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
 #endif
+#ifdef SO_NOSIGPIPE
+  (void)setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
+#endif
+  (void)client_fd;
 }
 
 bool Vajra::response::ResponseWriter::send(int client_fd, const Response &response) const
 {
+  prepare_client_socket(client_fd);
+  Vajra::transport::PlainConnection connection(client_fd);
+  return send(connection, response);
+}
+
+bool Vajra::response::ResponseWriter::send(Vajra::transport::Connection &connection, const Response &response) const
+{
+  return send(connection, response, false);
+}
+
+bool Vajra::response::ResponseWriter::send(Vajra::transport::Connection &connection, const Response &response, bool suppress_body) const
+{
   const auto started_at = std::chrono::steady_clock::now();
   try
   {
-    const std::string response_message = serializer_.serialize(response);
-    const bool sent = send_response_message(client_fd, response_message);
+    bool sent = send_response_message(connection, serializer_.serialize_head(response));
+    if (sent && !suppress_body && !response_body_empty(response))
+    {
+      if (response_has_body_chunks(response))
+      {
+        for (const std::string &chunk : response.body_chunks)
+        {
+          if (!send_response_message(connection, chunk))
+          {
+            sent = false;
+            break;
+          }
+        }
+      }
+      else if (response_has_body_file(response))
+      {
+        if (std::fseek(response.body_file->file, 0, SEEK_SET) != 0)
+        {
+          return false;
+        }
+        std::array<char, 16 * 1024> buffer;
+        for (;;)
+        {
+          const std::size_t read = std::fread(buffer.data(), 1, buffer.size(), response.body_file->file);
+          if (read > 0 && !send_response_bytes(connection, buffer.data(), read))
+          {
+            sent = false;
+            break;
+          }
+          if (read < buffer.size())
+          {
+            if (std::ferror(response.body_file->file) != 0)
+            {
+              sent = false;
+            }
+            break;
+          }
+        }
+      }
+      else
+      {
+        sent = send_response_message(connection, response.body);
+      }
+    }
     Vajra::runtime::note_worker_response_write_time(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - started_at)
@@ -132,15 +183,28 @@ void Vajra::response::ResponseWriter::log_serialization_error(const Serializatio
 bool Vajra::response::ResponseWriter::send_response_message(int client_fd, const std::string &response_message) const
 {
   prepare_client_socket(client_fd);
+  Vajra::transport::PlainConnection connection(client_fd);
+  return send_response_message(connection, response_message);
+}
 
+bool Vajra::response::ResponseWriter::send_response_message(
+    Vajra::transport::Connection &connection,
+    const std::string &response_message) const
+{
+  return send_response_bytes(connection, response_message.data(), response_message.size());
+}
+
+bool Vajra::response::ResponseWriter::send_response_bytes(
+    Vajra::transport::Connection &connection,
+    const char *data,
+    std::size_t length) const
+{
   std::size_t bytes_sent = 0;
-  while (bytes_sent < response_message.size())
+  while (bytes_sent < length)
   {
-    const ssize_t sent = ::send(
-        client_fd,
-        response_message.data() + bytes_sent,
-        response_message.size() - bytes_sent,
-        kSendFlags);
+    const ssize_t sent = connection.write(
+        data + bytes_sent,
+        length - bytes_sent);
     if (sent < 0)
     {
       if (errno == EINTR)
@@ -148,13 +212,15 @@ bool Vajra::response::ResponseWriter::send_response_message(int client_fd, const
         continue;
       }
 
-      std::cerr << "send failed: " << std::strerror(errno) << std::endl;
+      if (errno != EPIPE && errno != ECONNRESET && errno != ECONNABORTED)
+      {
+        std::cerr << "send failed: " << std::strerror(errno) << std::endl;
+      }
       return false;
     }
 
     if (sent == 0)
     {
-      std::cerr << "send failed: connection closed before response completed" << std::endl;
       return false;
     }
 

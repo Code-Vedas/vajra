@@ -74,6 +74,7 @@ RSpec.describe 'Vajra framework compatibility', :e2e, :integration do
       'config/vajra.rb' => <<~RUBY
         Vajra.configure do |config|
           config.max_request_head_bytes 32768
+          config.worker_timeout 1
         end
       RUBY
     }

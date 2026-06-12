@@ -7,6 +7,7 @@
 #define VAJRA_RUNTIME_NATIVE_RUNTIME_HPP
 
 #include "runtime/boot_contract.hpp"
+#include "request/request_body_reader.hpp"
 #include "runtime/runtime_config.hpp"
 #include "runtime/runtime_state.hpp"
 #include "runtime/worker_pool.hpp"
@@ -43,9 +44,26 @@ namespace Vajra
       int port = 0;
       std::size_t max_connections = 0;
       std::size_t max_request_head_bytes = 0;
+      std::size_t max_request_body_bytes = request::kDefaultMaxRequestBodyBytes;
+      std::size_t max_keepalive_requests = 0;
+      std::size_t request_timeout_seconds = 25;
       int request_head_timeout_seconds = 5;
       int first_data_timeout_seconds = 30;
+      int request_body_timeout_seconds = request::kDefaultRequestBodyTimeoutSeconds;
       int persistent_timeout_seconds = 30;
+      int worker_timeout_seconds = 25;
+      bool tls = false;
+      std::string tls_certificate;
+      std::string tls_private_key;
+      std::string tls_ca_certificate;
+      std::string tls_verify_mode = "none";
+      std::string tls_min_version = "TLSv1_2";
+      std::vector<std::string> alpn_protocols = {"http/1.1"};
+      bool http2 = false;
+      std::size_t http2_max_concurrent_streams = 128;
+      std::size_t http2_initial_window_size = 1'048'576;
+      std::size_t http2_max_frame_size = 1'048'576;
+      std::size_t http2_header_table_size = 4'096;
       int worker_processes = 0;
       std::size_t socket_queue_capacity = 0;
       std::string stats_path;
@@ -132,6 +150,7 @@ namespace Vajra
           std::size_t max_threads,
           int port,
           std::size_t max_request_head_bytes,
+          std::size_t max_request_body_bytes,
           int readiness_write_fd,
           int worker_index,
           int worker_processes,
@@ -139,9 +158,25 @@ namespace Vajra
           std::size_t socket_queue_capacity,
           std::string host,
           std::size_t max_connections,
+          std::size_t max_keepalive_requests,
+          std::size_t request_timeout_seconds,
           int request_head_timeout_seconds,
           int first_data_timeout_seconds,
+          int request_body_timeout_seconds,
           int persistent_timeout_seconds,
+          int worker_timeout_seconds,
+          bool tls,
+          std::string tls_certificate,
+          std::string tls_private_key,
+          std::string tls_ca_certificate,
+          std::string tls_verify_mode,
+          std::string tls_min_version,
+          std::vector<std::string> alpn_protocols,
+          bool http2,
+          std::size_t http2_max_concurrent_streams,
+          std::size_t http2_initial_window_size,
+          std::size_t http2_max_frame_size,
+          std::size_t http2_header_table_size,
           std::string stats_path,
           std::string metrics_endpoint,
           bool debug_logging);
@@ -150,6 +185,9 @@ namespace Vajra
           const RuntimeConfig &config,
           const std::vector<std::shared_ptr<SharedWorkerState>> &worker_states);
 
+      // These runtime lifecycle flags are protected by server_mutex_. Cross-thread
+      // worker health/progress is stored on SharedWorkerState atomics; the only
+      // async-signal flag is the file-local sig_atomic_t in native_runtime.cpp.
       bool runtime_shutdown_started_ = false;
       mutable std::mutex server_mutex_;
       std::condition_variable worker_state_changed_;

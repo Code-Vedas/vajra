@@ -8,12 +8,22 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
+if [ "${DOCKER:-}" = "1" ] && [ "${IN_VAJRA_DOCKER:-}" != "1" ]; then
+  exec "${SCRIPT_DIR}/run-in-docker" "scripts/run-all" "$@"
+fi
+
+. "${SCRIPT_DIR}/run-common"
+
+clean_compile_vajra_native_extension
+export SKIP_VAJRA_CLEAN_COMPILE=1
+
 "${SCRIPT_DIR}/run-rubocop-all"
 "${SCRIPT_DIR}/run-reek-all"
 "${SCRIPT_DIR}/run-clint-all"
 "${SCRIPT_DIR}/run-rbs-all"
 "${SCRIPT_DIR}/run-rspec-unit-all"
 "${SCRIPT_DIR}/run-rspec-e2e-all"
+"${SCRIPT_DIR}/run-h2spec-all"
 "${SCRIPT_DIR}/run-ctest-all"
 "${SCRIPT_DIR}/run-package-build-all"
 "${SCRIPT_DIR}/run-docs-build-all"

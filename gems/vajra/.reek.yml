@@ -4,6 +4,8 @@ detectors:
       - Vajra::CLI::Launcher#app
   DuplicateMethodCall:
     exclude:
+      - Vajra::Internal::RackExecution::StreamingInput#read_locked
+      - Vajra::Internal::RackExecution::StreamingInput#write_locked
       - Vajra::Internal::Tracing#install_metric_instruments
       - Vajra::Internal::Tracing#in_span
       - Vajra::Internal::Tracing#stop_request_observability_drain_thread
@@ -15,6 +17,10 @@ detectors:
   NilCheck:
     exclude:
       - Vajra::CLI::Launcher#normalize_setting_values
+      - Vajra::Internal::RackExecution#rack_input_for
+      - Vajra::Internal::RackExecution::StreamingInput#gets_locked
+      - Vajra::Internal::RackExecution::StreamingInput#read_locked
+      - Vajra::Internal::RackExecution::StreamingInput#write_locked
       - Vajra::Internal::Tracing#configured_meter
       - Vajra::Internal::Tracing#in_span
       - Vajra::Internal::Tracing#with_request_span
@@ -31,6 +37,18 @@ detectors:
   TooManyStatements:
     enabled: true
     max_statements: 25
+  MissingSafeMethod:
+    exclude:
+      - Vajra::Internal::RackExecution::StreamingInput
+  RepeatedConditional:
+    exclude:
+      - Vajra::Internal::RackExecution::StreamingInput
+  TooManyMethods:
+    exclude:
+      - Vajra::Internal::RackExecution::StreamingInput
+  TooManyInstanceVariables:
+    exclude:
+      - Vajra::Internal::RackExecution::StreamingInput
   TooManyConstants:
     enabled: true
     max_constants: 10

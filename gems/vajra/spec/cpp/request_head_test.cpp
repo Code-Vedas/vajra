@@ -86,6 +86,37 @@ namespace VajraSpecCpp
       }
     }
 
+    std::string request_head_with_header_count(std::size_t header_count)
+    {
+      std::string request_head = "GET / HTTP/1.1\r\n";
+      for (std::size_t index = 0; index < header_count; ++index)
+      {
+        request_head += "X-Test-" + std::to_string(index) + ": value\r\n";
+      }
+      request_head += "\r\n";
+      return request_head;
+    }
+
+    void test_parse_request_head_accepts_exact_header_count_limit()
+    {
+      Vajra::request::RequestHeadParser parser;
+      const Vajra::request::ParsedRequest request =
+          parser.parse(request_head_with_header_count(Vajra::request::kMaxParsedHeaderCount));
+
+      if (request.headers.size() != Vajra::request::kMaxParsedHeaderCount)
+      {
+        fail("request parser rejected the exact header count limit");
+      }
+    }
+
+    void test_parse_request_head_rejects_header_count_limit_plus_one()
+    {
+      expect_parse_error(
+          request_head_with_header_count(Vajra::request::kMaxParsedHeaderCount + 1),
+          Vajra::request::HeadFailureKind::bad_request,
+          "too many request headers");
+    }
+
     void test_parse_request_head_rejects_malformed_request_line_variants()
     {
       const std::vector<std::string> invalid_request_heads = {
@@ -125,13 +156,22 @@ namespace VajraSpecCpp
     {
       const std::vector<std::string> invalid_request_heads = {
           "GET / HTTP/2.0\r\nHost: example.test\r\n\r\n",
-          "GET / HTTP/1.0\r\nHost: example.test\r\n\r\n",
           "GET / http/1.1\r\nHost: example.test\r\n\r\n"};
 
       for (const std::string &request_head : invalid_request_heads)
       {
         expect_parse_error(request_head, Vajra::request::HeadFailureKind::bad_request, "invalid HTTP version");
       }
+    }
+
+    void test_parse_request_head_accepts_http_1_0()
+    {
+      expect_parse_success(
+          "GET /legacy HTTP/1.0\r\nHost: example.test\r\n\r\n",
+          "GET",
+          "/legacy",
+          "HTTP/1.0",
+          1);
     }
 
     void test_validate_request_head_size_rejects_oversized_request_head()
@@ -420,9 +460,12 @@ namespace VajraSpecCpp
   {
     test_parse_request_head_parses_request_line_and_headers();
     test_parse_request_head_preserves_header_order_and_empty_values();
+    test_parse_request_head_accepts_exact_header_count_limit();
+    test_parse_request_head_rejects_header_count_limit_plus_one();
     test_parse_request_head_rejects_malformed_request_line_variants();
     test_parse_request_head_rejects_invalid_header_variants();
     test_parse_request_head_rejects_invalid_http_version_variants();
+    test_parse_request_head_accepts_http_1_0();
     test_validate_request_head_size_rejects_oversized_request_head();
     test_head_reader_accepts_fragmented_request_head();
     test_head_reader_returns_incomplete_on_peer_close_before_boundary();

@@ -19,7 +19,7 @@ module Vajra
     def install!(application = current_application)
       application or raise Error, 'Rails application is not configured'
       validate_application!(application)
-      application.initialize! unless application.initialized?
+      initialize_application(application) unless application.initialized?
       Vajra::Internal::RackExecution.install!(application)
     rescue Error
       raise
@@ -53,5 +53,37 @@ module Vajra
       raise Error, "Rails application must respond to ##{e.name}"
     end
     private_class_method :validate_application!
+
+    def initialize_application(application)
+      executor = rails_executor(application)
+      initializer = proc { application.initialize! }
+      if (wrap = method_object(executor, :wrap))
+        wrap.call(&initializer)
+      else
+        initializer.call
+      end
+    end
+    private_class_method :initialize_application
+
+    def rails_executor(application)
+      if (executor = method_object(application, :executor))
+        return executor.call
+      end
+
+      current = current_application
+      return unless current.equal?(application)
+
+      method_object(current, :executor)&.call
+    end
+    private_class_method :rails_executor
+
+    def method_object(receiver, name)
+      return unless receiver
+
+      receiver.method(name)
+    rescue NameError
+      nil
+    end
+    private_class_method :method_object
   end
 end

@@ -7,6 +7,7 @@
 #define VAJRA_REQUEST_HEAD_READER_HPP
 
 #include "request_head_size_validator.hpp"
+#include "transport/connection.hpp"
 
 #include <cstddef>
 #include <string>
@@ -34,10 +35,12 @@ namespace Vajra
           int client_fd,
           std::string buffered_bytes = "",
           int initial_timeout_seconds = 30) const;
+      HeadReadResult read(
+          Vajra::transport::Connection &connection,
+          std::string buffered_bytes = "",
+          int initial_timeout_seconds = 30) const;
 
     private:
-      bool wait_for_readable(int client_fd, int timeout_seconds) const;
-
       RequestHeadSizeValidator request_head_size_validator_;
       int continuation_timeout_seconds_;
     };

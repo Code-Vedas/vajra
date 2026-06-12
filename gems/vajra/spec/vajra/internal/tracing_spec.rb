@@ -122,6 +122,7 @@ RSpec.describe Vajra::Internal::Tracing do
       described_class::TRACE_STATE.request_observability_thread = nil
       described_class::TRACE_STATE.request_observability_stop = false
     end
+    described_class.send(:set_request_span_observability_active!, false)
     allow(described_class).to receive(:require).and_call_original
     allow(Kernel).to receive(:require).and_call_original
     allow(described_class).to receive(:__native_set_tracing_status__)
@@ -152,6 +153,14 @@ RSpec.describe Vajra::Internal::Tracing do
       .with(false, false, '/ignored', 'vajra-test', false, 1.0, '', 'tracecontext,baggage')
     expect(described_class).to have_received(:__native_set_lifecycle_callback__).with(nil)
     expect(described_class).to have_received(:__native_set_request_observability_callback__).with(nil)
+  end
+
+  it 'does not take the tracing mutex on the disabled request hot path' do
+    allow(described_class::TRACE_MUTEX).to receive(:synchronize).and_raise('mutex should not be touched')
+
+    expect(described_class.with_request_span('REQUEST_METHOD' => 'GET') { :ok }).to eq(:ok)
+  ensure
+    allow(described_class::TRACE_MUTEX).to receive(:synchronize).and_call_original
   end
 
   it 'keeps OpenTelemetry fully opt-in by default' do
@@ -342,6 +351,15 @@ RSpec.describe Vajra::Internal::Tracing do
 
     expect(response).to eq(:ok)
     expect(request_counter.values.last.last).not_to include('http.response.status_code')
+  end
+
+  it 'yields directly when request span observability has no tracer or metrics' do
+    described_class.send(:write_trace_state, enabled: true, available: false, tracer: nil, meter: nil, provider: nil)
+    described_class.send(:set_request_span_observability_active!, true)
+
+    response = described_class.with_request_span('REQUEST_METHOD' => 'GET') { :ok }
+
+    expect(response).to eq(:ok)
   end
 
   it 'skips Rack span construction when the tracer reports disabled' do
@@ -686,6 +704,36 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(frozen_hash_response[1]).to equal(frozen_hash_headers)
     expect(frozen_array_response[1]).to equal(frozen_array_headers)
     expect(rejecting_response[1]).to equal(rejecting_headers)
+  end
+
+  it 'uses method lookup when deciding whether trace headers are writable' do
+    context = Class.new do
+      def hex_trace_id
+        'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
+      end
+    end.new
+    span = Class.new do
+      define_method(:initialize) { |context| @context = context }
+      define_method(:context) { @context }
+    end.new(context)
+    method_sensitive_headers = Class.new do
+      attr_reader :probes
+
+      def initialize
+        @probes = []
+      end
+
+      def method(name)
+        @probes << name
+        raise NameError, name.to_s if name == :[]=
+
+        super
+      end
+    end.new
+
+    response = [200, method_sensitive_headers, ['OK']]
+    expect(described_class.send(:attach_trace_context, response, span)).to equal(response)
+    expect(method_sensitive_headers.probes).to include(:[]=)
   end
 
   it 'emits lifecycle spans when tracing is available' do

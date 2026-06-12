@@ -48,6 +48,20 @@ RSpec.describe 'Vajra runtime contract', :e2e, :integration do
     expect(result[:trailing_bytes]).to eq('')
   end
 
+  it 'serves HTTP/1.0 and closes by default' do
+    result = raw_request_result(
+      request: "GET /legacy HTTP/1.0\r\nHost: localhost\r\n\r\n"
+    )
+    response = parse_http_response(result[:response])
+
+    expect(result[:exitstatus]).to eq(0)
+    expect(response).to include(
+      status_line: 'HTTP/1.1 200 OK',
+      body: 'OK'
+    )
+    expect(response[:headers]).to include('connection' => 'close')
+  end
+
   it 'preserves the pipelined next request across the keep-alive loop' do
     result = pipelined_request_result
 

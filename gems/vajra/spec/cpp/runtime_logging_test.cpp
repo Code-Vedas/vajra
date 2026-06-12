@@ -253,10 +253,15 @@ namespace
     Vajra::runtime::flush_runtime_logs();
     const std::size_t after_second_batch = Vajra::runtime::runtime_logging_node_block_count();
     Vajra::runtime::stop_runtime_logging_worker();
+    const std::size_t after_stop = Vajra::runtime::runtime_logging_node_block_count();
 
     if (initial_blocks == 0 || after_first_batch != initial_blocks || after_second_batch != initial_blocks)
     {
       VajraSpecCpp::fail("async logger did not reuse pooled queue nodes across batches");
+    }
+    if (after_stop != 0)
+    {
+      VajraSpecCpp::fail("async logger did not release pooled queue nodes after stop");
     }
   }
 
@@ -326,6 +331,38 @@ namespace
     }
   }
 
+  void test_request_observability_queue_drops_when_bounded()
+  {
+    (void)Vajra::runtime::drain_runtime_request_observability_events(100000);
+    const std::uint64_t initial_dropped =
+        Vajra::runtime::runtime_native_request_observability_events_dropped_total();
+    Vajra::runtime::set_runtime_request_observability_callback(reinterpret_cast<void *>(1));
+
+    constexpr std::size_t queue_capacity = 2048;
+    for (std::size_t index = 0; index < queue_capacity + 4; ++index)
+    {
+      Vajra::runtime::emit_runtime_request_observability_event(
+          sample_access_event(204),
+          "completed",
+          "",
+          true,
+          "");
+    }
+
+    std::vector<Vajra::runtime::RequestObservabilityEvent> drained =
+        Vajra::runtime::drain_runtime_request_observability_events(100000);
+    Vajra::runtime::set_runtime_request_observability_callback(nullptr);
+
+    if (drained.size() != queue_capacity)
+    {
+      VajraSpecCpp::fail("request observability queue did not enforce its bounded capacity");
+    }
+    if (Vajra::runtime::runtime_native_request_observability_events_dropped_total() != initial_dropped + 4)
+    {
+      VajraSpecCpp::fail("request observability queue did not count dropped events");
+    }
+  }
+
   void test_request_span_events_drain_to_ruby_observability_queue()
   {
     Vajra::runtime::set_runtime_request_observability_callback(reinterpret_cast<void *>(1));
@@ -380,5 +417,6 @@ void VajraSpecCpp::run_runtime_logging_tests()
   test_async_logger_reuses_pooled_nodes();
   test_request_observability_queue_drains_enabled_events();
   test_request_observability_disabled_queue_keeps_counters();
+  test_request_observability_queue_drops_when_bounded();
   test_request_span_events_drain_to_ruby_observability_queue();
 }

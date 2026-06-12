@@ -1,0 +1,35 @@
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+FROM golang:1.25-bookworm AS h2spec
+
+RUN go install github.com/summerwind/h2spec/cmd/h2spec@latest
+
+FROM grafana/k6:latest AS k6
+
+FROM ruby:3.4.3-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+  && apt-get install --no-install-recommends -y \
+    build-essential \
+    ca-certificates \
+    clang \
+    cmake \
+    git \
+    libssl-dev \
+    libnss-wrapper \
+    libxml2-dev \
+    libxslt1-dev \
+    libyaml-dev \
+    pkg-config \
+    zlib1g-dev \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY --from=h2spec /go/bin/h2spec /usr/local/bin/h2spec
+COPY --from=k6 /usr/bin/k6 /usr/local/bin/k6
+
+WORKDIR /workspace

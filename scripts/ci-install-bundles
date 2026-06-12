@@ -47,6 +47,13 @@ install_supported_bundle() {
   fi
 }
 
+support_suites() {
+  cat <<'EOF'
+danger
+gems/vajra/performance
+EOF
+}
+
 while IFS= read -r suite_dir; do
   install_supported_bundle "${suite_dir}"
 done <<EOF
@@ -57,4 +64,10 @@ while IFS= read -r suite_dir; do
   install_supported_bundle "${suite_dir}"
 done <<EOF
 $(docs_suites)
+EOF
+
+while IFS= read -r suite_dir; do
+  install_supported_bundle "${suite_dir}"
+done <<EOF
+$(support_suites)
 EOF

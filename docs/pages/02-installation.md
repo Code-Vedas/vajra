@@ -6,128 +6,86 @@ permalink: /installation/
 
 # Installation
 
-Use this page for the canonical package install path, native-extension build
-requirements, and artifact expectations.
+Use this page when adding Vajra to an application. Repository setup, native
+extension development, conformance checks, performance profiles, and release
+validation live in [Development](/development/).
 
-## Prerequisites
+## Add The Gem
 
-- Linux and macOS are the supported development platforms
-- Windows belongs to the Windows parity track and has its own platform-specific
-  contract
-- Ruby 3.2 or newer
-- Bundler
-- a C++ toolchain suitable for building Ruby native extensions
-- standard system headers and build tools required by your Ruby installation
-
-## Canonical Package Path
-
-The canonical package lives at `gems/vajra`.
-
-Vajra is a single-gem repository. Build and packaging commands resolve through
-that path.
-
-## Package Setup
-
-```bash
-cd gems/vajra
-bin/setup
-```
-
-`bin/setup` installs gem dependencies and compiles the native extension through
-the package-local build path.
-
-## Application Installation
-
-For application usage, add `vajra` to the host app bundle.
-
-### Rails
+Add Vajra to the application bundle.
 
 ```ruby
 # Gemfile
 gem "vajra"
 ```
 
-```ruby
-# config/vajra.rb
-Vajra.configure do |config|
-  config.port 3000
-  config.max_request_head_bytes 32768
-end
+Install the bundle from the application root.
+
+```bash
+bundle install
 ```
+
+Vajra ships with a native extension. Bundler compiles it during installation,
+the same way it does for other native gems.
+
+Validate the package loads:
+
+```bash
+bundle exec ruby -rvajra -e 'puts Vajra::VERSION'
+```
+
+If the native extension does not load, rebuild it through Bundler and then see
+[Troubleshooting](/troubleshooting/#native-extension-does-not-load). Runtime
+development prerequisites and repository validation commands live in
+[Development](/development/), not on this installation path.
+
+## Rails
+
+Rails applications continue to use the normal Rails launcher.
 
 ```bash
 bin/rails server
 ```
 
-Rails remains the user-facing launcher. Vajra supplies the server handler, so a
-Rails app does not need `puma` just to satisfy `bin/rails server`.
+Vajra supplies the server handler for `bin/rails server`; Rails applications do
+not need another Rack server gem for that command.
 
-### Sinatra, Roda, and Hanami
+Add `config/vajra.rb` when the application needs explicit Vajra server settings.
 
 ```ruby
-# Gemfile
-gem "vajra"
+# config/vajra.rb
+Vajra.configure do |config|
+  config.host "0.0.0.0"
+  config.port 3000
+  config.workers 2
+  config.threads 5, 5
+end
 ```
 
-Keep the framework’s standard `config.ru`. Vajra loads that rackup file
-automatically when no explicit `config/vajra.rb` is present.
+## Rack, Sinatra, Roda, And Hanami
+
+Keep the framework's standard `config.ru`.
+
+```ruby
+# config.ru
+run MyRackApplication
+```
+
+Start Vajra from the application root.
 
 ```bash
 bundle exec vajra
 ```
 
-Add `config/vajra.rb` only when the app needs Vajra-owned server settings such
-as `host`, `port`, or `max_request_head_bytes`.
+Vajra loads `config.ru` automatically when no explicit `config/vajra.rb` is
+present. Create a Vajra config file for server settings such as `host`, `port`,
+request limits, TLS, logging, metrics, or tracing.
 
-## Expected Build Outputs
+## Next Steps
 
-The native build flow produces artifacts that line up with the gem’s canonical
-load path:
-
-- sources live under `gems/vajra/ext/vajra/`
-- the extension is compiled through `ext/vajra/extconf.rb`
-- the load path resolves through `require "vajra"` and the internal
-  `require_relative "vajra/vajra"` bridge
-
-## Manual Rebuild
-
-```bash
-cd gems/vajra
-bundle exec rake clobber compile
-```
-
-Use the clobber-and-compile path when changing extension code, validating clean
-checkout behavior, or debugging a stale local artifact.
-
-## Repository-Level Setup
-
-For a full repository install and validation pass:
-
-```bash
-scripts/ci-install-bundles
-scripts/run-all
-```
-
-That path checks the gem, docs site, and repository automation assumptions
-together.
-
-## Validation Path
-
-The supported validation lanes are:
-
-- `bin/rspec-unit` for unit tests with coverage
-- `bin/rspec-e2e` for integration tests with no coverage
-- `bundle exec rake clobber compile build` for clean rebuild verification
-- `scripts/run-all` for the repository-wide baseline
-
-## Packaging Expectations
-
-The packaged gem includes the runtime package surface only:
-
-- `lib/`, `exe/`, `ext/`, `sig/`, and package-local support files
-- no repository-only workflow files
-- no docs build output
-- no transient build directories in the published artifact
-
-The smoke suite and gem build flow validate that the package contents stay lean
-and loadable.
+- See [Configuration](/configuration/) for the supported runtime settings.
+- See [Command Reference](/command-reference/) for executable behavior.
+- See [Frameworks](/frameworks/) for framework-specific setup.
+- See [Production](/production/) for deployment guidance.
+- See [Troubleshooting](/troubleshooting/) for common boot and native build
+  issues.

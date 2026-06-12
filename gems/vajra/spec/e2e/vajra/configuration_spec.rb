@@ -8,6 +8,8 @@
 require_relative 'support'
 require 'tmpdir'
 require 'json'
+require 'open3'
+require 'openssl'
 
 RSpec.describe 'Vajra configuration', :e2e, :integration do
   def post_request(body)
@@ -161,6 +163,215 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
     end
   end
 
+  def write_self_signed_certificate(root)
+    key = OpenSSL::PKey::RSA.new(2048)
+    cert = self_signed_certificate(key)
+
+    cert_path = File.join(root, 'server.crt')
+    key_path = File.join(root, 'server.key')
+    File.write(cert_path, cert.to_pem)
+    File.write(key_path, key.to_pem)
+    [cert_path, key_path]
+  end
+
+  def self_signed_certificate(key)
+    cert = OpenSSL::X509::Certificate.new
+    cert.version = 2
+    cert.serial = 1
+    cert.subject = OpenSSL::X509::Name.parse('/CN=localhost')
+    cert.issuer = cert.subject
+    cert.public_key = key.public_key
+    cert.not_before = Time.now.utc - 60
+    cert.not_after = Time.now.utc + 3600
+    add_self_signed_certificate_extensions(cert)
+    cert.sign(key, OpenSSL::Digest.new('SHA256'))
+    cert
+  end
+
+  def add_self_signed_certificate_extensions(cert)
+    extension_factory = OpenSSL::X509::ExtensionFactory.new
+    extension_factory.subject_certificate = cert
+    extension_factory.issuer_certificate = cert
+    cert.add_extension(extension_factory.create_extension('subjectAltName', 'DNS:localhost,IP:127.0.0.1'))
+    cert.add_extension(extension_factory.create_extension('basicConstraints', 'CA:FALSE', true))
+  end
+
+  def connected_tls_socket(port, alpn_protocols: nil)
+    tcp_socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, port)
+    context = OpenSSL::SSL::SSLContext.new
+    context.verify_mode = OpenSSL::SSL::VERIFY_NONE
+    context.alpn_protocols = alpn_protocols if alpn_protocols
+    ssl_socket = OpenSSL::SSL::SSLSocket.new(tcp_socket, context)
+    ssl_socket.hostname = 'localhost'
+    ssl_socket.connect
+    ssl_socket
+  end
+
+  def with_tls_vajra(script:, cert_path:, key_path:)
+    managed_popen2e(
+      vajra_env(port: disposable_listener_port).merge('TLS_CERTIFICATE' => cert_path, 'TLS_PRIVATE_KEY' => key_path),
+      *inline_ruby_command(script),
+      chdir: VajraE2EHelpers::PACKAGE_ROOT
+    ) do |_stdin, output, wait_thread|
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
+      yield(selected_port, startup_output, output, wait_thread)
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
+  def tls_request_response(script:, cert_path:, key_path:)
+    with_tls_vajra(script:, cert_path:, key_path:) do |selected_port, startup_output, output, wait_thread|
+      ssl_socket = connected_tls_socket(selected_port)
+      ssl_socket.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+      response = ssl_socket.read
+      ssl_socket.close
+      status = stop_process(wait_thread)
+      { exitstatus: status.exitstatus, response:, output: "#{startup_output.join}#{output.read}", port: selected_port }
+    end
+  end
+
+  def h2_integer(value, prefix_bits, prefix_value)
+    prefix_max = (1 << prefix_bits) - 1
+    return [prefix_value | value].pack('C') if value < prefix_max
+
+    bytes = [prefix_value | prefix_max]
+    value -= prefix_max
+    while value >= 128
+      bytes << ((value % 128) + 128)
+      value /= 128
+    end
+    bytes << value
+    bytes.pack('C*')
+  end
+
+  def h2_string(value)
+    h2_integer(value.bytesize, 7, 0) + value
+  end
+
+  def h2_frame(type, flags, stream_id, payload)
+    [payload.bytesize].pack('N')[1, 3] + [type, flags, stream_id & 0x7fff_ffff].pack('CCN') + payload
+  end
+
+  def h2_read_frame(socket)
+    header = socket.read(9)
+    raise 'HTTP/2 frame header missing' unless header&.bytesize == 9
+
+    a, b, c = header.byteslice(0, 3).bytes
+    length = (a << 16) | (b << 8) | c
+    type, flags, stream_id = header.byteslice(3, 6).unpack('CCN')
+    payload = length.zero? ? '' : socket.read(length)
+    { length:, type:, flags:, stream_id: stream_id & 0x7fff_ffff, payload: }
+  end
+
+  def h2_request_header_block
+    header_block = +"\x82".b # :method GET
+    header_block << "\x84".b # :path /
+    header_block << "\x87".b # :scheme https
+    header_block << "\x41".b << h2_string('localhost') # :authority literal
+    header_block
+  end
+
+  def h2_start(socket)
+    socket.write(
+      "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" \
+      "#{h2_frame(4, 0, 0, '')}"
+    )
+
+    Timeout.timeout(5) do
+      loop do
+        frame = h2_read_frame(socket)
+        if frame[:type] == 4 && frame[:flags].nobits?(0x1)
+          socket.write(h2_frame(4, 0x1, 0, ''))
+          return
+        end
+      end
+    end
+  end
+
+  def h2_read_until(socket, type:)
+    Timeout.timeout(5) do
+      loop do
+        frame = h2_read_frame(socket)
+        return frame if frame[:type] == type
+      end
+    end
+  end
+
+  def h2_goaway_error_code(frame)
+    frame.fetch(:payload).byteslice(4, 4).unpack1('N')
+  end
+
+  def h2_rst_stream_error_code(frame)
+    frame.fetch(:payload).unpack1('N')
+  end
+
+  def h2_exchange(socket)
+    socket.write(
+      "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" \
+      "#{h2_frame(4, 0, 0, '')}" \
+      "#{h2_frame(1, 0x5, 1, h2_request_header_block)}"
+    )
+
+    frames = []
+    Timeout.timeout(5) do
+      loop do
+        frame = h2_read_frame(socket)
+        frames << frame
+        socket.write(h2_frame(4, 0x1, 0, '')) if frame[:type] == 4 && frame[:flags].nobits?(0x1)
+        break if frame[:type] == 0 && frame[:flags].anybits?(0x1)
+      end
+    end
+    frames
+  end
+
+  def h2_request_response(script:, cert_path:, key_path:)
+    with_tls_vajra(script:, cert_path:, key_path:) do |selected_port, startup_output, output, wait_thread|
+      ssl_socket = connected_tls_socket(selected_port, alpn_protocols: ['h2'])
+      raise "unexpected ALPN protocol: #{ssl_socket.alpn_protocol.inspect}" unless ssl_socket.alpn_protocol == 'h2'
+
+      frames = h2_exchange(ssl_socket)
+      ssl_socket.close
+      status = stop_process(wait_thread)
+      { exitstatus: status.exitstatus, frames:, output: "#{startup_output.join}#{output.read}", port: selected_port }
+    end
+  end
+
+  def h2_protocol_assertions(script:, cert_path:, key_path:)
+    with_tls_vajra(script:, cert_path:, key_path:) do |selected_port, startup_output, output, wait_thread|
+      yield(selected_port)
+      status = stop_process(wait_thread)
+      { exitstatus: status.exitstatus, output: "#{startup_output.join}#{output.read}", port: selected_port }
+    end
+  end
+
+  def curl_http2_response(script:, cert_path:, key_path:)
+    with_tls_vajra(script:, cert_path:, key_path:) do |selected_port, startup_output, output, wait_thread|
+      stdout, stderr, curl_status = Open3.capture3(
+        'curl',
+        '--http2',
+        '--insecure',
+        '--silent',
+        '--show-error',
+        '--max-time',
+        '5',
+        '--write-out',
+        ["\n", '%', '{http_version}', ' ', '%', '{http_code}'].join,
+        "https://localhost:#{selected_port}/"
+      )
+      status = stop_process(wait_thread)
+      {
+        exitstatus: status.exitstatus,
+        curl_exitstatus: curl_status.exitstatus,
+        stdout:,
+        stderr:,
+        output: "#{startup_output.join}#{output.read}",
+        port: selected_port
+      }
+    end
+  end
+
   def queue_capacity_responses(selected_port, wait_thread, output)
     first_body = 'one'
     sockets = open_request_sockets(selected_port, 3)
@@ -212,6 +423,47 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
         output: "#{startup_output.join}#{runtime_output}#{output.read}"
       }
     ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
+  def max_keepalive_requests_result(env:)
+    managed_popen2e(vajra_env(port: disposable_listener_port).merge(env), *vajra_command, chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
+      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+      buffered_bytes = String.new(encoding: Encoding::BINARY)
+
+      socket.write("GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n")
+      first_response, buffered_bytes = read_http_response(
+        socket,
+        buffered_bytes:,
+        wait_thread:,
+        output:,
+        request_label: 'max_keepalive_requests_result:first'
+      )
+      socket.write("GET /second HTTP/1.1\r\nHost: localhost\r\n\r\n")
+      second_response, buffered_bytes = read_http_response(
+        socket,
+        buffered_bytes:,
+        wait_thread:,
+        output:,
+        request_label: 'max_keepalive_requests_result:second'
+      )
+      connection_closed = Timeout.timeout(2) { socket.read == '' }
+      socket.close
+      status = stop_process(wait_thread)
+
+      {
+        exitstatus: status.exitstatus,
+        first_response:,
+        second_response:,
+        connection_closed:,
+        trailing_bytes: buffered_bytes,
+        output: "#{startup_output.join}#{output.read}"
+      }
+    ensure
+      socket&.close unless socket&.closed?
       cleanup_process(wait_thread, output)
     end
   end
@@ -417,6 +669,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
         threads: [1, 1],
         access_log: ENV.fetch("ACCESS_LOG_PATH"),
         access_log_format: "json",
+        log_level: ENV.fetch("UNSAMPLED_OTEL", "") == "1" ? "info" : "debug",
         structured_logs: true,
         stats_path: "/__vajra/stats",
         trace_enabled: true,
@@ -661,6 +914,18 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
     expect(failure[:output]).to include('Expected an integer between 1 and 2147483647')
   end
 
+  it 'fails startup with actionable VAJRA_MAX_KEEPALIVE_REQUESTS validation errors' do
+    failure = startup_failure_with_config_env('VAJRA_MAX_KEEPALIVE_REQUESTS' => '-1')
+
+    expect(failure).to match(
+      exitstatus: be_positive,
+      output: a_string_including(
+        'Unable to start Vajra: invalid VAJRA_MAX_KEEPALIVE_REQUESTS: -1'
+      )
+    )
+    expect(failure[:output]).to include('Expected an integer between 0 and 2147483647')
+  end
+
   it 'fails startup with actionable Ruby option validation errors' do
     failure = startup_failure_with_inline_start('RUBY_PORT' => '-1')
 
@@ -681,6 +946,44 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
       exitstatus: be_positive,
       output: a_string_including('unknown start option: potr')
     )
+  end
+
+  it 'fails startup when TLS is enabled without certificate credentials' do
+    failure = startup_failure_with_inline_script(<<~RUBY)
+      require "vajra"
+      Vajra.start(tls: true)
+    RUBY
+
+    expect(failure).to match(
+      exitstatus: be_positive,
+      output: a_string_including('Unable to start Vajra: tls requires tls_certificate and tls_private_key')
+    )
+  end
+
+  it 'fails startup when h2 is advertised without HTTP/2 enabled' do
+    Dir.mktmpdir('vajra-invalid-h2') do |root|
+      cert_path, key_path = write_self_signed_certificate(root)
+      failure = startup_failure_with_inline_script(
+        <<~RUBY,
+          require "vajra"
+          Vajra.start(
+            tls: true,
+            tls_certificate: ENV.fetch("TLS_CERTIFICATE"),
+            tls_private_key: ENV.fetch("TLS_PRIVATE_KEY"),
+            alpn_protocols: ["h2", "http/1.1"]
+          )
+        RUBY
+        env: {
+          'TLS_CERTIFICATE' => cert_path,
+          'TLS_PRIVATE_KEY' => key_path
+        }
+      )
+
+      expect(failure).to match(
+        exitstatus: be_positive,
+        output: a_string_including('Unable to start Vajra: alpn_protocols cannot include h2 unless http2 is enabled')
+      )
+    end
   end
 
   it 'fails startup when Vajra.start is invoked from a non-main Ruby thread' do
@@ -959,6 +1262,167 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
     expect(request[:response]).to include('HTTP/1.1 200 OK')
   end
 
+  it 'serves HTTP/1.1 over TLS and exposes the HTTPS Rack scheme' do
+    Dir.mktmpdir('vajra-tls') do |root|
+      cert_path, key_path = write_self_signed_certificate(root)
+      script = <<~RUBY
+        require "vajra"
+
+        Vajra::Internal::RackExecution.install!(
+          lambda do |rack_env|
+            [200, { "Content-Type" => "text/plain" }, [rack_env.fetch("rack.url_scheme")]]
+          end
+        )
+
+        Vajra.start(
+          workers: 1,
+          threads: [1, 1],
+          tls: true,
+          tls_certificate: ENV.fetch("TLS_CERTIFICATE"),
+          tls_private_key: ENV.fetch("TLS_PRIVATE_KEY"),
+          tls_verify_mode: "none",
+          alpn_protocols: ["http/1.1"]
+        )
+      RUBY
+
+      result = tls_request_response(script:, cert_path:, key_path:)
+
+      expect(result[:exitstatus]).to eq(0), result[:output]
+      expect(result[:response]).to include('HTTP/1.1 200 OK')
+      expect(result[:response]).to end_with('https')
+    end
+  end
+
+  it 'serves a basic HTTP/2 request over TLS ALPN' do
+    Dir.mktmpdir('vajra-h2') do |root|
+      cert_path, key_path = write_self_signed_certificate(root)
+      script = <<~RUBY
+        require "vajra"
+
+        Vajra::Internal::RackExecution.install!(
+          lambda do |rack_env|
+            [200, { "Content-Type" => "text/plain" }, ["h2:\#{rack_env.fetch("SERVER_PROTOCOL")}:\#{rack_env.fetch("rack.url_scheme")}"]]
+          end
+        )
+
+        Vajra.start(
+          workers: 1,
+          threads: [1, 1],
+          tls: true,
+          tls_certificate: ENV.fetch("TLS_CERTIFICATE"),
+          tls_private_key: ENV.fetch("TLS_PRIVATE_KEY"),
+          tls_verify_mode: "none",
+          alpn_protocols: ["h2", "http/1.1"],
+          http2: true
+        )
+      RUBY
+
+      result = h2_request_response(script:, cert_path:, key_path:)
+      data_payloads = result[:frames].select { |frame| frame[:type] == 0 }.map { |frame| frame[:payload] }
+
+      expect(result[:exitstatus]).to eq(0), result[:output]
+      expect(data_payloads.join).to eq('h2:HTTP/2:https')
+    end
+  end
+
+  it 'serves a real curl HTTP/2 request over TLS ALPN' do
+    Dir.mktmpdir('vajra-curl-h2') do |root|
+      cert_path, key_path = write_self_signed_certificate(root)
+      script = <<~RUBY
+        require "vajra"
+
+        Vajra::Internal::RackExecution.install!(
+          lambda do |rack_env|
+            [200, { "Content-Type" => "text/plain" }, ["curl:\#{rack_env.fetch("SERVER_PROTOCOL")}:\#{rack_env.fetch("rack.url_scheme")}"]]
+          end
+        )
+
+        Vajra.start(
+          workers: 1,
+          threads: [1, 1],
+          tls: true,
+          tls_certificate: ENV.fetch("TLS_CERTIFICATE"),
+          tls_private_key: ENV.fetch("TLS_PRIVATE_KEY"),
+          tls_verify_mode: "none",
+          alpn_protocols: ["h2", "http/1.1"],
+          http2: true
+        )
+      RUBY
+
+      result = curl_http2_response(script:, cert_path:, key_path:)
+
+      expect(result[:exitstatus]).to eq(0), result[:output]
+      expect(result[:curl_exitstatus]).to eq(0), result[:stderr]
+      expect(result[:stdout]).to include('curl:HTTP/2:https')
+      expect(result[:stdout]).to end_with('2 200')
+    end
+  end
+
+  it 'rejects strict HTTP/2 protocol errors with the expected error frames' do
+    Dir.mktmpdir('vajra-h2-errors') do |root|
+      cert_path, key_path = write_self_signed_certificate(root)
+      script = <<~RUBY
+        require "vajra"
+
+        Vajra::Internal::RackExecution.install!(
+          lambda do |_rack_env|
+            [200, { "Content-Type" => "text/plain" }, ["ok"]]
+          end
+        )
+
+        Vajra.start(
+          workers: 1,
+          threads: [4, 4],
+          tls: true,
+          tls_certificate: ENV.fetch("TLS_CERTIFICATE"),
+          tls_private_key: ENV.fetch("TLS_PRIVATE_KEY"),
+          tls_verify_mode: "none",
+          alpn_protocols: ["h2", "http/1.1"],
+          http2: true
+        )
+      RUBY
+
+      result = h2_protocol_assertions(script:, cert_path:, key_path:) do |selected_port|
+        socket = connected_tls_socket(selected_port, alpn_protocols: ['h2'])
+        h2_start(socket)
+        socket.write(
+          h2_frame(1, 0x4, 1, h2_request_header_block) \
+          + h2_frame(3, 0, 1, [0].pack('N')) \
+          + h2_frame(0, 0x1, 1, 'late')
+        )
+        expect(h2_goaway_error_code(h2_read_until(socket, type: 7))).to eq(5)
+        socket.close
+
+        socket = connected_tls_socket(selected_port, alpn_protocols: ['h2'])
+        h2_start(socket)
+        socket.write(
+          h2_frame(1, 0x5, 5, h2_request_header_block) \
+          + h2_frame(1, 0x5, 3, h2_request_header_block)
+        )
+        expect(h2_goaway_error_code(h2_read_until(socket, type: 7))).to eq(1)
+        socket.close
+
+        socket = connected_tls_socket(selected_port, alpn_protocols: ['h2'])
+        h2_start(socket)
+        socket.write(h2_frame(2, 0, 1, [1, 16].pack('NC')))
+        expect(h2_rst_stream_error_code(h2_read_until(socket, type: 3))).to eq(1)
+        socket.close
+
+        socket = connected_tls_socket(selected_port, alpn_protocols: ['h2'])
+        h2_start(socket)
+        socket.write(
+          h2_frame(1, 0x4, 1, h2_request_header_block) \
+          + h2_frame(8, 0, 1, [0x7fff_ffff].pack('N')) \
+          + h2_frame(8, 0, 1, [0x7fff_ffff].pack('N'))
+        )
+        expect(h2_rst_stream_error_code(h2_read_until(socket, type: 3))).to eq(3)
+        socket.close
+      end
+
+      expect(result[:exitstatus]).to eq(0), result[:output]
+    end
+  end
+
   it 'applies the configured request head timeout to fragmented request headers' do
     result = fragmented_request_result(
       chunks: [
@@ -996,6 +1460,16 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
       status_line: 'HTTP/1.1 200 OK',
       body: 'OK'
     )
+    expect(result[:connection_closed]).to be(true)
+    expect(result[:trailing_bytes]).to eq('')
+  end
+
+  it 'applies the configured max keepalive request cap' do
+    result = max_keepalive_requests_result(env: { 'VAJRA_MAX_KEEPALIVE_REQUESTS' => '2' })
+
+    expect(result[:exitstatus]).to eq(0), result[:output]
+    expect(result[:first_response]).to include(status_line: 'HTTP/1.1 200 OK')
+    expect(result[:second_response]).to include(status_line: 'HTTP/1.1 200 OK')
     expect(result[:connection_closed]).to be(true)
     expect(result[:trailing_bytes]).to eq('')
   end
@@ -1181,6 +1655,14 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
     )
 
     spans = result[:span_lines].map { |line| JSON.parse(line) }
+    lifecycle_span = spans.find { |span| span.fetch('name') == 'vajra.worker_ready' }
+    expect(lifecycle_span).not_to be_nil
+    expect(lifecycle_span.fetch('attributes')).to include(
+      'vajra.worker.index' => 0,
+      'vajra.worker.lifecycle_state' => 'ready',
+      'vajra.worker.health_state' => 'healthy'
+    )
+
     native_error_span = spans.find do |span|
       span.fetch('attributes')['vajra.request.outcome'] == 'request_parse_error'
     end

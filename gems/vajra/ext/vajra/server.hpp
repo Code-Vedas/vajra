@@ -8,7 +8,9 @@
 
 #include <cstddef>
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -40,9 +42,11 @@ namespace Vajra
         int inherited_listener_fd = -1,
         int request_head_timeout_seconds = 5,
         int first_data_timeout_seconds = 30,
+        int request_body_timeout_seconds = request::kDefaultRequestBodyTimeoutSeconds,
         int persistent_timeout_seconds = 30,
         std::size_t max_connections = 256,
-        std::function<void()> shutdown_begin_callback = {});
+        std::function<void()> shutdown_begin_callback = {},
+        std::size_t max_request_body_bytes = request::kDefaultMaxRequestBodyBytes);
     ~Server();
 
     void start();
@@ -54,13 +58,20 @@ namespace Vajra
     struct ActiveClientRegistration
     {
       int original_fd;
-      int interrupt_fd;
+      bool open;
+      std::size_t descriptor_count;
     };
 
     struct HandlerThread
     {
       std::thread thread;
-      std::shared_ptr<std::atomic<bool>> completed;
+    };
+
+    struct PendingClient
+    {
+      int fd;
+      request::SocketContext socket_context;
+      std::uint64_t token;
     };
 
     std::string host_;
@@ -75,17 +86,27 @@ namespace Vajra
     std::string request_execution_role_;
     bool debug_logging_;
     std::size_t max_connections_;
+    std::size_t max_tracked_client_descriptors_;
     std::atomic<std::size_t> active_connection_count_{0};
+    std::size_t active_tracked_client_descriptors_ = 0;
     std::function<void()> shutdown_begin_callback_;
     std::mutex handler_threads_mutex_;
     std::vector<HandlerThread> handler_threads_;
+    std::mutex connection_queue_mutex_;
+    std::condition_variable connection_queue_condition_;
+    std::deque<PendingClient> pending_clients_;
+    bool connection_workers_stopping_ = false;
     std::mutex active_client_fds_mutex_;
     std::unordered_map<std::uint64_t, ActiveClientRegistration> active_client_fds_;
     std::atomic<std::uint64_t> next_active_client_token_{0};
 
     void close_listener_fd(bool interrupt_accept);
+    void start_handler_threads();
     void join_handler_threads();
     void reap_completed_handler_threads();
+    void enqueue_pending_client(PendingClient client);
+    void run_handler_thread();
+    void handle_pending_client(PendingClient client);
     std::uint64_t register_active_client_fd(int client_fd);
     void unregister_active_client_fd(int client_fd, std::uint64_t client_token);
     void interrupt_active_client_sockets() noexcept;

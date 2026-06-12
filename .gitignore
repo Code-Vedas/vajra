@@ -13,3 +13,4 @@ gems/vajra/lib/vajra/*.bundle
 gems/vajra/ext/vajra/Makefile
 *.gem
 *.log
+.agents/

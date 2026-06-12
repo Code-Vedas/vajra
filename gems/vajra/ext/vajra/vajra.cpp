@@ -6,6 +6,8 @@
 #include "vajra.hpp"
 
 #include "rack/rack_request_executor.hpp"
+#include "rack/ruby_execution_bridge.hpp"
+#include "rack/ruby_rack_transport.hpp"
 #include "runtime/boot_contract.hpp"
 #include "runtime/runtime_config.hpp"
 #include "runtime/runtime_logging.hpp"
@@ -15,8 +17,29 @@
 #include <string>
 #include <vector>
 
+#if defined(__linux__) && __has_include(<malloc.h>)
+#include <malloc.h>
+#endif
+
 namespace
 {
+#if defined(__linux__) && __has_include(<malloc.h>)
+  void configure_linux_malloc_retention()
+  {
+#ifdef M_ARENA_MAX
+    (void)mallopt(M_ARENA_MAX, 4);
+#endif
+#ifdef M_TRIM_THRESHOLD
+    (void)mallopt(M_TRIM_THRESHOLD, 256 * 1024);
+#endif
+#ifdef M_TOP_PAD
+    (void)mallopt(M_TOP_PAD, 64 * 1024);
+#endif
+  }
+#else
+  void configure_linux_malloc_retention() {}
+#endif
+
   [[noreturn]] void raise_ruby_runtime_error(const char *context, const std::exception &error)
   {
     rb_raise(rb_eRuntimeError, "%s: %s", context, error.what());
@@ -30,6 +53,7 @@ namespace
       VALUE options = Qnil;
       rb_scan_args(argc, argv, "0:", &options);
       const Vajra::runtime::RuntimeConfig config = Vajra::runtime::RuntimeConfigLoader::configured_runtime(options);
+      Vajra::rack::RubyExecutionBridge::set_multithread(config.max_threads > 1);
       VajraNative::start(
           config.host,
           config.port,
@@ -39,11 +63,26 @@ namespace
           config.max_connections,
           config.socket_queue_capacity,
           config.max_request_head_bytes,
+          config.max_request_body_bytes,
+          config.max_keepalive_requests,
           config.request_timeout_seconds,
           config.request_head_timeout_seconds,
           config.first_data_timeout_seconds,
+          config.request_body_timeout_seconds,
           config.persistent_timeout_seconds,
           config.worker_timeout_seconds,
+          config.tls,
+          config.tls_certificate,
+          config.tls_private_key,
+          config.tls_ca_certificate,
+          config.tls_verify_mode,
+          config.tls_min_version,
+          config.alpn_protocols,
+          config.http2,
+          config.http2_max_concurrent_streams,
+          config.http2_initial_window_size,
+          config.http2_max_frame_size,
+          config.http2_header_table_size,
           config.log_level,
           config.access_log,
           config.error_log,
@@ -72,6 +111,7 @@ namespace
     try
     {
       VajraNative::stop();
+      Vajra::rack::shutdown_same_process_rack_execution_threads();
     }
     catch (const std::exception &error)
     {
@@ -93,6 +133,13 @@ namespace
     (void)self;
     Vajra::rack::set_rack_execution_app(app);
     return app;
+  }
+
+  VALUE rb_rack_execution_native_configure_threads(VALUE self, VALUE max_threads)
+  {
+    (void)self;
+    Vajra::rack::configure_same_process_rack_execution_threads(NUM2SIZET(max_threads));
+    return max_threads;
   }
 
   VALUE rb_boot_native_set_callback(VALUE self, VALUE callback)
@@ -188,6 +235,7 @@ namespace
 
 extern "C" void Init_vajra()
 {
+  configure_linux_malloc_retention();
   Vajra::runtime::RuntimeConfigLoader::initialize_ids();
   Vajra::runtime::BootContract::initialize_ids();
   Vajra::rack::initialize_rack_execution_bridge();
@@ -214,6 +262,11 @@ extern "C" void Init_vajra()
       mRackExecution,
       "__native_set_app__",
       RUBY_METHOD_FUNC(rb_rack_execution_native_set_app),
+      1);
+  rb_define_singleton_method(
+      mRackExecution,
+      "__native_configure_threads__",
+      RUBY_METHOD_FUNC(rb_rack_execution_native_configure_threads),
       1);
   rb_define_singleton_method(
       mTracing,

@@ -1,0 +1,79 @@
+#!/bin/sh
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
+
+if [ "${IN_VAJRA_DOCKER:-}" = "1" ]; then
+  if [ "$#" -eq 0 ]; then
+    set -- scripts/run-all
+  fi
+  exec "$@"
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "Docker is required when DOCKER=1 is set." >&2
+  exit 127
+fi
+
+if [ "$#" -eq 0 ]; then
+  set -- scripts/run-all
+fi
+
+image_name="${VAJRA_DOCKER_IMAGE:-vajra-test:local}"
+dockerfile="${VAJRA_DOCKERFILE:-${REPO_ROOT}/Dockerfile.test}"
+bundle_path="${VAJRA_DOCKER_BUNDLE_PATH:-/workspace/tmp/docker/vendor/bundle}"
+bundle_app_config="${VAJRA_DOCKER_BUNDLE_APP_CONFIG:-/workspace/tmp/docker/bundle-config}"
+home_dir="${VAJRA_DOCKER_HOME:-/tmp/vajra-home}"
+user_flag=""
+tty_flag=""
+
+if [ "${VAJRA_DOCKER_BUILD:-1}" != "0" ]; then
+  docker build -f "${dockerfile}" -t "${image_name}" "${REPO_ROOT}"
+fi
+
+if [ "${VAJRA_DOCKER_USER:-1}" = "1" ]; then
+  user_flag="--user $(id -u):$(id -g)"
+fi
+
+if [ -t 1 ]; then
+  tty_flag="-t"
+fi
+
+# shellcheck disable=SC2086
+docker run --rm ${tty_flag} ${user_flag} \
+  -e IN_VAJRA_DOCKER=1 \
+  -e DOCKER=1 \
+  -e CI="${CI:-1}" \
+  -e HOME="${home_dir}" \
+  -e BUNDLE_PATH="${bundle_path}" \
+  -e BUNDLE_APP_CONFIG="${bundle_app_config}" \
+  -v "${REPO_ROOT}:/workspace" \
+  -w /workspace \
+  "${image_name}" \
+  /bin/bash -lc '
+    mkdir -p "${HOME}" "${BUNDLE_PATH}" "${BUNDLE_APP_CONFIG}"
+    if ! getent passwd "$(id -u)" >/dev/null 2>&1; then
+      nss_wrapper=$(find /usr/lib -name libnss_wrapper.so -print -quit 2>/dev/null || true)
+      if [ -n "${nss_wrapper}" ]; then
+        passwd_file="${HOME}/passwd"
+        group_file="${HOME}/group"
+        cp /etc/passwd "${passwd_file}"
+        cp /etc/group "${group_file}"
+        printf "vajra:x:%s:%s:Vajra Docker User:%s:/bin/bash\n" "$(id -u)" "$(id -g)" "${HOME}" >> "${passwd_file}"
+        if ! getent group "$(id -g)" >/dev/null 2>&1; then
+          printf "vajra:x:%s:\n" "$(id -g)" >> "${group_file}"
+        fi
+        export NSS_WRAPPER_PASSWD="${passwd_file}"
+        export NSS_WRAPPER_GROUP="${group_file}"
+        export LD_PRELOAD="${LD_PRELOAD:+${LD_PRELOAD}:}${nss_wrapper}"
+      fi
+    fi
+    scripts/ci-install-bundles && exec "$@"
+  ' \
+  vajra-docker "$@"

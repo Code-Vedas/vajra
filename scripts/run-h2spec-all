@@ -1,0 +1,94 @@
+#!/bin/sh
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "${SCRIPT_DIR}/run-common"
+
+run_h2spec_suite() {
+  if ! command -v h2spec >/dev/null 2>&1; then
+    echo "h2spec is required. Install with: go install github.com/summerwind/h2spec/cmd/h2spec@latest"
+    return 127
+  fi
+
+  port=$(
+    ruby -rsocket -e 'server = TCPServer.new("127.0.0.1", 0); puts server.addr[1]; server.close'
+  )
+  tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/vajra-h2spec.XXXXXX")
+  app_file="${tmp_root}/app.rb"
+  server_log="${tmp_root}/server.log"
+  server_pid=""
+
+  cleanup_h2spec_server() {
+    if [ "${server_pid}" != "" ] && kill -0 "${server_pid}" >/dev/null 2>&1; then
+      kill "${server_pid}" >/dev/null 2>&1 || true
+      wait "${server_pid}" >/dev/null 2>&1 || true
+    fi
+    rm -rf "${tmp_root}"
+  }
+  trap cleanup_h2spec_server EXIT HUP INT TERM
+
+  cat >"${app_file}" <<'RUBY'
+require "vajra"
+
+Vajra::Internal::RackExecution.install!(
+  lambda do |env|
+    body = "h2spec:#{env.fetch("SERVER_PROTOCOL")}:#{env.fetch("rack.url_scheme")}"
+    [200, { "Content-Type" => "text/plain" }, [body]]
+  end
+)
+
+Vajra.start(
+  workers: 1,
+  threads: [8, 8],
+  http2: true,
+  log_level: "warn"
+)
+RUBY
+
+  VAJRA_PORT="${port}" ruby -Ilib "${app_file}" >"${server_log}" 2>&1 &
+  server_pid=$!
+
+  ready=0
+  attempt=0
+  while [ "${attempt}" -lt 100 ]; do
+    if ! kill -0 "${server_pid}" >/dev/null 2>&1; then
+      cat "${server_log}"
+      echo "Vajra exited before h2spec could run"
+      return 1
+    fi
+    if grep -q "Use Ctrl-C to stop" "${server_log}"; then
+      ready=1
+      break
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.05
+  done
+
+  if [ "${ready}" -ne 1 ]; then
+    cat "${server_log}"
+    echo "Timed out waiting for Vajra h2spec server"
+    return 1
+  fi
+
+  h2spec_status=0
+  if [ "${H2SPEC_ARGS:-}" != "" ]; then
+    # shellcheck disable=SC2086
+    h2spec -h 127.0.0.1 -p "${port}" -o "${H2SPEC_TIMEOUT_SECONDS:-5}" ${H2SPEC_ARGS} || h2spec_status=$?
+  else
+    h2spec -h 127.0.0.1 -p "${port}" -o "${H2SPEC_TIMEOUT_SECONDS:-5}" || h2spec_status=$?
+  fi
+  if [ "${h2spec_status}" -ne 0 ]; then
+    cat "${server_log}"
+    return "${h2spec_status}"
+  fi
+}
+
+ruby_suites | while IFS= read -r suite_dir; do
+  prepare_native_extension_if_needed "${suite_dir}" "rspec-e2e"
+  with_repo_dir "${suite_dir}" run_cmd "$(suite_name "${suite_dir}")-h2spec" run_h2spec_suite
+done

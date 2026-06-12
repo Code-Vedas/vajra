@@ -619,8 +619,8 @@ module Vajra
       def current_trace_context(span = current_span)
         context = span_context_for(span)
         compact_attributes(
-          trace_id: trace_context_value(context, :trace_id, :hex_trace_id),
-          span_id: trace_context_value(context, :span_id, :hex_span_id)
+          trace_id: trace_context_value(context, :hex_trace_id, :trace_id),
+          span_id: trace_context_value(context, :hex_span_id, :span_id)
         )
       end
 
@@ -634,13 +634,13 @@ module Vajra
       end
       private_class_method :span_context_for
 
-      def trace_context_value(context, primary, fallback)
+      def trace_context_value(context, preferred, alternate)
         return nil unless context
 
-        value = context.public_send(fallback) if context.respond_to?(fallback)
+        value = context.public_send(preferred) if context.respond_to?(preferred)
         return value.to_s unless value.nil?
 
-        value = context.public_send(primary) if context.respond_to?(primary)
+        value = context.public_send(alternate) if context.respond_to?(alternate)
         value&.to_s
       end
       private_class_method :trace_context_value

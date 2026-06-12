@@ -549,7 +549,7 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
   catch (const QueueCapacityError &error)
   {
     const auto rejection_response = response_writer_.queue_capacity_response();
-    const bool response_sent = reject_request_queue_capacity(client_fd, error);
+    const bool response_sent = reject_request_queue_capacity(client_fd, error, rejection_response);
     const auto event = access_event_for(
         request_context,
         rejection_response.status.code,
@@ -563,7 +563,7 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
   catch (const RequestTimeoutError &error)
   {
     const auto rejection_response = response_writer_.request_timeout_response();
-    const bool response_sent = reject_request_timeout(client_fd, error);
+    const bool response_sent = reject_request_timeout(client_fd, error, rejection_response);
     const auto event = access_event_for(
         request_context,
         rejection_response.status.code,
@@ -577,7 +577,7 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
   catch (const std::exception &error)
   {
     const auto rejection_response = response_writer_.internal_server_error_response();
-    const bool response_sent = reject_request_execution(client_fd, error);
+    const bool response_sent = reject_request_execution(client_fd, error, rejection_response);
     const auto event = access_event_for(
         request_context,
         rejection_response.status.code,
@@ -654,11 +654,6 @@ Vajra::response::Response Vajra::request::RequestProcessor::response_for(
   return *response;
 }
 
-bool Vajra::request::RequestProcessor::reject_request_head(int client_fd, const HeadError &error) const
-{
-  return reject_request_head(client_fd, error, response_writer_.request_head_failure_response(error.kind()));
-}
-
 bool Vajra::request::RequestProcessor::reject_request_head(
     int client_fd,
     const HeadError &error,
@@ -668,30 +663,37 @@ bool Vajra::request::RequestProcessor::reject_request_head(
   return response_writer_.send(client_fd, response);
 }
 
-bool Vajra::request::RequestProcessor::reject_request_execution(int client_fd, const std::exception &error) const
+bool Vajra::request::RequestProcessor::reject_request_execution(
+    int client_fd,
+    const std::exception &error,
+    const Vajra::response::Response &response) const
 {
   std::ostringstream message;
   message << "request execution failed: client_fd=" << client_fd << " error=" << error.what();
   log_request_error(message.str());
-  return response_writer_.send(client_fd, response_writer_.internal_server_error_response());
+  return response_writer_.send(client_fd, response);
 }
 
 bool Vajra::request::RequestProcessor::reject_request_queue_capacity(
     int client_fd,
-    const QueueCapacityError &error) const
+    const QueueCapacityError &error,
+    const Vajra::response::Response &response) const
 {
   std::ostringstream message;
   message << "request queue capacity reached: client_fd=" << client_fd << " error=" << error.what();
   log_request_error(message.str());
-  return response_writer_.send(client_fd, response_writer_.queue_capacity_response());
+  return response_writer_.send(client_fd, response);
 }
 
-bool Vajra::request::RequestProcessor::reject_request_timeout(int client_fd, const RequestTimeoutError &error) const
+bool Vajra::request::RequestProcessor::reject_request_timeout(
+    int client_fd,
+    const RequestTimeoutError &error,
+    const Vajra::response::Response &response) const
 {
   std::ostringstream message;
   message << "request timed out: client_fd=" << client_fd << " error=" << error.what();
   log_request_error(message.str());
-  return response_writer_.send(client_fd, response_writer_.request_timeout_response());
+  return response_writer_.send(client_fd, response);
 }
 
 Vajra::response::ConnectionBehavior Vajra::request::RequestProcessor::connection_behavior_for(

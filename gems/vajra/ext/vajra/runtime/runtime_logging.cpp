@@ -2222,11 +2222,13 @@ bool Vajra::runtime::runtime_trace_sampled(const std::string &traceparent)
   {
     return false;
   }
-  const bool tracecontext_enabled = tracecontext_propagator_snapshot.load(std::memory_order_acquire);
-  const int parent_sampled = tracecontext_enabled ? traceparent_sample_flag(traceparent) : -1;
-  if (parent_sampled >= 0)
+  if (!traceparent.empty() && tracecontext_propagator_snapshot.load(std::memory_order_acquire))
   {
-    return parent_sampled == 1;
+    const int parent_sampled = traceparent_sample_flag(traceparent);
+    if (parent_sampled >= 0)
+    {
+      return parent_sampled == 1;
+    }
   }
 
   const std::uint64_t threshold = trace_sample_threshold.load(std::memory_order_acquire);

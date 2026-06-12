@@ -64,14 +64,22 @@ namespace Vajra
       Vajra::response::Response response_for(
           const RequestContext &request_context,
           Vajra::response::ConnectionBehavior connection_behavior) const;
-      bool reject_request_head(int client_fd, const HeadError &error) const;
       bool reject_request_head(
           int client_fd,
           const HeadError &error,
           const Vajra::response::Response &response) const;
-      bool reject_request_queue_capacity(int client_fd, const QueueCapacityError &error) const;
-      bool reject_request_timeout(int client_fd, const RequestTimeoutError &error) const;
-      bool reject_request_execution(int client_fd, const std::exception &error) const;
+      bool reject_request_queue_capacity(
+          int client_fd,
+          const QueueCapacityError &error,
+          const Vajra::response::Response &response) const;
+      bool reject_request_timeout(
+          int client_fd,
+          const RequestTimeoutError &error,
+          const Vajra::response::Response &response) const;
+      bool reject_request_execution(
+          int client_fd,
+          const std::exception &error,
+          const Vajra::response::Response &response) const;
 
       HeadReader request_head_reader_;
       RequestHeadParser request_head_parser_;

@@ -133,6 +133,8 @@ module Vajra
       TRACE_STATE: TraceState
 
       def self.install_from_start_options!: (start_options) -> bool
+      def self.shutdown!: () -> void
+      def self.after_fork!: () -> void
       def self.with_request_span: [T] (Hash[String, rack_env_value]) { () -> T } -> T
       def self.emit_lifecycle_span: (lifecycle_event) -> nil
       def self.emit_native_request_span: (native_request_event) -> void

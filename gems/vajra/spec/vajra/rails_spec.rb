@@ -63,6 +63,65 @@ RSpec.describe Vajra::Rails do
     expect(application.initialize_calls).to eq(0)
   end
 
+  it 'initializes uninitialized Rails applications inside the executor when available' do
+    executor = Class.new do
+      attr_reader :wrap_calls
+
+      def initialize
+        @wrap_calls = 0
+      end
+
+      def wrap
+        @wrap_calls += 1
+        yield
+      end
+    end.new
+    application = build_application
+    application.define_singleton_method(:executor) { executor }
+    stub_const('Rails', Module.new)
+    Rails.singleton_class.send(:define_method, :application) { application }
+
+    expect(described_class.install!).to equal(application)
+
+    expect(application.initialized?).to be(true)
+    expect(application.initialize_calls).to eq(1)
+    expect(executor.wrap_calls).to eq(1)
+  end
+
+  it 'uses the current Rails application executor when the explicit application matches' do
+    executor = Class.new do
+      attr_reader :wrap_calls
+
+      def initialize
+        @wrap_calls = 0
+      end
+
+      def wrap
+        @wrap_calls += 1
+        yield
+      end
+    end.new
+    application = build_application
+    stub_const('Rails', Module.new)
+    Rails.singleton_class.send(:define_method, :application) { application }
+    method_executor_calls = 0
+    application.singleton_class.send(:define_method, :method) do |name|
+      if name == :executor
+        method_executor_calls += 1
+        raise NameError, name.to_s if method_executor_calls == 1
+      end
+
+      super(name)
+    end
+    application.singleton_class.send(:define_method, :executor) { executor }
+
+    expect(described_class.install!(application)).to equal(application)
+
+    expect(application.initialized?).to be(true)
+    expect(application.initialize_calls).to eq(1)
+    expect(executor.wrap_calls).to eq(1)
+  end
+
   it 'accepts an explicit Rails application argument' do
     application = build_application
 

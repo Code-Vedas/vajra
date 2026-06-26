@@ -1,0 +1,3 @@
+nghttp2 1.69.0 is vendored from https://github.com/nghttp2/nghttp2/releases/tag/v1.69.0.
+Only libnghttp2 C sources, internal headers, public headers, and license metadata are included.
+The upstream project is licensed under the MIT license; see COPYING in this directory.

@@ -43,13 +43,19 @@ module Vajra
       interface _BootCoordinator
         def call: (coordinator_boot_request) -> (boot_result_hash | raw_boot_result | raw_boot_status)
       end
-      type boot_coordinator = _BootCoordinator | Method
+      type boot_coordinator = _BootCoordinator
 
       STATUSES: Hash[Symbol, String]
       SINGLE_PROCESS_BOOTSTRAP_ROLE: String
 
       class BootContractError < StandardError
       end
+
+      class BootState < ::Struct[boot_coordinator?]
+        attr_accessor coordinator: boot_coordinator?
+      end
+
+      BOOT_STATE: BootState
 
       def self.install!: (?boot_coordinator) -> boot_coordinator
       def self.uninstall!: () -> nil

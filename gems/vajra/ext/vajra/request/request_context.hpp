@@ -8,10 +8,17 @@
 
 #include "request_head_types.hpp"
 
+#include <memory>
 #include <string>
 
 namespace Vajra
 {
+  namespace rack
+  {
+    struct Http2StreamState;
+    class NativeHijackTransport;
+  }
+
   namespace request
   {
     struct SocketContext
@@ -29,6 +36,8 @@ namespace Vajra
       SocketContext socket;
       int client_fd = -1;
       std::string request_body = "";
+      std::shared_ptr<Vajra::rack::Http2StreamState> http2_stream;
+      std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport;
     };
   }
 }

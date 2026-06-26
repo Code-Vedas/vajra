@@ -170,6 +170,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
             build-essential git libyaml-dev pkg-config
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.25.x
+      - name: Install h2spec
+        run: |
+          go install github.com/summerwind/h2spec/cmd/h2spec@latest
+          echo "${HOME}/go/bin" >> "${GITHUB_PATH}"
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
@@ -188,6 +196,8 @@ jobs:
           CI_RUBY_VERSION: ${{ matrix.ruby_version }}
       - name: Run e2e tests
         run: scripts/run-rspec-e2e-all
+      - name: Run HTTP/2 h2spec conformance tests
+        run: scripts/run-h2spec-all
 
   build_package:
     name: Build Package

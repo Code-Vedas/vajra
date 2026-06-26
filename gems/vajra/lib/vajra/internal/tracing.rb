@@ -45,6 +45,8 @@ module Vajra
         :propagators,
         keyword_init: true
       )
+      # Lightweight flag shared with the native request observability callback.
+      RequestSpanObservabilityState = Struct.new(:active, keyword_init: true)
       TRACE_MUTEX = Mutex.new
       TRACE_STATE = TraceState.new(
         enabled: false,
@@ -61,6 +63,7 @@ module Vajra
         request_observability_stop: false,
         propagators: 'tracecontext,baggage'
       )
+      REQUEST_SPAN_OBSERVABILITY_STATE = RequestSpanObservabilityState.new(active: false)
       INTERNAL_TRACE_ID_HEADER = 'X-Vajra-Internal-Trace-Id'
       INTERNAL_SPAN_ID_HEADER = 'X-Vajra-Internal-Span-Id'
       REQUEST_OBSERVABILITY_BATCH_SIZE = 4096
@@ -161,6 +164,8 @@ module Vajra
       end
 
       def with_request_span(env, &)
+        return yield unless request_span_observability_active?
+
         tracer, metrics_available = TRACE_MUTEX.synchronize do
           [
             TRACE_STATE.tracer,
@@ -446,6 +451,10 @@ module Vajra
           TRACE_STATE.request_duration = request_duration
           TRACE_STATE.active_requests = active_requests
           TRACE_STATE.metric_instruments = metric_instruments
+          set_request_span_observability_active!(
+            !TRACE_STATE.tracer.equal?(nil) ||
+              [request_counter, request_duration, active_requests].any?
+          )
         end
       end
       private_class_method :install_metric_instruments
@@ -515,7 +524,7 @@ module Vajra
 
         span = tracer.start_span(name, **options, with_parent: parent_context)
         OpenTelemetry::Trace.with_span(span) { |active_span, _context| yield active_span }
-      rescue Exception => e # rubocop:disable Lint/RescueException
+      rescue StandardError => e
         span.record_exception(e) if !span.nil? && span.respond_to?(:record_exception)
         record_span_error(span, "Unhandled exception of type: #{e.class}") if span
         raise
@@ -772,9 +781,20 @@ module Vajra
           TRACE_STATE.active_requests = nil unless meter
           TRACE_STATE.metric_instruments = {} unless meter
           TRACE_STATE.propagators = propagators
+          set_request_span_observability_active!(!tracer.equal?(nil) || !meter.equal?(nil))
         end
       end
       private_class_method :write_trace_state
+
+      def request_span_observability_active?
+        REQUEST_SPAN_OBSERVABILITY_STATE.active == true
+      end
+      private_class_method :request_span_observability_active?
+
+      def set_request_span_observability_active!(active)
+        REQUEST_SPAN_OBSERVABILITY_STATE.active = active == true
+      end
+      private_class_method :set_request_span_observability_active!
 
       def native_request_attributes(event)
         protocol_name, protocol_version = protocol_attributes('SERVER_PROTOCOL' => event[:protocol])

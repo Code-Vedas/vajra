@@ -25,10 +25,7 @@ module Vajra
       array: %i[threads alpn_protocols].freeze,
       integer: %i[
         port
-        backlog
         workers
-        worker_boot_timeout
-        worker_shutdown_timeout
         worker_timeout
         max_request_head_bytes
         request_timeout
@@ -38,21 +35,15 @@ module Vajra
         request_head_timeout
         request_body_timeout
         max_keepalive_requests
-        linger_timeout
         max_connections
         socket_queue_capacity
-        max_requests_per_worker
         http2_max_concurrent_streams
         http2_initial_window_size
         http2_max_frame_size
         http2_header_table_size
-        drain_timeout
-        shutdown_timeout
       ].freeze,
       string: %i[
         host
-        bind
-        unix_socket
         tls_certificate
         tls_private_key
         tls_ca_certificate
@@ -66,14 +57,8 @@ module Vajra
         metrics_endpoint
         trace_endpoint
         trace_service_name
-        pidfile
-        state_path
-        control_socket
       ].freeze,
       boolean: %i[
-        reuse_port
-        preload_app
-        phased_restart
         tls
         http2
         structured_logs
@@ -98,8 +83,6 @@ module Vajra
     }.freeze
 
     def with_config_target(target)
-      current_thread = nil
-      previous_target = nil
       current_thread = config_target_thread
       previous_target = current_thread[:vajra_config_target] if current_thread
       current_thread[:vajra_config_target] = target if current_thread

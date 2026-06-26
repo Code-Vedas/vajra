@@ -12,7 +12,9 @@
 #include "request/request_head_types.hpp"
 #include "response/response.hpp"
 
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <string>
 #include <vector>

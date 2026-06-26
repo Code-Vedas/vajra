@@ -67,6 +67,59 @@ RSpec.describe 'Vajra lifecycle', :e2e, :integration do
     )
   end
 
+  it 'drains an active Rack request before worker shutdown exits' do
+    script = <<~RUBY
+      require "vajra"
+
+      Vajra::Internal::RackExecution.install!(
+        lambda do |_env|
+          STDERR.puts "rack-app-started"
+          STDERR.flush
+          sleep 0.25
+          [200, { "Content-Type" => "text/plain" }, ["drained"]]
+        end
+      )
+
+      Vajra.start(worker_timeout: 3)
+    RUBY
+
+    managed_popen2e(vajra_env(port: disposable_listener_port), *inline_ruby_command(script),
+                    chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
+
+      socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+      socket.write("GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+      runtime_output = +''
+      Timeout.timeout(2) do
+        loop do
+          runtime_output << read_available_output(output)
+          break if runtime_output.include?('rack-app-started')
+
+          sleep 0.01
+        end
+      end
+
+      signal_process_group(wait_thread, 'INT')
+      immediate_output = wait_for_graceful_shutdown_banner(output, wait_thread)
+      response = read_raw_http_response(socket, wait_thread:, output:, request_label: 'active_drain_shutdown')
+      socket.close
+      status = wait_for_exit(wait_thread, timeout: 5)
+
+      expect(status.exitstatus).to eq(0)
+      expect(response).to include('HTTP/1.1 200 OK')
+      expect(response).to end_with('drained')
+      expect("#{startup_output.join}#{runtime_output}#{immediate_output}#{output.read}").to include(
+        '- Gracefully shutting down workers...',
+        '=== vajra shutdown:',
+        '- Goodbye!'
+      )
+    ensure
+      socket.close unless socket.nil? || socket.closed?
+      cleanup_process(wait_thread, output)
+    end
+  end
+
   it 'interrupts an idle keep-alive socket during Ctrl-C drain' do
     shutdown = keep_alive_shutdown_with_open_socket
 
@@ -86,7 +139,12 @@ RSpec.describe 'Vajra lifecycle', :e2e, :integration do
       followup_chunks: [
         "GET /next HTTP/1.1\r\n",
         "Host: localhost\r\n"
-      ]
+      ],
+      env: {
+        'VAJRA_REQUEST_HEAD_TIMEOUT' => '30',
+        'VAJRA_WORKER_TIMEOUT' => '3'
+      },
+      exit_timeout: 8
     )
 
     expect(shutdown[:exitstatus]).to eq(0)

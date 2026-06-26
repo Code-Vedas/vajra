@@ -1,0 +1,12 @@
+.git
+.ruby-lsp
+tmp
+vendor/bundle
+gems/vajra/tmp
+gems/vajra/pkg
+gems/vajra/coverage
+gems/vajra/log
+gems/vajra/performance/tmp
+docs/_site
+docs/.ruby-lsp
+.DS_Store

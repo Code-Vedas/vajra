@@ -59,12 +59,12 @@ for installation, runtime behavior, operations, and troubleshooting.
 Start with:
 
 - [`docs/index.md`](docs/index.md)
-- [`docs/pages/getting-started.md`](docs/pages/getting-started.md)
-- [`docs/pages/installation.md`](docs/pages/installation.md)
-- [`docs/pages/runtime-model.md`](docs/pages/runtime-model.md)
-- [`docs/pages/architecture.md`](docs/pages/architecture.md)
-- [`docs/pages/troubleshooting.md`](docs/pages/troubleshooting.md)
-- [`docs/pages/development.md`](docs/pages/development.md)
+- [`docs/pages/02-installation.md`](docs/pages/02-installation.md)
+- [`docs/pages/03-configuration.md`](docs/pages/03-configuration.md)
+- [`docs/pages/04-architecture/02-runtime-model.md`](docs/pages/04-architecture/02-runtime-model.md)
+- [`docs/pages/04-architecture.md`](docs/pages/04-architecture.md)
+- [`docs/pages/06-troubleshooting.md`](docs/pages/06-troubleshooting.md)
+- [`docs/pages/05-development.md`](docs/pages/05-development.md)
 
 ## Contributing
 

@@ -8,8 +8,8 @@ AllCops:
   NewCops: enable
   TargetRubyVersion: 3.2
   Exclude:
-    - 'tmp/**/*'
-    - 'performance/tmp/**/*'
+    - tmp/**/*
+    - performance/tmp/**/*
 
 Layout/LineLength:
   Max: 160
@@ -100,3 +100,4 @@ RSpec/DescribeClass:
     - spec/e2e/vajra/rack_env_integration_spec.rb
     - spec/e2e/vajra/runtime_contract_spec.rb
     - spec/vajra/railtie_spec.rb
+    - spec/e2e/vajra/h2c_integration_spec.rb

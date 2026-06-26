@@ -4,6 +4,40 @@
 # LICENSE file in the root directory of this source tree.
 
 module Vajra
+  class NativeInput
+    def self.from_string: (String) -> NativeInput
+    def initialize: (?memory_limit: Integer) -> void
+    def read: (?Integer? length, ?String? outbuf) -> String?
+    def gets: (?String? separator) -> String?
+    def each: () { (String) -> void } -> self
+            | () -> Enumerator[String, self]
+    def rewind: () -> Integer
+    def close: () -> nil
+    def external_encoding: () -> Encoding
+  end
+
+  class NativeHijack
+    def call: () -> IO
+  end
+
+  module HTTP2
+    interface _HeaderValue
+      def to_s: () -> String
+    end
+
+    class Stream
+      def accept: (?Integer status, ?Hash[String | Symbol, _HeaderValue] headers) -> self
+      def read: (?Integer? length, ?String? outbuf) -> String?
+      def write: (String chunk) -> Integer
+      def flush: () -> nil
+      def close: () -> nil
+      def reset: (?Integer error_code) -> nil
+      def closed?: () -> bool
+      def protocol: () -> String
+      def stream_id: () -> Integer
+    end
+  end
+
   module Internal
     module RackExecution
       interface _RackHeaderValue
@@ -11,7 +45,15 @@ module Vajra
       end
 
       interface _RackApp
-        def call: (Hash[String, String | bool | IO | StringIO | Array[Integer]]) -> [Integer | String, Hash[String | Symbol, _RackHeaderValue] | Array[[String | Symbol, _RackHeaderValue]] | _RackHeaders, Array[String] | _RackBody]
+        def call: (Hash[String, String | bool | IO | _RackInput | NativeHijack | HTTP2::Stream | Array[Integer]]) -> [Integer | String, Hash[String | Symbol, _RackHeaderValue] | Array[[String | Symbol, _RackHeaderValue]] | _RackHeaders, Array[String] | _RackBody]
+      end
+
+      interface _RackInput
+        def read: (?Integer? length, ?String? outbuf) -> String?
+        def gets: (?String? separator) -> String?
+        def each: () { (String) -> void } -> self
+        def rewind: () -> Integer
+        def close: () -> nil
       end
 
       interface _RackHeaders
@@ -22,13 +64,23 @@ module Vajra
         def each: () { (String) -> void } -> void
       end
 
+      class AppState < ::Struct[_RackApp? | Integer]
+        attr_accessor app: _RackApp?
+        attr_accessor max_threads: Integer
+      end
+
       RACK_VERSION: Array[Integer]
+      APP_MUTEX: Thread::Mutex
+      APP_STATE: AppState
 
       def self.install!: (_RackApp) -> _RackApp
       def self.uninstall!: () -> nil
+      def self.configure_threads!: (Integer) -> Integer
       def self.installed?: () -> bool
-      def self.call: (Array[[String, String]], String) -> [Integer, Array[[String, String]], String]?
+      def self.call: (Array[[String, String]], String | _RackInput) -> [Integer, Array[[String, String]], Array[String]]?
+      def self.__native_set_app__: (_RackApp? app) -> _RackApp?
       def self.__native_set_callback__: (Proc | nil) -> (Proc | nil)
+      def self.__native_configure_threads__: (Integer max_threads) -> Integer
     end
   end
 end

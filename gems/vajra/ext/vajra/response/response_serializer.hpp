@@ -25,6 +25,7 @@ namespace Vajra
     {
     public:
       void validate(const Response &response) const;
+      std::string serialize_head(const Response &response) const;
       std::string serialize(const Response &response) const;
 
     private:

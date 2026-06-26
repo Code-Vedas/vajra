@@ -98,7 +98,7 @@ namespace VajraSpecCpp
                   Vajra::request::ParsedHeader{"X-Trace-Id", "abc123"},
                   Vajra::request::ParsedHeader{"X-Trace-Id", "def456"},
               }},
-          Vajra::request::SocketContext{"127.0.0.2", 54'321, "127.0.0.1", 3000, "http"}};
+          Vajra::request::SocketContext{"127.0.0.2", 54'321, "127.0.0.1", 3000, "http"}, -1, "", nullptr, nullptr};
 
       const std::vector<Vajra::request::RackEnvEntry> env_entries = builder.build(request_context);
 
@@ -112,11 +112,11 @@ namespace VajraSpecCpp
       expect_entry_value(env_entries, "REMOTE_ADDR", "127.0.0.2");
       expect_entry_value(env_entries, "REMOTE_PORT", "54321");
       expect_entry_value(env_entries, "rack.url_scheme", "http");
-      expect_entry_value(env_entries, "HTTP_HOST", "example.test");
-      expect_entry_value(env_entries, "HTTP_X_FOO", "kept");
-      expect_entry_value(env_entries, "HTTP_COOKIE", "a=1; b=2");
+      expect_entry_value(env_entries, "HOST", "example.test");
+      expect_entry_value(env_entries, "X_FOO", "kept");
+      expect_entry_value(env_entries, "COOKIE", "a=1; b=2");
       expect_entry_value(env_entries, "CONTENT_TYPE", "application/json");
-      expect_entry_value(env_entries, "HTTP_X_TRACE_ID", "abc123,def456");
+      expect_entry_value(env_entries, "X_TRACE_ID", "abc123,def456");
     }
 
     void test_build_rejects_unsupported_header_name_characters()
@@ -126,7 +126,7 @@ namespace VajraSpecCpp
           Vajra::request::ParsedRequest{
               Vajra::request::ParsedRequestLine{"GET", "/", "HTTP/1.1"},
               {Vajra::request::ParsedHeader{"X/Trace", "abc123"}}},
-          Vajra::request::SocketContext{"127.0.0.1", 10'000, "127.0.0.1", 3000, "http"}};
+          Vajra::request::SocketContext{"127.0.0.1", 10'000, "127.0.0.1", 3000, "http"}, -1, "", nullptr, nullptr};
 
       try
       {
@@ -152,7 +152,7 @@ namespace VajraSpecCpp
           Vajra::request::ParsedRequest{
               Vajra::request::ParsedRequestLine{"GET", "/", "HTTP/1.1"},
               {Vajra::request::ParsedHeader{"X_Foo", "ambiguous"}}},
-          Vajra::request::SocketContext{"127.0.0.1", 10'000, "127.0.0.1", 3000, "http"}};
+          Vajra::request::SocketContext{"127.0.0.1", 10'000, "127.0.0.1", 3000, "http"}, -1, "", nullptr, nullptr};
 
       try
       {
@@ -178,7 +178,7 @@ namespace VajraSpecCpp
           Vajra::request::ParsedRequest{
               Vajra::request::ParsedRequestLine{"GET", "/", "HTTP/1.1"},
               {Vajra::request::ParsedHeader{"X.Foo", "ambiguous"}}},
-          Vajra::request::SocketContext{"127.0.0.1", 10'000, "127.0.0.1", 3000, "http"}};
+          Vajra::request::SocketContext{"127.0.0.1", 10'000, "127.0.0.1", 3000, "http"}, -1, "", nullptr, nullptr};
 
       try
       {
@@ -204,7 +204,7 @@ namespace VajraSpecCpp
           Vajra::request::ParsedRequest{
               Vajra::request::ParsedRequestLine{"GET", "/", "HTTP/1.1"},
               {Vajra::request::ParsedHeader{"X-Trace-Id", std::string("bad\0value", 9)}}},
-          Vajra::request::SocketContext{"127.0.0.1", 10'000, "127.0.0.1", 3000, "http"}};
+          Vajra::request::SocketContext{"127.0.0.1", 10'000, "127.0.0.1", 3000, "http"}, -1, "", nullptr, nullptr};
 
       try
       {
@@ -233,7 +233,7 @@ namespace VajraSpecCpp
                   Vajra::request::ParsedHeader{"Content-Length", "0"},
                   Vajra::request::ParsedHeader{"Content-Length", "0"},
               }},
-          Vajra::request::SocketContext{"127.0.0.1", 10'000, "127.0.0.1", 3000, "http"}};
+          Vajra::request::SocketContext{"127.0.0.1", 10'000, "127.0.0.1", 3000, "http"}, -1, "", nullptr, nullptr};
 
       try
       {
@@ -262,7 +262,7 @@ namespace VajraSpecCpp
                   Vajra::request::ParsedHeader{"Content-Type", "application/json"},
                   Vajra::request::ParsedHeader{"Content-Type", "text/plain"},
               }},
-          Vajra::request::SocketContext{"127.0.0.1", 10'000, "127.0.0.1", 3000, "http"}};
+          Vajra::request::SocketContext{"127.0.0.1", 10'000, "127.0.0.1", 3000, "http"}, -1, "", nullptr, nullptr};
 
       try
       {
@@ -291,7 +291,7 @@ namespace VajraSpecCpp
                   Vajra::request::ParsedHeader{"Host", "example.test"},
                   Vajra::request::ParsedHeader{"Host", "evil.test"},
               }},
-          Vajra::request::SocketContext{"127.0.0.1", 10'000, "127.0.0.1", 3000, "http"}};
+          Vajra::request::SocketContext{"127.0.0.1", 10'000, "127.0.0.1", 3000, "http"}, -1, "", nullptr, nullptr};
 
       try
       {

@@ -35,15 +35,8 @@ module Vajra
       def rails: (?String environment_path) -> Proc
       def host: (String) -> String
       def port: (Integer) -> Integer
-      def bind: (String) -> String
-      def unix_socket: (String) -> String
-      def backlog: (Integer) -> Integer
-      def reuse_port: (?bool) -> bool
       def workers: (Integer) -> Integer
       def threads: (Integer | Array[Integer], ?Integer) -> Array[Integer]
-      def preload_app: (?bool) -> bool
-      def worker_boot_timeout: (Integer) -> Integer
-      def worker_shutdown_timeout: (Integer) -> Integer
       def worker_timeout: (Integer) -> Integer
       def max_request_head_bytes: (Integer) -> Integer
       def request_timeout: (Integer) -> Integer
@@ -53,10 +46,8 @@ module Vajra
       def request_head_timeout: (Integer) -> Integer
       def request_body_timeout: (Integer) -> Integer
       def max_keepalive_requests: (Integer) -> Integer
-      def linger_timeout: (Integer) -> Integer
       def max_connections: (Integer) -> Integer
       def socket_queue_capacity: (Integer) -> Integer
-      def max_requests_per_worker: (Integer) -> Integer
       def tls: (?bool) -> bool
       def tls_certificate: (String) -> String
       def tls_private_key: (String) -> String
@@ -80,12 +71,6 @@ module Vajra
       def trace_endpoint: (String) -> String
       def trace_service_name: (String) -> String
       def trace_otel_owner: (?bool) -> bool
-      def pidfile: (String) -> String
-      def state_path: (String) -> String
-      def control_socket: (String) -> String
-      def drain_timeout: (Integer) -> Integer
-      def shutdown_timeout: (Integer) -> Integer
-      def phased_restart: (?bool) -> bool
     end
   end
 end

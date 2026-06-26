@@ -154,19 +154,19 @@ void Vajra::runtime::BootContract::ensure_ready(const BootContractResult &result
 {
   switch (result.status)
   {
-    case BootStatus::ready:
-      return;
-    case BootStatus::pending:
-      throw std::runtime_error("Ruby boot contract did not reach ready state");
-    case BootStatus::failed:
-      if (!result.diagnostic.has_value())
-      {
-        throw std::runtime_error("Ruby boot failed without diagnostic details");
-      }
+  case BootStatus::ready:
+    return;
+  case BootStatus::pending:
+    throw std::runtime_error("Ruby boot contract did not reach ready state");
+  case BootStatus::failed:
+    if (!result.diagnostic.has_value())
+    {
+      throw std::runtime_error("Ruby boot failed without diagnostic details");
+    }
 
-      throw std::runtime_error(
-          "Ruby boot failed (" + result.diagnostic->code + "/" + result.diagnostic->category + "): " +
-          result.diagnostic->message);
+    throw std::runtime_error(
+        "Ruby boot failed (" + result.diagnostic->code + "/" + result.diagnostic->category + "): " +
+        result.diagnostic->message);
   }
 
   throw std::runtime_error("Ruby boot contract returned an unknown state");
@@ -176,25 +176,25 @@ Vajra::runtime::BootDiagnostic Vajra::runtime::BootContract::diagnostic_for_fail
 {
   switch (result.status)
   {
-    case BootStatus::failed:
-      if (result.diagnostic.has_value())
-      {
-        return *result.diagnostic;
-      }
-      return BootDiagnostic{
-          "missing_boot_diagnostic",
-          "contract",
-          "Ruby boot failed without diagnostic details"};
-    case BootStatus::pending:
-      return BootDiagnostic{
-          "boot_not_ready",
-          "contract",
-          "Ruby boot contract did not reach ready state"};
-    case BootStatus::ready:
-      return BootDiagnostic{
-          "unexpected_ready_state",
-          "contract",
-          "Ruby worker bootstrap reported ready when a failure diagnostic was requested"};
+  case BootStatus::failed:
+    if (result.diagnostic.has_value())
+    {
+      return *result.diagnostic;
+    }
+    return BootDiagnostic{
+        "missing_boot_diagnostic",
+        "contract",
+        "Ruby boot failed without diagnostic details"};
+  case BootStatus::pending:
+    return BootDiagnostic{
+        "boot_not_ready",
+        "contract",
+        "Ruby boot contract did not reach ready state"};
+  case BootStatus::ready:
+    return BootDiagnostic{
+        "unexpected_ready_state",
+        "contract",
+        "Ruby worker bootstrap reported ready when a failure diagnostic was requested"};
   }
 
   return BootDiagnostic{

@@ -10,10 +10,14 @@
 #include "request_head_types.hpp"
 #include "request_line_validation_pipeline.hpp"
 
+#include <string_view>
+
 namespace Vajra
 {
   namespace request
   {
+    constexpr std::size_t kMaxParsedHeaderCount = 100;
+
     class RequestHeadParser
     {
     public:
@@ -67,14 +71,19 @@ namespace Vajra
             return;
           }
 
-          parsed_request.headers.push_back(parse_header_line(request_head.substr(cursor, line_end - cursor)));
+          if (parsed_request.headers.size() >= kMaxParsedHeaderCount)
+          {
+            throw bad_request_error("too many request headers");
+          }
+
+          parsed_request.headers.push_back(parse_header_line(std::string_view(request_head).substr(cursor, line_end - cursor)));
           cursor = line_end + 2;
         }
 
         throw bad_request_error("missing header terminator");
       }
 
-      ParsedHeader parse_header_line(const std::string &header_line) const
+      ParsedHeader parse_header_line(std::string_view header_line) const
       {
         const std::size_t delimiter = header_line.find(':');
         if (delimiter == std::string::npos || delimiter == 0)
@@ -82,21 +91,24 @@ namespace Vajra
           throw bad_request_error("invalid header line");
         }
 
-        const std::string header_name = header_line.substr(0, delimiter);
+        const std::string_view header_name = header_line.substr(0, delimiter);
         if (header_name.find_first_of(" \t") != std::string::npos)
         {
           throw bad_request_error("invalid header name");
         }
 
-        return ParsedHeader{header_name, strip_leading_header_whitespace(header_line.substr(delimiter + 1))};
+        const std::string_view header_value = strip_leading_header_whitespace(header_line.substr(delimiter + 1));
+        return ParsedHeader{
+            std::string(header_name),
+            std::string(header_value)};
       }
 
-      std::string strip_leading_header_whitespace(std::string value) const
+      std::string_view strip_leading_header_whitespace(std::string_view value) const
       {
         const std::size_t first_non_whitespace = value.find_first_not_of(" \t");
         if (first_non_whitespace == std::string::npos)
         {
-          return "";
+          return {};
         }
 
         return value.substr(first_non_whitespace);

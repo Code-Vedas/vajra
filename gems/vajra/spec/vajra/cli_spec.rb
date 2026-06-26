@@ -10,6 +10,13 @@ require 'tmpdir'
 require_relative '../support/documented_server_options'
 
 RSpec.describe Vajra::CLI do
+  describe 'Vajra.header' do
+    it 'renders the banner with the current version' do
+      expect(Vajra.header).to include("v#{Vajra::VERSION}\n\n")
+      expect(Vajra.header).to include('__      __')
+    end
+  end
+
   describe '.with_config_target' do
     it 'restores the previous config target after yielding' do
       Thread.current[:vajra_config_target] = :previous_target
@@ -78,13 +85,13 @@ RSpec.describe Vajra::CLI do
       end
     end
 
-    it 'rejects documented but unimplemented directives during startup' do
+    it 'rejects unsupported directives while loading configuration' do
       Dir.mktmpdir('vajra-cli-config') do |root|
         config_dir = File.join(root, 'config')
         FileUtils.mkdir_p(config_dir)
         File.write(File.join(config_dir, 'vajra.rb'), <<~RUBY)
           Vajra.configure do |config|
-            config.tls
+            config.bind "tcp://127.0.0.1:3000"
           end
         RUBY
 
@@ -92,7 +99,7 @@ RSpec.describe Vajra::CLI do
 
         expect do
           described_class.start(argv: [], root:, stdout: StringIO.new)
-        end.to raise_error(Vajra::Error, /start option not implemented yet: tls/)
+        end.to raise_error(Vajra::Error, /unsupported configuration directive: bind/)
       end
     end
 

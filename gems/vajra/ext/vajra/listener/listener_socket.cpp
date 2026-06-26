@@ -8,6 +8,7 @@
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstring>
+#include <memory>
 #include <netdb.h>
 #include <stdexcept>
 #include <string>
@@ -55,11 +56,12 @@ Vajra::listener::SocketBinding Vajra::listener::Socket::open(const std::string &
   {
     throw host_resolution_error(host, port, resolution_status);
   }
+  const std::unique_ptr<addrinfo, decltype(&freeaddrinfo)> addresses(result, freeaddrinfo);
 
   int socket_fd = -1;
   int last_error = 0;
   SocketFailureStage last_failure_stage = SocketFailureStage::bind;
-  for (addrinfo *candidate = result; candidate != nullptr; candidate = candidate->ai_next)
+  for (addrinfo *candidate = addresses.get(); candidate != nullptr; candidate = candidate->ai_next)
   {
     socket_fd = socket(candidate->ai_family, candidate->ai_socktype, candidate->ai_protocol);
     if (socket_fd < 0)
@@ -74,7 +76,6 @@ Vajra::listener::SocketBinding Vajra::listener::Socket::open(const std::string &
     {
       const int error_number = errno;
       close(socket_fd);
-      freeaddrinfo(result);
       throw startup_error("socket option setup", host, port, error_number);
     }
 
@@ -83,14 +84,12 @@ Vajra::listener::SocketBinding Vajra::listener::Socket::open(const std::string &
     {
       const int error_number = errno;
       close(socket_fd);
-      freeaddrinfo(result);
       throw startup_error("reuseport setup", host, port, error_number);
     }
 #else
     if (reuse_port)
     {
       close(socket_fd);
-      freeaddrinfo(result);
       throw std::runtime_error("listener reuse_port requested but SO_REUSEPORT is not available");
     }
 #endif
@@ -105,8 +104,6 @@ Vajra::listener::SocketBinding Vajra::listener::Socket::open(const std::string &
     close(socket_fd);
     socket_fd = -1;
   }
-
-  freeaddrinfo(result);
 
   if (socket_fd < 0)
   {

@@ -5,6 +5,7 @@
 
 #include "runtime/runtime_config.hpp"
 
+#include "request/request_body_reader.hpp"
 #include "request/request_head_error.hpp"
 #include "runtime/ruby_support.hpp"
 
@@ -16,6 +17,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace
 {
@@ -24,13 +26,28 @@ namespace
   ID id_workers;
   ID id_threads;
   ID id_max_request_head_bytes;
+  ID id_max_request_body_bytes;
   ID id_max_connections;
+  ID id_max_keepalive_requests;
   ID id_socket_queue_capacity;
   ID id_request_timeout;
   ID id_request_head_timeout;
   ID id_first_data_timeout;
+  ID id_request_body_timeout;
   ID id_persistent_timeout;
   ID id_worker_timeout;
+  ID id_tls;
+  ID id_tls_certificate;
+  ID id_tls_private_key;
+  ID id_tls_ca_certificate;
+  ID id_tls_verify_mode;
+  ID id_tls_min_version;
+  ID id_alpn_protocols;
+  ID id_http2;
+  ID id_http2_max_concurrent_streams;
+  ID id_http2_initial_window_size;
+  ID id_http2_max_frame_size;
+  ID id_http2_header_table_size;
   ID id_log_level;
   ID id_access_log;
   ID id_error_log;
@@ -65,13 +82,28 @@ namespace
         key_id == id_workers ||
         key_id == id_threads ||
         key_id == id_max_connections ||
+        key_id == id_max_keepalive_requests ||
         key_id == id_socket_queue_capacity ||
         key_id == id_max_request_head_bytes ||
+        key_id == id_max_request_body_bytes ||
         key_id == id_request_timeout ||
         key_id == id_request_head_timeout ||
         key_id == id_first_data_timeout ||
+        key_id == id_request_body_timeout ||
         key_id == id_persistent_timeout ||
         key_id == id_worker_timeout ||
+        key_id == id_tls ||
+        key_id == id_tls_certificate ||
+        key_id == id_tls_private_key ||
+        key_id == id_tls_ca_certificate ||
+        key_id == id_tls_verify_mode ||
+        key_id == id_tls_min_version ||
+        key_id == id_alpn_protocols ||
+        key_id == id_http2 ||
+        key_id == id_http2_max_concurrent_streams ||
+        key_id == id_http2_initial_window_size ||
+        key_id == id_http2_max_frame_size ||
+        key_id == id_http2_header_table_size ||
         key_id == id_log_level ||
         key_id == id_access_log ||
         key_id == id_error_log ||
@@ -201,7 +233,8 @@ namespace
 
   std::string trim_ascii_whitespace(std::string value)
   {
-    const auto is_not_space = [](unsigned char character) {
+    const auto is_not_space = [](unsigned char character)
+    {
       return !std::isspace(character);
     };
 
@@ -261,6 +294,82 @@ namespace
     return string_value;
   }
 
+  std::vector<std::string> configured_string_array_from_ruby(
+      VALUE options,
+      ID key,
+      const char *name,
+      const std::vector<std::string> &default_value)
+  {
+    if (NIL_P(options))
+    {
+      return default_value;
+    }
+
+    VALUE lookup_args[2] = {options, ID2SYM(key)};
+    const VALUE option_value = Vajra::runtime::protected_ruby_call_value(
+        Vajra::runtime::protected_rb_hash_lookup,
+        reinterpret_cast<VALUE>(lookup_args),
+        "failed to read Ruby start options");
+    if (NIL_P(option_value))
+    {
+      return default_value;
+    }
+    if (RB_TYPE_P(option_value, T_ARRAY) == 0 || RARRAY_LEN(option_value) == 0)
+    {
+      throw std::runtime_error("invalid " + std::string(name) + ": expected a non-empty Array");
+    }
+
+    std::vector<std::string> values;
+    values.reserve(static_cast<std::size_t>(RARRAY_LEN(option_value)));
+    for (long index = 0; index < RARRAY_LEN(option_value); ++index)
+    {
+      VALUE item = rb_ary_entry(option_value, index);
+      Vajra::runtime::ProtectedStringConversion string_conversion{item, Qnil};
+      VALUE item_string = Vajra::runtime::protected_ruby_call_value(
+          Vajra::runtime::protected_rb_obj_as_string,
+          reinterpret_cast<VALUE>(&string_conversion),
+          ("invalid " + std::string(name)).c_str());
+      std::string value = trim_ascii_whitespace(StringValueCStr(item_string));
+      if (value.empty())
+      {
+        throw std::runtime_error("invalid " + std::string(name) + ": values must not be empty");
+      }
+      values.push_back(std::move(value));
+    }
+
+    return values;
+  }
+
+  std::vector<std::string> configured_string_array_from_env(
+      const char *name,
+      const std::vector<std::string> &default_value)
+  {
+    const char *env_value = std::getenv(name);
+    if (env_value == nullptr || env_value[0] == '\0')
+    {
+      return default_value;
+    }
+
+    std::vector<std::string> values;
+    std::stringstream stream(env_value);
+    std::string token;
+    while (std::getline(stream, token, ','))
+    {
+      std::string value = trim_ascii_whitespace(token);
+      if (value.empty())
+      {
+        throw std::runtime_error("invalid " + std::string(name) + ": values must not be empty");
+      }
+      values.push_back(std::move(value));
+    }
+
+    if (values.empty())
+    {
+      throw std::runtime_error("invalid " + std::string(name) + ": expected at least one value");
+    }
+    return values;
+  }
+
   bool configured_boolean_from_ruby(VALUE options, ID key, bool default_value)
   {
     if (NIL_P(options))
@@ -294,9 +403,8 @@ namespace
   bool configured_boolean_from_env(const char *name, bool default_value)
   {
     std::string value = configured_string_from_env(name, default_value ? "true" : "false");
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
-      return static_cast<char>(std::tolower(character));
-    });
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character)
+                   { return static_cast<char>(std::tolower(character)); });
 
     if (value == "true" || value == "1" || value == "yes" || value == "on")
     {
@@ -438,9 +546,8 @@ namespace
   std::string normalized_log_level(const std::string &value, const char *name)
   {
     std::string normalized = value;
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char character) {
-      return static_cast<char>(std::tolower(character));
-    });
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char character)
+                   { return static_cast<char>(std::tolower(character)); });
 
     if (normalized == "debug" ||
         normalized == "info" ||
@@ -456,6 +563,62 @@ namespace
         ". Expected one of: debug, info, warn, error, fatal.");
   }
 
+  std::string normalized_tls_verify_mode(const std::string &value, const char *name)
+  {
+    std::string normalized = value;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char character)
+                   { return static_cast<char>(std::tolower(character)); });
+
+    if (normalized == "none" || normalized == "peer")
+    {
+      return normalized;
+    }
+
+    throw std::runtime_error(
+        "invalid " + std::string(name) + ": " + value + ". Expected one of: none, peer.");
+  }
+
+  std::string normalized_tls_min_version(const std::string &value, const char *name)
+  {
+    if (value == "TLSv1_2" || value == "TLSv1_3")
+    {
+      return value;
+    }
+
+    throw std::runtime_error(
+        "invalid " + std::string(name) + ": " + value + ". Expected one of: TLSv1_2, TLSv1_3.");
+  }
+
+  void validate_protocol_config(
+      bool tls,
+      const std::string &certificate,
+      const std::string &private_key,
+      bool http2,
+      const std::vector<std::string> &alpn_protocols)
+  {
+    if (tls && (certificate.empty() || private_key.empty()))
+    {
+      throw std::runtime_error("tls requires tls_certificate and tls_private_key");
+    }
+
+    bool advertises_h2 = false;
+    for (const std::string &protocol : alpn_protocols)
+    {
+      if (protocol == "h2")
+      {
+        advertises_h2 = true;
+      }
+      else if (protocol != "http/1.1")
+      {
+        throw std::runtime_error("unsupported ALPN protocol: " + protocol);
+      }
+    }
+    if (advertises_h2 && !http2)
+    {
+      throw std::runtime_error("alpn_protocols cannot include h2 unless http2 is enabled");
+    }
+  }
+
 }
 
 void Vajra::runtime::RuntimeConfigLoader::initialize_ids()
@@ -465,13 +628,28 @@ void Vajra::runtime::RuntimeConfigLoader::initialize_ids()
   id_workers = rb_intern("workers");
   id_threads = rb_intern("threads");
   id_max_connections = rb_intern("max_connections");
+  id_max_keepalive_requests = rb_intern("max_keepalive_requests");
   id_socket_queue_capacity = rb_intern("socket_queue_capacity");
   id_request_timeout = rb_intern("request_timeout");
   id_request_head_timeout = rb_intern("request_head_timeout");
   id_first_data_timeout = rb_intern("first_data_timeout");
+  id_request_body_timeout = rb_intern("request_body_timeout");
   id_persistent_timeout = rb_intern("persistent_timeout");
   id_worker_timeout = rb_intern("worker_timeout");
   id_max_request_head_bytes = rb_intern("max_request_head_bytes");
+  id_max_request_body_bytes = rb_intern("max_request_body_bytes");
+  id_tls = rb_intern("tls");
+  id_tls_certificate = rb_intern("tls_certificate");
+  id_tls_private_key = rb_intern("tls_private_key");
+  id_tls_ca_certificate = rb_intern("tls_ca_certificate");
+  id_tls_verify_mode = rb_intern("tls_verify_mode");
+  id_tls_min_version = rb_intern("tls_min_version");
+  id_alpn_protocols = rb_intern("alpn_protocols");
+  id_http2 = rb_intern("http2");
+  id_http2_max_concurrent_streams = rb_intern("http2_max_concurrent_streams");
+  id_http2_initial_window_size = rb_intern("http2_initial_window_size");
+  id_http2_max_frame_size = rb_intern("http2_max_frame_size");
+  id_http2_header_table_size = rb_intern("http2_header_table_size");
   id_log_level = rb_intern("log_level");
   id_access_log = rb_intern("access_log");
   id_error_log = rb_intern("error_log");
@@ -507,11 +685,25 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       256,
       1,
       std::numeric_limits<long>::max());
+  const long ruby_max_keepalive_requests = configured_integer_from_ruby(
+      options,
+      id_max_keepalive_requests,
+      "max_keepalive_requests option",
+      0,
+      0,
+      std::numeric_limits<int>::max());
   const long ruby_max_request_head_bytes = configured_integer_from_ruby(
       options,
       id_max_request_head_bytes,
       "max_request_head_bytes option",
       static_cast<long>(Vajra::request::kDefaultMaxRequestHeadBytes),
+      1,
+      std::numeric_limits<int>::max());
+  const long ruby_max_request_body_bytes = configured_integer_from_ruby(
+      options,
+      id_max_request_body_bytes,
+      "max_request_body_bytes option",
+      static_cast<long>(Vajra::request::kDefaultMaxRequestBodyBytes),
       1,
       std::numeric_limits<int>::max());
   const long ruby_request_timeout_seconds = configured_integer_from_ruby(
@@ -535,6 +727,13 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       30,
       1,
       std::numeric_limits<int>::max());
+  const long ruby_request_body_timeout_seconds = configured_integer_from_ruby(
+      options,
+      id_request_body_timeout,
+      "request_body_timeout option",
+      Vajra::request::kDefaultRequestBodyTimeoutSeconds,
+      1,
+      std::numeric_limits<int>::max());
   const long ruby_persistent_timeout_seconds = configured_integer_from_ruby(
       options,
       id_persistent_timeout,
@@ -548,6 +747,66 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       "worker_timeout option",
       60,
       1,
+      std::numeric_limits<int>::max());
+  const bool ruby_tls = configured_boolean_from_ruby(options, id_tls, false);
+  const std::string ruby_tls_certificate = configured_string_from_ruby(
+      options,
+      id_tls_certificate,
+      "tls_certificate option",
+      "");
+  const std::string ruby_tls_private_key = configured_string_from_ruby(
+      options,
+      id_tls_private_key,
+      "tls_private_key option",
+      "");
+  const std::string ruby_tls_ca_certificate = configured_string_from_ruby(
+      options,
+      id_tls_ca_certificate,
+      "tls_ca_certificate option",
+      "");
+  const std::string ruby_tls_verify_mode = configured_string_from_ruby(
+      options,
+      id_tls_verify_mode,
+      "tls_verify_mode option",
+      "none");
+  const std::string ruby_tls_min_version = configured_string_from_ruby(
+      options,
+      id_tls_min_version,
+      "tls_min_version option",
+      "TLSv1_2");
+  const bool ruby_http2 = configured_boolean_from_ruby(options, id_http2, false);
+  const std::vector<std::string> ruby_alpn_protocols = configured_string_array_from_ruby(
+      options,
+      id_alpn_protocols,
+      "alpn_protocols option",
+      ruby_tls && ruby_http2 ? std::vector<std::string>{"h2", "http/1.1"} : std::vector<std::string>{"http/1.1"});
+  const long ruby_http2_max_concurrent_streams = configured_integer_from_ruby(
+      options,
+      id_http2_max_concurrent_streams,
+      "http2_max_concurrent_streams option",
+      128,
+      1,
+      1'000'000);
+  const long ruby_http2_initial_window_size = configured_integer_from_ruby(
+      options,
+      id_http2_initial_window_size,
+      "http2_initial_window_size option",
+      1'048'576,
+      0,
+      2'147'483'647);
+  const long ruby_http2_max_frame_size = configured_integer_from_ruby(
+      options,
+      id_http2_max_frame_size,
+      "http2_max_frame_size option",
+      1'048'576,
+      16'384,
+      16'777'215);
+  const long ruby_http2_header_table_size = configured_integer_from_ruby(
+      options,
+      id_http2_header_table_size,
+      "http2_header_table_size option",
+      4'096,
+      0,
       std::numeric_limits<int>::max());
   const std::string ruby_log_level = normalized_log_level(
       configured_string_from_ruby(options, id_log_level, "log_level option", "info"),
@@ -615,6 +874,16 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       ruby_max_request_head_bytes,
       1,
       std::numeric_limits<int>::max()));
+  const std::size_t max_request_body_bytes = static_cast<std::size_t>(configured_integer_from_env(
+      "VAJRA_MAX_REQUEST_BODY_BYTES",
+      ruby_max_request_body_bytes,
+      1,
+      std::numeric_limits<int>::max()));
+  const std::size_t max_keepalive_requests = static_cast<std::size_t>(configured_integer_from_env(
+      "VAJRA_MAX_KEEPALIVE_REQUESTS",
+      ruby_max_keepalive_requests,
+      0,
+      std::numeric_limits<int>::max()));
   const std::size_t request_timeout_seconds = static_cast<std::size_t>(configured_integer_from_env(
       "VAJRA_REQUEST_TIMEOUT",
       ruby_request_timeout_seconds,
@@ -630,6 +899,11 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       ruby_first_data_timeout_seconds,
       1,
       std::numeric_limits<int>::max()));
+  const int request_body_timeout_seconds = static_cast<int>(configured_integer_from_env(
+      "VAJRA_REQUEST_BODY_TIMEOUT",
+      ruby_request_body_timeout_seconds,
+      1,
+      std::numeric_limits<int>::max()));
   const int persistent_timeout_seconds = static_cast<int>(configured_integer_from_env(
       "VAJRA_PERSISTENT_TIMEOUT",
       ruby_persistent_timeout_seconds,
@@ -640,6 +914,43 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       ruby_worker_timeout_seconds,
       1,
       std::numeric_limits<int>::max()));
+  const bool tls = configured_boolean_from_env("VAJRA_TLS", ruby_tls);
+  const bool http2 = configured_boolean_from_env("VAJRA_HTTP2", ruby_http2);
+  const std::string tls_certificate = configured_string_from_env("VAJRA_TLS_CERTIFICATE", ruby_tls_certificate);
+  const std::string tls_private_key = configured_string_from_env("VAJRA_TLS_PRIVATE_KEY", ruby_tls_private_key);
+  const std::string tls_ca_certificate = configured_string_from_env("VAJRA_TLS_CA_CERTIFICATE", ruby_tls_ca_certificate);
+  const std::string tls_verify_mode = normalized_tls_verify_mode(
+      configured_string_from_env("VAJRA_TLS_VERIFY_MODE", ruby_tls_verify_mode),
+      "VAJRA_TLS_VERIFY_MODE");
+  const std::string tls_min_version = normalized_tls_min_version(
+      configured_string_from_env("VAJRA_TLS_MIN_VERSION", ruby_tls_min_version),
+      "VAJRA_TLS_MIN_VERSION");
+  const std::vector<std::string> default_alpn_protocols =
+      tls && http2 ? std::vector<std::string>{"h2", "http/1.1"} : ruby_alpn_protocols;
+  const std::vector<std::string> alpn_protocols = configured_string_array_from_env(
+      "VAJRA_ALPN_PROTOCOLS",
+      default_alpn_protocols);
+  const std::size_t http2_max_concurrent_streams = static_cast<std::size_t>(configured_integer_from_env(
+      "VAJRA_HTTP2_MAX_CONCURRENT_STREAMS",
+      ruby_http2_max_concurrent_streams,
+      1,
+      1'000'000));
+  const std::size_t http2_initial_window_size = static_cast<std::size_t>(configured_integer_from_env(
+      "VAJRA_HTTP2_INITIAL_WINDOW_SIZE",
+      ruby_http2_initial_window_size,
+      0,
+      2'147'483'647));
+  const std::size_t http2_max_frame_size = static_cast<std::size_t>(configured_integer_from_env(
+      "VAJRA_HTTP2_MAX_FRAME_SIZE",
+      ruby_http2_max_frame_size,
+      16'384,
+      16'777'215));
+  const std::size_t http2_header_table_size = static_cast<std::size_t>(configured_integer_from_env(
+      "VAJRA_HTTP2_HEADER_TABLE_SIZE",
+      ruby_http2_header_table_size,
+      0,
+      std::numeric_limits<int>::max()));
+  validate_protocol_config(tls, tls_certificate, tls_private_key, http2, alpn_protocols);
   const std::string log_level = normalized_log_level(
       configured_string_from_env("VAJRA_LOG_LEVEL", ruby_log_level),
       "VAJRA_LOG_LEVEL");
@@ -666,11 +977,26 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       max_connections,
       socket_queue_capacity,
       max_request_head_bytes,
+      max_request_body_bytes,
+      max_keepalive_requests,
       request_timeout_seconds,
       request_head_timeout_seconds,
       first_data_timeout_seconds,
+      request_body_timeout_seconds,
       persistent_timeout_seconds,
       worker_timeout_seconds,
+      tls,
+      tls_certificate,
+      tls_private_key,
+      tls_ca_certificate,
+      tls_verify_mode,
+      tls_min_version,
+      alpn_protocols,
+      http2,
+      http2_max_concurrent_streams,
+      http2_initial_window_size,
+      http2_max_frame_size,
+      http2_header_table_size,
       log_level,
       access_log,
       error_log,

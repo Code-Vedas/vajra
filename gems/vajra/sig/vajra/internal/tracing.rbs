@@ -70,8 +70,21 @@ module Vajra
         String | Integer | bool | nil
       ]
 
+      type trace_context = Hash[Symbol, String?]
+
       interface _Tracer
         def in_span: [T] (String, attributes: Hash[String, String | Integer | bool]) { () -> T } -> T
+      end
+
+      interface _TraceContext
+        def hex_trace_id: () -> String?
+        def trace_id: () -> String?
+        def hex_span_id: () -> String?
+        def span_id: () -> String?
+      end
+
+      interface _TraceSpan
+        def context: () -> _TraceContext?
       end
 
       interface _TelemetryProvider
@@ -100,7 +113,7 @@ module Vajra
         def record: (Numeric, attributes: Hash[String, String | Integer | bool]) -> void
       end
 
-      class TraceConfig
+      class TraceConfig < ::Struct[bool | String]
         attr_accessor enabled: bool
         attr_accessor endpoint: String
         attr_accessor service_name: String
@@ -113,7 +126,16 @@ module Vajra
         attr_accessor sampler_arg: String
       end
 
-      class TraceState
+      class TraceState < ::Struct[
+        bool |
+        String |
+        _Tracer? |
+        _Meter? |
+        _TelemetryProvider? |
+        metric_instrument? |
+        Hash[Symbol, metric_instrument?] |
+        Thread?
+      ]
         attr_accessor enabled: bool
         attr_accessor available: bool
         attr_accessor tracer: _Tracer?
@@ -129,13 +151,19 @@ module Vajra
         attr_accessor propagators: String
       end
 
+      class RequestSpanObservabilityState < ::Struct[bool]
+        attr_accessor active: bool
+      end
+
       TRACE_MUTEX: Thread::Mutex
       TRACE_STATE: TraceState
+      REQUEST_SPAN_OBSERVABILITY_STATE: RequestSpanObservabilityState
 
       def self.install_from_start_options!: (start_options) -> bool
       def self.shutdown!: () -> void
       def self.after_fork!: () -> void
       def self.with_request_span: [T] (Hash[String, rack_env_value]) { () -> T } -> T
+      def self.current_trace_context: (?_TraceSpan? span) -> trace_context
       def self.emit_lifecycle_span: (lifecycle_event) -> nil
       def self.emit_native_request_span: (native_request_event) -> void
       def self.__native_set_tracing_status__: (bool, bool, String, String, bool, Float, String, String) -> nil

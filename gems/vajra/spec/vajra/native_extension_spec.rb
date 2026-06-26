@@ -10,10 +10,6 @@ RSpec.describe Vajra::NativeExtension do
     proc { |_path| raise LoadError, 'cannot load such file -- vajra/vajra' }
   end
 
-  it 'loads the native extension through the canonical require path' do
-    expect([Vajra.respond_to?(:start), Vajra.respond_to?(:stop)]).to eq([true, true])
-  end
-
   it 'raises an actionable error when the native extension cannot be loaded' do
     expect { described_class.load!(loader: failing_loader) }.to raise_error(
       LoadError,

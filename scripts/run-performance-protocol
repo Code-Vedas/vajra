@@ -1,0 +1,15 @@
+#!/bin/sh
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "${SCRIPT_DIR}/run-common"
+
+cd "${REPO_ROOT}/gems/vajra/performance"
+ruby -S bundle check || ruby -S bundle install
+clean_compile_vajra_native_extension
+ruby -S bundle exec rake performance:protocol "$@"

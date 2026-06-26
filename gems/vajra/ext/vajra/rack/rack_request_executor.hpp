@@ -8,11 +8,14 @@
 
 #include "request/rack_env.hpp"
 #include "request/request_executor.hpp"
-#include "runtime/worker_pool.hpp"
+
+#ifdef VAJRA_RUNTIME_TESTING
+using VALUE = unsigned long;
+#else
 #include "ruby.h"
+#endif
 
 #include <cstddef>
-#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -22,26 +25,27 @@ namespace Vajra
 {
   namespace rack
   {
+    struct NativeInputState;
+    struct Http2StreamState;
+    class NativeHijackTransport;
+
     void initialize_rack_execution_bridge();
     void set_rack_execution_callback(VALUE callback);
     void set_rack_execution_app(VALUE app);
-    void run_worker_request_execution_loop(
-        const std::vector<int> &channel_fds,
-        std::size_t max_threads);
-    std::shared_ptr<const class RackExecutionTransport> request_channel_transport(int channel_fd);
-    std::shared_ptr<const class RackExecutionTransport> request_channel_transport(
-        const std::vector<std::shared_ptr<Vajra::runtime::SharedWorkerState>> &worker_states,
-        std::size_t max_threads,
-        std::size_t queue_capacity,
-        std::size_t request_timeout_seconds,
-        std::size_t worker_timeout_seconds,
-        std::function<void(const std::shared_ptr<Vajra::runtime::SharedWorkerState> &)> worker_timeout_handler,
-        bool debug_logging);
     class RackExecutionSession
     {
     public:
       virtual ~RackExecutionSession() = default;
-      virtual void append_request_body_chunk(const std::string &chunk) = 0;
+      virtual NativeInputState *native_input_state() { return nullptr; }
+      virtual std::shared_ptr<NativeInputState> native_input_state_owner() { return nullptr; }
+      virtual void append_request_body_bytes(const char *data, std::size_t length) = 0;
+      virtual bool try_append_request_body_bytes(const char *data, std::size_t length)
+      {
+        append_request_body_bytes(data, length);
+        return true;
+      }
+      virtual void finish_request_body() {}
+      virtual void fail_request_body(const std::string &) noexcept {}
       virtual std::optional<Vajra::response::Response> finish() = 0;
     };
 
@@ -49,12 +53,48 @@ namespace Vajra
     {
     public:
       virtual ~RackExecutionTransport() = default;
+      virtual bool async_execution_supported() const { return false; }
+      virtual bool async_completion_supported() const { return false; }
       virtual std::unique_ptr<RackExecutionSession> start(
           const std::vector<request::RackEnvEntry> &env_entries,
-          int client_fd) const;
+          int client_fd,
+          std::shared_ptr<NativeHijackTransport> native_hijack_transport = nullptr) const;
       virtual std::optional<Vajra::response::Response> execute(
           const std::vector<request::RackEnvEntry> &env_entries,
-          const std::string &request_body) const = 0;
+          const std::string &request_body,
+          int client_fd,
+          std::shared_ptr<Http2StreamState> http2_stream = nullptr,
+          std::shared_ptr<NativeHijackTransport> native_hijack_transport = nullptr) const = 0;
+      virtual std::optional<Vajra::response::Response> execute(
+          const std::vector<request::RackEnvEntry> &env_entries,
+          std::string &&request_body,
+          int client_fd,
+          std::shared_ptr<Http2StreamState> http2_stream = nullptr,
+          std::shared_ptr<NativeHijackTransport> native_hijack_transport = nullptr) const
+      {
+        return execute(
+            env_entries,
+            static_cast<const std::string &>(request_body),
+            client_fd,
+            std::move(http2_stream),
+            std::move(native_hijack_transport));
+      }
+      virtual bool execute_async(
+          std::vector<request::RackEnvEntry> env_entries,
+          std::string request_body,
+          int client_fd,
+          std::shared_ptr<Http2StreamState> http2_stream,
+          std::shared_ptr<NativeHijackTransport> native_hijack_transport,
+          request::RequestExecutor::CompletionCallback callback) const
+      {
+        (void)env_entries;
+        (void)request_body;
+        (void)client_fd;
+        (void)http2_stream;
+        (void)native_hijack_transport;
+        (void)callback;
+        return false;
+      }
       virtual std::string stats_payload_json() const;
       virtual std::string metrics_payload_text() const;
     };
@@ -75,14 +115,17 @@ namespace Vajra
 
       std::optional<Vajra::response::Response> control_response(
           const request::RequestContext &request_context) const override;
+      bool async_execution_supported() const override;
       std::unique_ptr<request::RequestExecutionSession> start(
           const request::RequestContext &request_context) const override;
       std::optional<Vajra::response::Response> execute(const request::RequestContext &request_context) const override;
+      std::optional<Vajra::response::Response> execute(request::RequestContext &&request_context) const override;
+      bool async_completion_supported() const override;
+      bool execute_async(
+          request::RequestContext &&request_context,
+          request::RequestExecutor::CompletionCallback callback) const override;
 
     private:
-      // The current same-process Ruby callback path is bootstrap transport only.
-      // Later worker IPC routing should replace this transport without redefining
-      // the outer Rack execution contract consumed by RequestProcessor.
       std::shared_ptr<const RackExecutionTransport> transport_;
       ControlPlaneConfig control_plane_config_;
     };

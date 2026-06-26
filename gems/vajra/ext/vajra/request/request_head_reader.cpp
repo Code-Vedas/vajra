@@ -7,8 +7,6 @@
 
 #include <cerrno>
 #include <cstring>
-#include <poll.h>
-#include <sys/socket.h>
 #include <utility>
 
 namespace
@@ -30,6 +28,15 @@ Vajra::request::HeadReader::HeadReader(std::size_t max_request_head_bytes, int c
 
 Vajra::request::HeadReadResult Vajra::request::HeadReader::read(
     int client_fd,
+    std::string buffered_bytes,
+    int initial_timeout_seconds) const
+{
+  Vajra::transport::PlainConnection connection(client_fd);
+  return read(connection, std::move(buffered_bytes), initial_timeout_seconds);
+}
+
+Vajra::request::HeadReadResult Vajra::request::HeadReader::read(
+    Vajra::transport::Connection &connection,
     std::string buffered_bytes,
     int initial_timeout_seconds) const
 {
@@ -58,12 +65,12 @@ Vajra::request::HeadReadResult Vajra::request::HeadReader::read(
       next_header_boundary_search_start = request_head.size() - (kHeaderBoundaryLength - 1);
     }
 
-    if (!wait_for_readable(client_fd, next_timeout_seconds))
+    if (!connection.wait_readable(next_timeout_seconds))
     {
       return HeadReadResult{false, false, request_head, ""};
     }
 
-    const ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer), MSG_DONTWAIT);
+    const ssize_t bytes_read = connection.read(buffer, sizeof(buffer));
     if (bytes_read < 0)
     {
       if (errno == EINTR)
@@ -89,28 +96,5 @@ Vajra::request::HeadReadResult Vajra::request::HeadReader::read(
     }
     request_head.append(buffer, bytes_read);
     next_timeout_seconds = continuation_timeout_seconds_;
-  }
-}
-
-bool Vajra::request::HeadReader::wait_for_readable(int client_fd, int timeout_seconds) const
-{
-  pollfd descriptor{client_fd, POLLIN | POLLHUP | POLLERR, 0};
-  const int timeout_milliseconds = timeout_seconds <= 0 ? 0 : timeout_seconds * 1000;
-
-  for (;;)
-  {
-    const int poll_result = poll(&descriptor, 1, timeout_milliseconds);
-    if (poll_result > 0)
-    {
-      return (descriptor.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
-    }
-    if (poll_result == 0)
-    {
-      return false;
-    }
-    if (errno != EINTR)
-    {
-      return false;
-    }
   }
 }

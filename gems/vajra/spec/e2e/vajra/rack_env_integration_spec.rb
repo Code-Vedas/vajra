@@ -104,6 +104,68 @@ RSpec.describe 'Vajra Rack environment integration', :e2e, :integration do
     expect(response[:body].bytes).to eq([97, 0, 98])
   end
 
+  {
+    'headers.each' => <<~RUBY,
+      headers = Class.new do
+        def each
+          raise "headers exploded"
+        end
+      end.new
+      [200, headers, ["ignored"]]
+    RUBY
+    'body.each' => <<~RUBY,
+      body = Class.new do
+        def each
+          raise "body exploded"
+        end
+
+        def close
+          @closed = true
+        end
+      end.new
+      [200, { "Content-Type" => "text/plain" }, body]
+    RUBY
+    'body.close' => <<~RUBY
+      body = Class.new do
+        def each
+          yield "ignored"
+        end
+
+        def close
+          raise "close exploded"
+        end
+      end.new
+      [200, { "Content-Type" => "text/plain" }, body]
+    RUBY
+  }.each do |failure_site, rack_result|
+    it "returns a 500 when native response conversion raises from #{failure_site}" do
+      script = <<~RUBY
+        require "vajra"
+
+        Vajra::Internal::RackExecution.install!(
+          lambda do |_rack_env|
+            #{rack_result}
+          end
+        )
+
+        Vajra.start
+      RUBY
+
+      result = rack_app_request_result(
+        script:,
+        request:
+          "GET /raise HTTP/1.1\r\n" \
+          "Host: example.test\r\n" \
+          "Connection: close\r\n\r\n"
+      )
+
+      response = parse_http_response(result[:response])
+
+      expect(result[:exitstatus]).to eq(0), result[:output]
+      expect(response[:status_line]).to eq('HTTP/1.1 500 Internal Server Error')
+    end
+  end
+
   it 'uses a standard reason phrase for redirect Rack responses' do
     script = <<~RUBY
       require "vajra"
@@ -313,6 +375,46 @@ RSpec.describe 'Vajra Rack environment integration', :e2e, :integration do
     )
   end
 
+  it 'rejects request bodies over the configured native limit and cancels Rack input readers' do
+    Dir.mktmpdir('vajra-body-limit') do |root|
+      marker_path = File.join(root, 'rack-called')
+      script = <<~RUBY
+        require "vajra"
+
+        Vajra::Internal::RackExecution.install!(
+          lambda do |rack_env|
+            begin
+              rack_env.fetch("rack.input").read
+              File.write(ENV.fetch("RACK_CALLED_MARKER"), "read")
+            rescue => e
+              File.write(ENV.fetch("RACK_CALLED_MARKER"), "\#{e.class}:\#{e.message}")
+            end
+            [200, { "Content-Type" => "text/plain" }, ["unexpected"]]
+          end
+        )
+
+        Vajra.start(max_request_body_bytes: 3)
+      RUBY
+
+      result = rack_app_request_result(
+        script:,
+        env: { 'RACK_CALLED_MARKER' => marker_path },
+        request:
+          "POST /too-large HTTP/1.1\r\n" \
+          "Host: example.test\r\n" \
+          "Content-Length: 4\r\n" \
+          "Connection: close\r\n\r\n" \
+          'body'
+      )
+
+      response = parse_http_response(result[:response])
+
+      expect(result[:exitstatus]).to eq(0)
+      expect(response[:status_line]).to eq('HTTP/1.1 400 Bad Request')
+      expect(File.read(marker_path)).to eq('IOError:request body stream closed before completion')
+    end
+  end
+
   it 'supports large fragmented fixed-length request bodies' do
     script = <<~RUBY
       require "json"
@@ -362,6 +464,39 @@ RSpec.describe 'Vajra Rack environment integration', :e2e, :integration do
       'prefix' => 'body',
       'suffix' => 'body'
     )
+  end
+
+  it 'preserves early Rack responses while draining unread large request bodies' do
+    script = <<~RUBY
+      require "vajra"
+
+      Vajra::Internal::RackExecution.install!(
+        lambda do |_rack_env|
+          [202, { "Content-Type" => "text/plain" }, ["accepted"]]
+        end
+      )
+
+      Vajra.start
+    RUBY
+
+    request_body = ('x' * (2 * 1024 * 1024)).b
+    result = rack_app_request_chunks_result(
+      script:,
+      chunks: [
+        "POST /early HTTP/1.1\r\n" \
+        "Host: example.test\r\n" \
+        "Content-Length: #{request_body.bytesize}\r\n" \
+        "Connection: close\r\n\r\n",
+        request_body
+      ],
+      pause: 0.01
+    )
+
+    response = parse_http_response(result[:response])
+
+    expect(result[:exitstatus]).to eq(0), result[:output]
+    expect(response[:status_line]).to eq('HTTP/1.1 202 Accepted')
+    expect(response[:body]).to eq('accepted')
   end
 
   it 'decodes chunked request bodies and consumes trailers without surfacing them' do

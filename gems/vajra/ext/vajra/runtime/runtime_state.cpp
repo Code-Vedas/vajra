@@ -43,10 +43,14 @@ namespace
   {
     switch (lifecycle_state)
     {
-      case Vajra::runtime::WorkerLifecycleState::booting: return "booting";
-      case Vajra::runtime::WorkerLifecycleState::ready: return "ready";
-      case Vajra::runtime::WorkerLifecycleState::stopping: return "stopping";
-      case Vajra::runtime::WorkerLifecycleState::exited: return "exited";
+    case Vajra::runtime::WorkerLifecycleState::booting:
+      return "booting";
+    case Vajra::runtime::WorkerLifecycleState::ready:
+      return "ready";
+    case Vajra::runtime::WorkerLifecycleState::stopping:
+      return "stopping";
+    case Vajra::runtime::WorkerLifecycleState::exited:
+      return "exited";
     }
     return "unknown";
   }
@@ -55,12 +59,18 @@ namespace
   {
     switch (state)
     {
-      case Vajra::runtime::WorkerHealthState::healthy: return "healthy";
-      case Vajra::runtime::WorkerHealthState::busy: return "busy";
-      case Vajra::runtime::WorkerHealthState::overloaded: return "overloaded";
-      case Vajra::runtime::WorkerHealthState::degraded: return "degraded";
-      case Vajra::runtime::WorkerHealthState::suspect: return "suspect";
-      case Vajra::runtime::WorkerHealthState::wedged: return "wedged";
+    case Vajra::runtime::WorkerHealthState::healthy:
+      return "healthy";
+    case Vajra::runtime::WorkerHealthState::busy:
+      return "busy";
+    case Vajra::runtime::WorkerHealthState::overloaded:
+      return "overloaded";
+    case Vajra::runtime::WorkerHealthState::degraded:
+      return "degraded";
+    case Vajra::runtime::WorkerHealthState::suspect:
+      return "suspect";
+    case Vajra::runtime::WorkerHealthState::wedged:
+      return "wedged";
     }
     return "unknown";
   }
@@ -171,22 +181,30 @@ namespace
     return &installed_runtime_state->workers[worker_index];
   }
 
+  void add_installed_worker_nanoseconds(std::atomic<std::int64_t> Vajra::runtime::WorkerRuntimeState::*field, std::int64_t nanoseconds)
+  {
+    if (installed_worker_state != nullptr)
+    {
+      (installed_worker_state->*field).fetch_add(nanoseconds, std::memory_order_acq_rel);
+    }
+  }
+
   const char *health_state_name(Vajra::runtime::WorkerHealthState state)
   {
     switch (state)
     {
-      case Vajra::runtime::WorkerHealthState::healthy:
-        return "healthy";
-      case Vajra::runtime::WorkerHealthState::busy:
-        return "busy";
-      case Vajra::runtime::WorkerHealthState::overloaded:
-        return "overloaded";
-      case Vajra::runtime::WorkerHealthState::degraded:
-        return "degraded";
-      case Vajra::runtime::WorkerHealthState::suspect:
-        return "suspect";
-      case Vajra::runtime::WorkerHealthState::wedged:
-        return "wedged";
+    case Vajra::runtime::WorkerHealthState::healthy:
+      return "healthy";
+    case Vajra::runtime::WorkerHealthState::busy:
+      return "busy";
+    case Vajra::runtime::WorkerHealthState::overloaded:
+      return "overloaded";
+    case Vajra::runtime::WorkerHealthState::degraded:
+      return "degraded";
+    case Vajra::runtime::WorkerHealthState::suspect:
+      return "suspect";
+    case Vajra::runtime::WorkerHealthState::wedged:
+      return "wedged";
     }
 
     return "unknown";
@@ -196,14 +214,14 @@ namespace
   {
     switch (state)
     {
-      case Vajra::runtime::WorkerLifecycleState::booting:
-        return "booting";
-      case Vajra::runtime::WorkerLifecycleState::ready:
-        return "ready";
-      case Vajra::runtime::WorkerLifecycleState::stopping:
-        return "stopping";
-      case Vajra::runtime::WorkerLifecycleState::exited:
-        return "exited";
+    case Vajra::runtime::WorkerLifecycleState::booting:
+      return "booting";
+    case Vajra::runtime::WorkerLifecycleState::ready:
+      return "ready";
+    case Vajra::runtime::WorkerLifecycleState::stopping:
+      return "stopping";
+    case Vajra::runtime::WorkerLifecycleState::exited:
+      return "exited";
     }
 
     return "unknown";
@@ -213,18 +231,18 @@ namespace
   {
     switch (state)
     {
-      case Vajra::runtime::WorkerRecoveryState::none:
-        return "none";
-      case Vajra::runtime::WorkerRecoveryState::draining:
-        return "draining";
-      case Vajra::runtime::WorkerRecoveryState::terminating:
-        return "terminating";
-      case Vajra::runtime::WorkerRecoveryState::replacing:
-        return "replacing";
-      case Vajra::runtime::WorkerRecoveryState::rejoin_pending:
-        return "rejoin_pending";
-      case Vajra::runtime::WorkerRecoveryState::terminal_failure:
-        return "terminal_failure";
+    case Vajra::runtime::WorkerRecoveryState::none:
+      return "none";
+    case Vajra::runtime::WorkerRecoveryState::draining:
+      return "draining";
+    case Vajra::runtime::WorkerRecoveryState::terminating:
+      return "terminating";
+    case Vajra::runtime::WorkerRecoveryState::replacing:
+      return "replacing";
+    case Vajra::runtime::WorkerRecoveryState::rejoin_pending:
+      return "rejoin_pending";
+    case Vajra::runtime::WorkerRecoveryState::terminal_failure:
+      return "terminal_failure";
     }
 
     return "unknown";
@@ -238,36 +256,36 @@ namespace
     {
       switch (character)
       {
-        case '\\':
-        case '"':
-          escaped << '\\' << character;
-          break;
-        case '\b':
-          escaped << "\\b";
-          break;
-        case '\f':
-          escaped << "\\f";
-          break;
-        case '\n':
-          escaped << "\\n";
-          break;
-        case '\r':
-          escaped << "\\r";
-          break;
-        case '\t':
-          escaped << "\\t";
-          break;
-        default:
-          if (character < 0x20)
-          {
-            escaped << "\\u00";
-            const char hex[] = "0123456789abcdef";
-            escaped << hex[(character >> 4) & 0x0f] << hex[character & 0x0f];
-          }
-          else
-          {
-            escaped << static_cast<char>(character);
-          }
+      case '\\':
+      case '"':
+        escaped << '\\' << character;
+        break;
+      case '\b':
+        escaped << "\\b";
+        break;
+      case '\f':
+        escaped << "\\f";
+        break;
+      case '\n':
+        escaped << "\\n";
+        break;
+      case '\r':
+        escaped << "\\r";
+        break;
+      case '\t':
+        escaped << "\\t";
+        break;
+      default:
+        if (character < 0x20)
+        {
+          escaped << "\\u00";
+          const char hex[] = "0123456789abcdef";
+          escaped << hex[(character >> 4) & 0x0f] << hex[character & 0x0f];
+        }
+        else
+        {
+          escaped << static_cast<char>(character);
+        }
       }
     }
     escaped << '"';
@@ -574,10 +592,47 @@ void Vajra::runtime::note_worker_rack_execution_time(std::int64_t nanoseconds)
 
 void Vajra::runtime::note_worker_response_write_time(std::int64_t nanoseconds)
 {
-  if (installed_worker_state != nullptr)
-  {
-    installed_worker_state->response_write_nanoseconds.fetch_add(nanoseconds, std::memory_order_acq_rel);
-  }
+  add_installed_worker_nanoseconds(&WorkerRuntimeState::response_write_nanoseconds, nanoseconds);
+}
+
+void Vajra::runtime::note_worker_http2_receive_time(std::int64_t nanoseconds)
+{
+  add_installed_worker_nanoseconds(&WorkerRuntimeState::http2_receive_nanoseconds, nanoseconds);
+}
+
+void Vajra::runtime::note_worker_http2_frame_precheck_time(std::int64_t nanoseconds)
+{
+  add_installed_worker_nanoseconds(&WorkerRuntimeState::http2_frame_precheck_nanoseconds, nanoseconds);
+}
+
+void Vajra::runtime::note_worker_http2_nghttp2_recv_time(std::int64_t nanoseconds)
+{
+  add_installed_worker_nanoseconds(&WorkerRuntimeState::http2_nghttp2_recv_nanoseconds, nanoseconds);
+}
+
+void Vajra::runtime::note_worker_http2_execution_enqueue_time(std::int64_t nanoseconds)
+{
+  add_installed_worker_nanoseconds(&WorkerRuntimeState::http2_execution_enqueue_nanoseconds, nanoseconds);
+}
+
+void Vajra::runtime::note_worker_http2_execution_queue_wait_time(std::int64_t nanoseconds)
+{
+  add_installed_worker_nanoseconds(&WorkerRuntimeState::http2_execution_queue_wait_nanoseconds, nanoseconds);
+}
+
+void Vajra::runtime::note_worker_http2_execution_drain_time(std::int64_t nanoseconds)
+{
+  add_installed_worker_nanoseconds(&WorkerRuntimeState::http2_execution_drain_nanoseconds, nanoseconds);
+}
+
+void Vajra::runtime::note_worker_http2_response_submit_time(std::int64_t nanoseconds)
+{
+  add_installed_worker_nanoseconds(&WorkerRuntimeState::http2_response_submit_nanoseconds, nanoseconds);
+}
+
+void Vajra::runtime::note_worker_http2_session_send_time(std::int64_t nanoseconds)
+{
+  add_installed_worker_nanoseconds(&WorkerRuntimeState::http2_session_send_nanoseconds, nanoseconds);
 }
 
 void Vajra::runtime::note_worker_request_completed()
@@ -666,6 +721,14 @@ std::string Vajra::runtime::runtime_stats_payload_json()
   std::int64_t total_rack_finish_ns = 0;
   std::int64_t total_rack_ns = 0;
   std::int64_t total_response_ns = 0;
+  std::int64_t total_http2_receive_ns = 0;
+  std::int64_t total_http2_frame_precheck_ns = 0;
+  std::int64_t total_http2_nghttp2_recv_ns = 0;
+  std::int64_t total_http2_execution_enqueue_ns = 0;
+  std::int64_t total_http2_execution_queue_wait_ns = 0;
+  std::int64_t total_http2_execution_drain_ns = 0;
+  std::int64_t total_http2_response_submit_ns = 0;
+  std::int64_t total_http2_session_send_ns = 0;
   std::uint64_t total_accepts = 0;
   std::uint64_t total_dispatches = 0;
   std::uint64_t total_receives = 0;
@@ -690,12 +753,24 @@ std::string Vajra::runtime::runtime_stats_payload_json()
         static_cast<WorkerHealthState>(worker.health_state.load(std::memory_order_acquire));
     switch (health_state)
     {
-      case WorkerHealthState::healthy: ++healthy; break;
-      case WorkerHealthState::busy: ++busy; break;
-      case WorkerHealthState::overloaded: ++overloaded; break;
-      case WorkerHealthState::degraded: ++degraded; break;
-      case WorkerHealthState::suspect: ++suspect; break;
-      case WorkerHealthState::wedged: ++wedged; break;
+    case WorkerHealthState::healthy:
+      ++healthy;
+      break;
+    case WorkerHealthState::busy:
+      ++busy;
+      break;
+    case WorkerHealthState::overloaded:
+      ++overloaded;
+      break;
+    case WorkerHealthState::degraded:
+      ++degraded;
+      break;
+    case WorkerHealthState::suspect:
+      ++suspect;
+      break;
+    case WorkerHealthState::wedged:
+      ++wedged;
+      break;
     }
 
     total_head_ns += worker.request_head_nanoseconds.load(std::memory_order_acquire);
@@ -706,6 +781,14 @@ std::string Vajra::runtime::runtime_stats_payload_json()
     total_rack_finish_ns += worker.rack_finish_nanoseconds.load(std::memory_order_acquire);
     total_rack_ns += worker.rack_execution_nanoseconds.load(std::memory_order_acquire);
     total_response_ns += worker.response_write_nanoseconds.load(std::memory_order_acquire);
+    total_http2_receive_ns += worker.http2_receive_nanoseconds.load(std::memory_order_acquire);
+    total_http2_frame_precheck_ns += worker.http2_frame_precheck_nanoseconds.load(std::memory_order_acquire);
+    total_http2_nghttp2_recv_ns += worker.http2_nghttp2_recv_nanoseconds.load(std::memory_order_acquire);
+    total_http2_execution_enqueue_ns += worker.http2_execution_enqueue_nanoseconds.load(std::memory_order_acquire);
+    total_http2_execution_queue_wait_ns += worker.http2_execution_queue_wait_nanoseconds.load(std::memory_order_acquire);
+    total_http2_execution_drain_ns += worker.http2_execution_drain_nanoseconds.load(std::memory_order_acquire);
+    total_http2_response_submit_ns += worker.http2_response_submit_nanoseconds.load(std::memory_order_acquire);
+    total_http2_session_send_ns += worker.http2_session_send_nanoseconds.load(std::memory_order_acquire);
     total_accepts += worker.accept_count.load(std::memory_order_acquire);
     total_dispatches += worker.dispatch_count.load(std::memory_order_acquire);
     total_receives += worker.receive_count.load(std::memory_order_acquire);
@@ -759,6 +842,14 @@ std::string Vajra::runtime::runtime_stats_payload_json()
           << "\"rack_finish_nanoseconds\":" << total_rack_finish_ns << ','
           << "\"ruby_execution_nanoseconds\":" << total_rack_ns << ','
           << "\"response_write_nanoseconds\":" << total_response_ns << ','
+          << "\"http2_receive_nanoseconds\":" << total_http2_receive_ns << ','
+          << "\"http2_frame_precheck_nanoseconds\":" << total_http2_frame_precheck_ns << ','
+          << "\"http2_nghttp2_recv_nanoseconds\":" << total_http2_nghttp2_recv_ns << ','
+          << "\"http2_execution_enqueue_nanoseconds\":" << total_http2_execution_enqueue_ns << ','
+          << "\"http2_execution_queue_wait_nanoseconds\":" << total_http2_execution_queue_wait_ns << ','
+          << "\"http2_execution_drain_nanoseconds\":" << total_http2_execution_drain_ns << ','
+          << "\"http2_response_submit_nanoseconds\":" << total_http2_response_submit_ns << ','
+          << "\"http2_session_send_nanoseconds\":" << total_http2_session_send_ns << ','
           << "\"accept_count\":" << total_accepts << ','
           << "\"dispatch_count\":" << total_dispatches << ','
           << "\"receive_count\":" << total_receives << ','
@@ -767,7 +858,9 @@ std::string Vajra::runtime::runtime_stats_payload_json()
           << "\"native_observability\":{"
           << "\"request_events_total\":" << Vajra::runtime::runtime_native_request_observability_events_total() << ','
           << "\"request_errors_total\":" << Vajra::runtime::runtime_native_request_observability_errors_total() << ','
-          << "\"admission_rejections_total\":" << Vajra::runtime::runtime_native_request_admission_rejections_total()
+          << "\"admission_rejections_total\":" << Vajra::runtime::runtime_native_request_admission_rejections_total() << ','
+          << "\"request_events_dropped_total\":" << Vajra::runtime::runtime_native_request_observability_events_dropped_total() << ','
+          << "\"otlp_span_events_dropped_total\":" << Vajra::runtime::runtime_native_otlp_span_events_dropped_total()
           << "},"
           << "\"health_counts\":{"
           << "\"healthy\":" << healthy << ','
@@ -820,6 +913,22 @@ std::string Vajra::runtime::runtime_metrics_payload_text()
             << worker.rack_execution_nanoseconds.load(std::memory_order_acquire) << '\n';
     payload << "vajra_worker_response_write_nanoseconds_total{worker=\"" << index << "\"} "
             << worker.response_write_nanoseconds.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_http2_receive_nanoseconds_total{worker=\"" << index << "\"} "
+            << worker.http2_receive_nanoseconds.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_http2_frame_precheck_nanoseconds_total{worker=\"" << index << "\"} "
+            << worker.http2_frame_precheck_nanoseconds.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_http2_nghttp2_recv_nanoseconds_total{worker=\"" << index << "\"} "
+            << worker.http2_nghttp2_recv_nanoseconds.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_http2_execution_enqueue_nanoseconds_total{worker=\"" << index << "\"} "
+            << worker.http2_execution_enqueue_nanoseconds.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_http2_execution_queue_wait_nanoseconds_total{worker=\"" << index << "\"} "
+            << worker.http2_execution_queue_wait_nanoseconds.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_http2_execution_drain_nanoseconds_total{worker=\"" << index << "\"} "
+            << worker.http2_execution_drain_nanoseconds.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_http2_response_submit_nanoseconds_total{worker=\"" << index << "\"} "
+            << worker.http2_response_submit_nanoseconds.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_http2_session_send_nanoseconds_total{worker=\"" << index << "\"} "
+            << worker.http2_session_send_nanoseconds.load(std::memory_order_acquire) << '\n';
     payload << "vajra_worker_local_queue_depth{worker=\"" << index << "\"} "
             << worker.local_queue_depth.load(std::memory_order_acquire) << '\n';
     payload << "vajra_worker_lifecycle_state{worker=\"" << index << "\",state=\""

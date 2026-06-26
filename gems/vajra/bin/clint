@@ -29,25 +29,52 @@ done < <(
     end
   '
 )
+OPENSSL_CPPFLAGS_ARRAY=()
+if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists openssl; then
+  while IFS= read -r line; do
+    OPENSSL_CPPFLAGS_ARRAY+=("$line")
+  done < <(pkg-config --cflags openssl | ruby -rshellwords -ne 'Shellwords.split($_).each { |flag| puts flag }')
+fi
 
 CPP_SOURCES=()
 while IFS= read -r line; do
   CPP_SOURCES+=("$line")
 done < <(find "$ROOT_DIR/ext/vajra" -type f -name '*.cpp' | sort)
+C_SOURCES=()
+while IFS= read -r line; do
+  C_SOURCES+=("$line")
+done < <(find "$ROOT_DIR/ext/vajra/vendor/nghttp2" -type f -name '*.c' | sort)
 
 COMMON_FLAGS=(
-  -std=c++17
   -Wall
   -Wextra
   -Wpedantic
   -Werror
   -fsyntax-only
+  -DNGHTTP2_STATICLIB
+  -DBUILDING_NGHTTP2
+  -DHAVE_ARPA_INET_H
+  -DHAVE_NETINET_IN_H
+)
+INCLUDE_FLAGS=(
+  "${RUBY_CPPFLAGS_ARRAY[@]}"
+  "${RUBY_INCLUDE_FLAGS_ARRAY[@]}"
+  "${OPENSSL_CPPFLAGS_ARRAY[@]}"
+  -I"$ROOT_DIR/ext/vajra"
+  -I"$ROOT_DIR/ext/vajra/vendor/nghttp2/lib/includes"
+  -I"$ROOT_DIR/ext/vajra/vendor/nghttp2/lib"
 )
 
 clang++ \
+  -std=c++17 \
   "${COMMON_FLAGS[@]}" \
-  "${RUBY_CPPFLAGS_ARRAY[@]}" \
-  "${RUBY_INCLUDE_FLAGS_ARRAY[@]}" \
-  -I"$ROOT_DIR/ext/vajra" \
+  "${INCLUDE_FLAGS[@]}" \
   "${CPP_SOURCES[@]}" \
+  "$@"
+
+clang \
+  -std=c17 \
+  "${COMMON_FLAGS[@]}" \
+  "${INCLUDE_FLAGS[@]}" \
+  "${C_SOURCES[@]}" \
   "$@"

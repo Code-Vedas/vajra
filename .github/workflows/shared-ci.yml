@@ -49,7 +49,7 @@ jobs:
           ruby-version: ${{ matrix.ruby_version }}
           bundler-cache: false
       - name: Restore bundle cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ${{ env.BUNDLE_PATH }}
           key: ${{ runner.os }}-ruby-${{ matrix.ruby_version }}-bundle-${{ hashFiles('gems/vajra/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
@@ -87,7 +87,7 @@ jobs:
           ruby-version: ${{ matrix.ruby_version }}
           bundler-cache: false
       - name: Restore bundle cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ${{ env.BUNDLE_PATH }}
           key: ${{ runner.os }}-ruby-${{ matrix.ruby_version }}-bundle-${{ hashFiles('gems/vajra/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
@@ -130,7 +130,7 @@ jobs:
           ruby-version: ${{ matrix.ruby_version }}
           bundler-cache: false
       - name: Restore bundle cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ${{ env.BUNDLE_PATH }}
           key: ${{ runner.os }}-ruby-${{ matrix.ruby_version }}-bundle-${{ hashFiles('gems/vajra/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
@@ -184,7 +184,7 @@ jobs:
           ruby-version: ${{ matrix.ruby_version }}
           bundler-cache: false
       - name: Restore bundle cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ${{ env.BUNDLE_PATH }}
           key: ${{ runner.os }}-ruby-${{ matrix.ruby_version }}-bundle-${{ hashFiles('gems/vajra/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
@@ -218,7 +218,7 @@ jobs:
           ruby-version: ${{ env.RUBY_VERSION }}
           bundler-cache: false
       - name: Restore bundle cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ${{ env.BUNDLE_PATH }}
           key: ${{ runner.os }}-ruby-${{ env.RUBY_VERSION }}-bundle-${{ hashFiles('gems/vajra/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
@@ -252,7 +252,7 @@ jobs:
           ruby-version: ${{ env.RUBY_VERSION }}
           bundler-cache: false
       - name: Restore bundle cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ${{ env.BUNDLE_PATH }}
           key: ${{ runner.os }}-ruby-${{ env.RUBY_VERSION }}-bundle-${{ hashFiles('gems/vajra/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}

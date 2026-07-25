@@ -28,4 +28,20 @@ RSpec.describe Vajra::NativeExtension do
       expect(e.backtrace.first).to eq('/tmp/native_extension.rb:12')
     end
   end
+
+  it 'loads only the native extension for the current platform' do
+    loader = instance_double(Method, call: true)
+
+    described_class.load!(loader: loader)
+
+    expect(loader).to have_received(:call).with(
+      File.expand_path("../../lib/vajra/vajra.#{RbConfig::CONFIG.fetch('DLEXT')}", __dir__)
+    )
+  end
+
+  it 'normalizes a callable loader result to a boolean' do
+    loader = instance_double(Method, call: Object.new)
+
+    expect(described_class.load!(loader: loader, extension_path: '/tmp/vajra.bundle')).to be(true)
+  end
 end

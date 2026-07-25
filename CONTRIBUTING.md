@@ -79,7 +79,7 @@ To report a security issue, follow [SECURITY.md](SECURITY.md).
 ## Release Process
 
 1. Create `release/<version>` from `main`.
-2. Update `gems/vajra/lib/vajra/version.rb` and `gems/vajra/vajra.gemspec`.
+2. Update `gems/vajra/lib/vajra/version.rb`. Update the gemspec only when release metadata changes.
 3. Update `CHANGELOG.md`, root docs, and package docs for the release.
 4. Run `scripts/run-all`.
 5. Open a PR to `main` and label it appropriately.

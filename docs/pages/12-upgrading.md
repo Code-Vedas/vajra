@@ -58,12 +58,19 @@ Run the app's normal test suite, then add server-focused checks:
 
 ```bash
 curl -f http://127.0.0.1:3000/
-curl -f http://127.0.0.1:3000/__vajra/stats
-curl -f http://127.0.0.1:3000/metrics
 ```
 
-Use the configured paths for stats and metrics. If HTTP/2 is enabled, validate
-TLS ALPN and h2c clients as applicable.
+When the optional control-plane endpoints are enabled, validate their configured
+paths as separate checks:
+
+```bash
+stats_path=/__vajra/stats
+metrics_path=/metrics
+curl -f "http://127.0.0.1:3000${stats_path}"
+curl -f "http://127.0.0.1:3000${metrics_path}"
+```
+
+If HTTP/2 is enabled, validate TLS ALPN and h2c clients as applicable.
 
 ## Rollout
 

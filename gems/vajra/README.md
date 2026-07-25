@@ -24,7 +24,7 @@ This package owns:
 ## Repository Pairing
 
 - `gems/vajra` is the one supported gem package in this repository
-- `docs/` is the product documentation source of truth
+- [Vajra documentation](https://vajra.codevedas.com) is the product documentation source of truth
 - root `scripts/` provide repository-level install and verification entrypoints
 - `.github/` workflows validate this package and the docs site together
 
@@ -39,7 +39,7 @@ bin/rubocop
 bin/reek
 bin/clint
 bin/ctest
-rbs -I sig validate
+bundle exec rbs -I sig validate
 bundle exec exe/vajra
 ```
 
@@ -52,7 +52,10 @@ IPC contract coverage.
 ## Runtime Configuration
 
 Vajra accepts runtime config from both `Vajra.start(...)` and environment variables.
-Environment variables take precedence when both are present.
+Environment variables take precedence when both are present. The entries below
+are common examples; see the complete
+[configuration reference](https://vajra.codevedas.com/configuration/) for every
+supported setting and default.
 
 - `port`
   - Ruby: `Vajra.start(port: 9292)`

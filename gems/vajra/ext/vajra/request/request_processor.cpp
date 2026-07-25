@@ -708,35 +708,6 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
         connection_behavior = Vajra::response::ConnectionBehavior::close;
     }
 
-    if (request_executor_)
-    {
-        std::optional<Vajra::response::Response> control_response = request_executor_->control_response(request_context);
-        if (control_response)
-        {
-            control_response->headers = Vajra::response::strip_framing_headers(control_response->headers);
-            strip_internal_trace_headers(*control_response);
-            control_response->connection_behavior = connection_behavior;
-            if (!response_writer_.send(connection, *control_response))
-            {
-                return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
-            }
-
-            Vajra::runtime::note_worker_request_completed();
-            const auto event = access_event_for(
-                request_context,
-                control_response->status.code,
-                Vajra::response::response_body_size(*control_response),
-                request_started_at,
-                connection_outcome_for(connection_behavior));
-            log_access_event_if_enabled(event);
-            emit_native_request_observability(event, "ok", "", true, "");
-            return RequestProcessingResult{
-                connection_behavior == Vajra::response::ConnectionBehavior::keep_alive ? RequestProcessingOutcome::keep_alive : RequestProcessingOutcome::close,
-                std::move(head_read_result.trailing_bytes),
-                false};
-        }
-    }
-
     BodyReadPlan body_plan;
     bool execute_without_streaming = false;
     try
@@ -765,6 +736,39 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
             error.what());
         log_access_event_if_enabled(event);
         return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
+    }
+
+    if (request_executor_)
+    {
+        std::optional<Vajra::response::Response> control_response = request_executor_->control_response(request_context);
+        if (control_response)
+        {
+            if (body_plan.framing != BodyFraming::none)
+            {
+                connection_behavior = Vajra::response::ConnectionBehavior::close;
+            }
+            control_response->headers = Vajra::response::strip_framing_headers(control_response->headers);
+            strip_internal_trace_headers(*control_response);
+            control_response->connection_behavior = connection_behavior;
+            if (!response_writer_.send(connection, *control_response))
+            {
+                return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
+            }
+
+            Vajra::runtime::note_worker_request_completed();
+            const auto event = access_event_for(
+                request_context,
+                control_response->status.code,
+                Vajra::response::response_body_size(*control_response),
+                request_started_at,
+                connection_outcome_for(connection_behavior));
+            log_access_event_if_enabled(event);
+            emit_native_request_observability(event, "ok", "", true, "");
+            return RequestProcessingResult{
+                connection_behavior == Vajra::response::ConnectionBehavior::keep_alive ? RequestProcessingOutcome::keep_alive : RequestProcessingOutcome::close,
+                std::move(head_read_result.trailing_bytes),
+                false};
+        }
     }
 
     std::unique_ptr<RequestExecutionSession> execution_session;

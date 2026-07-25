@@ -10,6 +10,8 @@
 #include "request_head_types.hpp"
 #include "request_line_validation_pipeline.hpp"
 
+#include <arpa/inet.h>
+#include <cctype>
 #include <string_view>
 
 namespace Vajra
@@ -35,6 +37,7 @@ namespace Vajra
 
         ParsedRequest parsed_request{build_request_line(request_line, tokens), {}};
         parse_headers(request_head, request_line_end + 2, parsed_request);
+        validate_host_header(parsed_request);
         return parsed_request;
       }
 
@@ -97,13 +100,13 @@ namespace Vajra
           throw bad_request_error("invalid header name");
         }
 
-        const std::string_view header_value = strip_leading_header_whitespace(header_line.substr(delimiter + 1));
+        const std::string_view header_value = strip_header_whitespace(header_line.substr(delimiter + 1));
         return ParsedHeader{
             std::string(header_name),
             std::string(header_value)};
       }
 
-      std::string_view strip_leading_header_whitespace(std::string_view value) const
+      std::string_view strip_header_whitespace(std::string_view value) const
       {
         const std::size_t first_non_whitespace = value.find_first_not_of(" \t");
         if (first_non_whitespace == std::string::npos)
@@ -111,7 +114,151 @@ namespace Vajra
           return {};
         }
 
-        return value.substr(first_non_whitespace);
+        const std::size_t last_non_whitespace = value.find_last_not_of(" \t");
+        return value.substr(first_non_whitespace, last_non_whitespace - first_non_whitespace + 1);
+      }
+
+      bool header_name_equals(std::string_view actual, std::string_view expected) const
+      {
+        if (actual.size() != expected.size())
+        {
+          return false;
+        }
+
+        for (std::size_t index = 0; index < actual.size(); ++index)
+        {
+          if (std::tolower(static_cast<unsigned char>(actual[index])) !=
+              std::tolower(static_cast<unsigned char>(expected[index])))
+          {
+            return false;
+          }
+        }
+        return true;
+      }
+
+      void validate_host_header(const ParsedRequest &parsed_request) const
+      {
+        if (parsed_request.request_line.version != "HTTP/1.1")
+        {
+          return;
+        }
+
+        std::size_t host_count = 0;
+        for (const ParsedHeader &header : parsed_request.headers)
+        {
+          if (!header_name_equals(header.name, "Host"))
+          {
+            continue;
+          }
+
+          ++host_count;
+          if (!valid_authority(header.value))
+          {
+            throw bad_request_error("invalid Host header");
+          }
+        }
+
+        if (host_count != 1)
+        {
+          throw bad_request_error("HTTP/1.1 requires exactly one Host header");
+        }
+      }
+
+      bool valid_authority(const std::string &authority) const
+      {
+        if (authority.empty())
+        {
+          return false;
+        }
+
+        std::string host;
+        std::string port;
+        if (authority.front() == '[')
+        {
+          const std::size_t closing_bracket = authority.find(']');
+          if (closing_bracket == std::string::npos || closing_bracket == 1)
+          {
+            return false;
+          }
+          host = authority.substr(1, closing_bracket - 1);
+          in6_addr address{};
+          if (inet_pton(AF_INET6, host.c_str(), &address) != 1)
+          {
+            return false;
+          }
+          if (closing_bracket + 1 == authority.size())
+          {
+            return true;
+          }
+          if (authority[closing_bracket + 1] != ':')
+          {
+            return false;
+          }
+          port = authority.substr(closing_bracket + 2);
+        }
+        else
+        {
+          const std::size_t colon = authority.find(':');
+          if (colon != std::string::npos && authority.find(':', colon + 1) != std::string::npos)
+          {
+            return false;
+          }
+          host = authority.substr(0, colon);
+          port = colon == std::string::npos ? "" : authority.substr(colon + 1);
+          if (!valid_reg_name(host))
+          {
+            return false;
+          }
+        }
+
+        return port.empty() ? authority.back() != ':' : valid_port(port);
+      }
+
+      bool valid_reg_name(const std::string &host) const
+      {
+        if (host.empty())
+        {
+          return false;
+        }
+        for (std::size_t index = 0; index < host.size(); ++index)
+        {
+          const unsigned char character = static_cast<unsigned char>(host[index]);
+          const bool ascii_alphanumeric = (character >= 'a' && character <= 'z') ||
+                                           (character >= 'A' && character <= 'Z') ||
+                                           (character >= '0' && character <= '9');
+          const bool unreserved = ascii_alphanumeric || character == '-' || character == '.' ||
+                                  character == '_' || character == '~';
+          if (unreserved)
+          {
+            continue;
+          }
+          if (character != '%' || index + 2 >= host.size() ||
+              !std::isxdigit(static_cast<unsigned char>(host[index + 1])) ||
+              !std::isxdigit(static_cast<unsigned char>(host[index + 2])))
+          {
+            return false;
+          }
+          index += 2;
+        }
+        return true;
+      }
+
+      bool valid_port(const std::string &port) const
+      {
+        unsigned int value = 0;
+        for (const unsigned char character : port)
+        {
+          if (character < '0' || character > '9')
+          {
+            return false;
+          }
+          value = value * 10 + static_cast<unsigned int>(character - '0');
+          if (value > 65'535)
+          {
+            return false;
+          }
+        }
+        return true;
       }
 
       RequestLineValidationPipeline request_line_validators_;

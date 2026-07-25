@@ -60,6 +60,8 @@ namespace
   ID id_trace_service_name;
   ID id_trace_otel_owner;
 
+  constexpr long kMaxPollTimeoutSeconds = std::numeric_limits<int>::max() / 1'000;
+
   struct OptionValidationContext
   {
     bool valid;
@@ -712,42 +714,42 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       "request_timeout option",
       25,
       1,
-      std::numeric_limits<int>::max());
+      kMaxPollTimeoutSeconds);
   const long ruby_request_head_timeout_seconds = configured_integer_from_ruby(
       options,
       id_request_head_timeout,
       "request_head_timeout option",
       5,
       1,
-      std::numeric_limits<int>::max());
+      kMaxPollTimeoutSeconds);
   const long ruby_first_data_timeout_seconds = configured_integer_from_ruby(
       options,
       id_first_data_timeout,
       "first_data_timeout option",
       30,
       1,
-      std::numeric_limits<int>::max());
+      kMaxPollTimeoutSeconds);
   const long ruby_request_body_timeout_seconds = configured_integer_from_ruby(
       options,
       id_request_body_timeout,
       "request_body_timeout option",
       Vajra::request::kDefaultRequestBodyTimeoutSeconds,
       1,
-      std::numeric_limits<int>::max());
+      kMaxPollTimeoutSeconds);
   const long ruby_persistent_timeout_seconds = configured_integer_from_ruby(
       options,
       id_persistent_timeout,
       "persistent_timeout option",
       30,
       1,
-      std::numeric_limits<int>::max());
+      kMaxPollTimeoutSeconds);
   const long ruby_worker_timeout_seconds = configured_integer_from_ruby(
       options,
       id_worker_timeout,
       "worker_timeout option",
       60,
       1,
-      std::numeric_limits<int>::max());
+      kMaxPollTimeoutSeconds);
   const bool ruby_tls = configured_boolean_from_ruby(options, id_tls, false);
   const std::string ruby_tls_certificate = configured_string_from_ruby(
       options,
@@ -888,32 +890,32 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       "VAJRA_REQUEST_TIMEOUT",
       ruby_request_timeout_seconds,
       1,
-      std::numeric_limits<int>::max()));
+      kMaxPollTimeoutSeconds));
   const int request_head_timeout_seconds = static_cast<int>(configured_integer_from_env(
       "VAJRA_REQUEST_HEAD_TIMEOUT",
       ruby_request_head_timeout_seconds,
       1,
-      std::numeric_limits<int>::max()));
+      kMaxPollTimeoutSeconds));
   const int first_data_timeout_seconds = static_cast<int>(configured_integer_from_env(
       "VAJRA_FIRST_DATA_TIMEOUT",
       ruby_first_data_timeout_seconds,
       1,
-      std::numeric_limits<int>::max()));
+      kMaxPollTimeoutSeconds));
   const int request_body_timeout_seconds = static_cast<int>(configured_integer_from_env(
       "VAJRA_REQUEST_BODY_TIMEOUT",
       ruby_request_body_timeout_seconds,
       1,
-      std::numeric_limits<int>::max()));
+      kMaxPollTimeoutSeconds));
   const int persistent_timeout_seconds = static_cast<int>(configured_integer_from_env(
       "VAJRA_PERSISTENT_TIMEOUT",
       ruby_persistent_timeout_seconds,
       1,
-      std::numeric_limits<int>::max()));
+      kMaxPollTimeoutSeconds));
   const int worker_timeout_seconds = static_cast<int>(configured_integer_from_env(
       "VAJRA_WORKER_TIMEOUT",
       ruby_worker_timeout_seconds,
       1,
-      std::numeric_limits<int>::max()));
+      kMaxPollTimeoutSeconds));
   const bool tls = configured_boolean_from_env("VAJRA_TLS", ruby_tls);
   const bool http2 = configured_boolean_from_env("VAJRA_HTTP2", ruby_http2);
   const std::string tls_certificate = configured_string_from_env("VAJRA_TLS_CERTIFICATE", ruby_tls_certificate);
@@ -922,6 +924,11 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
   const std::string tls_verify_mode = normalized_tls_verify_mode(
       configured_string_from_env("VAJRA_TLS_VERIFY_MODE", ruby_tls_verify_mode),
       "VAJRA_TLS_VERIFY_MODE");
+  if (tls_verify_mode == "peer" && tls_ca_certificate.empty())
+  {
+    throw std::runtime_error(
+        "TLS peer verification requires tls_ca_certificate or VAJRA_TLS_CA_CERTIFICATE");
+  }
   const std::string tls_min_version = normalized_tls_min_version(
       configured_string_from_env("VAJRA_TLS_MIN_VERSION", ruby_tls_min_version),
       "VAJRA_TLS_MIN_VERSION");

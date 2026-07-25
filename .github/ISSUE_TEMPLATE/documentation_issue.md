@@ -24,6 +24,5 @@ assignees: ""
 
 - [ ] I have searched for similar documentation issues and found none.
 - [ ] I have included all the required information.
-- [ ] I have tagged the issue with the label "documentation."
 
 <!-- Feel free to add any additional details that might help in understanding or resolving the documentation issue. -->

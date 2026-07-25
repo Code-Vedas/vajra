@@ -33,9 +33,17 @@ jobs:
             build-mode: none
           - language: ruby
             build-mode: none
+          - language: c-cpp
+            build-mode: manual
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+      - name: Set up Ruby for native build
+        if: matrix.language == 'c-cpp'
+        uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+          working-directory: gems/vajra
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
@@ -43,14 +51,9 @@ jobs:
           build-mode: ${{ matrix.build-mode }}
       - name: Run manual build steps
         if: matrix.build-mode == 'manual'
-        shell: bash
+        working-directory: gems/vajra
         run: |
-          echo 'If you are using a "manual" build mode for one or more of the' \
-            'languages you are analyzing, replace this with the commands to build' \
-            'your code, for example:'
-          echo '  make bootstrap'
-          echo '  make release'
-          exit 1
+          bundle exec rake compile
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4

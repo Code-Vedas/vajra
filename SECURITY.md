@@ -2,18 +2,21 @@
 
 ## Supported Versions
 
-Supported versions are documented through tagged releases, release notes,
-`CHANGELOG.md`, and package metadata. Security fixes target maintained release
-lines only.
+Only the latest released Vajra version receives security fixes. Earlier
+versions are unsupported; upgrade to the latest release before requesting a
+security backport. The current release is identified by RubyGems, repository
+tags, and `CHANGELOG.md`.
 
 ## Reporting a Vulnerability
 
-Use the `Report a security vulnerability` issue template in this repository.
+Report vulnerabilities privately through
+[GitHub Security Advisories](https://github.com/Code-Vedas/vajra/security/advisories/new).
+Do not open a public issue for a suspected vulnerability.
 Include:
 
 - affected version or commit
 - impact summary
-- reproduction details if safe to share
+- reproduction details
 - suggested mitigation if known
 
 We will triage the report and prioritize a fix according to impact and

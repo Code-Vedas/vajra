@@ -32,6 +32,5 @@ assignees: ""
 
 - [ ] I have searched for a similar feature request and didn't find any duplicates.
 - [ ] I have included all the required information.
-- [ ] I have tagged the issue with the label "enhancement."
 
 <!-- Feel free to add any other details that might help in understanding or implementing the requested feature. -->

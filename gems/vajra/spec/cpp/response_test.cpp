@@ -53,6 +53,29 @@ namespace VajraSpecCpp
       }
     };
 
+    class ControlResponseRequestExecutor final : public Vajra::request::RequestExecutor
+    {
+    public:
+      std::optional<Vajra::response::Response> control_response(
+          const Vajra::request::RequestContext &request_context) const override
+      {
+        if (request_context.request.request_line.target != "/metrics")
+        {
+          return std::nullopt;
+        }
+        return Vajra::response::Response{
+            Vajra::response::Status{200, "OK"},
+            {Vajra::response::Header{"Content-Type", "text/plain"}},
+            "metric 1\n",
+            Vajra::response::ConnectionBehavior::keep_alive};
+      }
+
+      std::optional<Vajra::response::Response> execute(const Vajra::request::RequestContext &) const override
+      {
+        return std::nullopt;
+      }
+    };
+
     class InvalidResponseRequestExecutor final : public Vajra::request::RequestExecutor
     {
     public:
@@ -1464,6 +1487,64 @@ namespace VajraSpecCpp
           fail("second pipelined response did not advertise connection close");
         }
 
+        client_socket.close_if_open();
+        processor_thread.join();
+      }
+      catch (...)
+      {
+        client_socket.close_if_open();
+        if (processor_thread.joinable())
+        {
+          processor_thread.join();
+        }
+        throw;
+      }
+    }
+
+    void test_control_response_closes_instead_of_reinterpreting_request_body()
+    {
+      int sockets[2];
+      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
+      {
+        fail("socketpair failed while setting up control response framing test");
+      }
+
+      FileDescriptorGuard client_socket(sockets[0]);
+      FileDescriptorGuard server_socket(sockets[1]);
+      suppress_sigpipe(client_socket.get());
+      const std::string hidden_request =
+          "GET /poisoned HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n";
+      const auto executor = std::make_shared<ControlResponseRequestExecutor>();
+      const Vajra::request::RequestProcessor processor(
+          Vajra::request::kDefaultMaxRequestHeadBytes,
+          Vajra::request::kDefaultMaxRequestBodyBytes,
+          5,
+          30,
+          Vajra::request::kDefaultRequestBodyTimeoutSeconds,
+          30,
+          0,
+          executor);
+      std::thread processor_thread = start_request_processor_thread(processor, server_socket);
+
+      try
+      {
+        const std::string request =
+            "GET /metrics HTTP/1.1\r\nHost: example.test\r\nContent-Length: " +
+            std::to_string(hidden_request.size()) + "\r\n\r\n" + hidden_request;
+        if (!send_all(client_socket.get(), request))
+        {
+          fail("failed to send framed control request");
+        }
+        const std::string response = read_all(client_socket.get());
+        if (response.find("HTTP/1.1 200 OK\r\n") != 0 ||
+            response.find("Connection: close\r\n") == std::string::npos)
+        {
+          fail("framed control request did not receive a closing response");
+        }
+        if (response.find("HTTP/1.1 200 OK\r\n", 1) != std::string::npos)
+        {
+          fail("control request body was reinterpreted as another request");
+        }
         client_socket.close_if_open();
         processor_thread.join();
       }
@@ -3587,6 +3668,7 @@ namespace VajraSpecCpp
     test_response_writer_send_returns_false_on_serialization_failure();
     test_request_processor_keeps_connection_open_for_sequential_requests();
     test_request_processor_handles_pipelined_read_ahead_without_losing_the_next_request();
+    test_control_response_closes_instead_of_reinterpreting_request_body();
     test_request_processor_closes_after_parse_error_response();
     test_request_processor_keeps_connection_open_after_request_body_framing();
     test_request_processor_closes_http_1_0_without_keep_alive();

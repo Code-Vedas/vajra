@@ -106,6 +106,28 @@ RSpec.describe Vajra, '.start' do
   end
 
   describe '.start' do
+    it 'shuts down Ruby telemetry only after native draining completes' do
+      events = []
+      allow(Vajra::Internal::RackExecution).to receive(:configure_threads!)
+      allow(Vajra::Internal::Tracing).to receive(:install_from_start_options!) { events << :install }
+      allow(described_class).to receive(:__native_start__) { events << :native_drained }
+      allow(Vajra::Internal::Tracing).to receive(:shutdown!) { events << :telemetry_shutdown }
+
+      described_class.start
+
+      expect(events).to eq(%i[install native_drained telemetry_shutdown])
+    end
+
+    it 'shuts down Ruby telemetry when native start fails after tracing is installed' do
+      allow(Vajra::Internal::RackExecution).to receive(:configure_threads!)
+      allow(Vajra::Internal::Tracing).to receive(:install_from_start_options!)
+      allow(Vajra::Internal::Tracing).to receive(:shutdown!)
+      allow(described_class).to receive(:__native_start__).and_raise(RuntimeError, 'native failure')
+
+      expect { described_class.start }.to raise_error(RuntimeError, 'native failure')
+      expect(Vajra::Internal::Tracing).to have_received(:shutdown!)
+    end
+
     it 'accepts the native-backed start surface' do
       allow(described_class).to receive(:__native_start__)
       allow(Vajra::Internal::RackExecution).to receive(:configure_threads!)
@@ -217,6 +239,9 @@ RSpec.describe Vajra, '.start' do
 
       expect { described_class.start(port: 65_536) }
         .to raise_error(Vajra::Error, 'Unable to start Vajra: invalid port option: 65536. Expected an integer between 0 and 65535')
+
+      expect { described_class.start(request_head_timeout: 2_147_484) }
+        .to raise_error(Vajra::Error, 'Unable to start Vajra: invalid request_head_timeout option: 2147484. Expected an integer between 1 and 2147483')
     end
 
     it 'rejects invalid thread ranges before native start' do
@@ -243,18 +268,23 @@ RSpec.describe Vajra, '.start' do
       expect { described_class.start(tls: true) }
         .to raise_error(Vajra::Error, 'Unable to start Vajra: tls requires tls_certificate and tls_private_key')
 
+      expect { described_class.start(tls_verify_mode: 'peer') }
+        .to raise_error(Vajra::Error, 'Unable to start Vajra: tls_verify_mode peer requires tls_ca_certificate')
+
       expect { described_class.start(alpn_protocols: %w[h2 http/1.1]) }
         .to raise_error(Vajra::Error, 'Unable to start Vajra: alpn_protocols cannot include h2 unless http2 is enabled')
     end
   end
 
   describe '.stop' do
-    it 'delegates to the native stop entrypoint' do
+    it 'requests native shutdown without stopping telemetry before the drain completes' do
       allow(described_class).to receive(:__native_stop__)
+      allow(Vajra::Internal::Tracing).to receive(:shutdown!)
 
       described_class.stop
 
       expect(described_class).to have_received(:__native_stop__)
+      expect(Vajra::Internal::Tracing).not_to have_received(:shutdown!)
     end
   end
 end

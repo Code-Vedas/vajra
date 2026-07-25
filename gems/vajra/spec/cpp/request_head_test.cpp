@@ -166,7 +166,12 @@ namespace VajraSpecCpp
           "GET / HTTP/1.1\r\nConnection: close\r\n\r\n",
           "GET / HTTP/1.1\r\nHost:\r\n\r\n",
           "GET / HTTP/1.1\r\nHost: example.test\r\nhost: duplicate.test\r\n\r\n",
-          "GET / HTTP/1.1\r\nHost: bad host\r\n\r\n"};
+          "GET / HTTP/1.1\r\nHost: bad host\r\n\r\n",
+          "GET / HTTP/1.1\r\nHost: user@example.test\r\n\r\n",
+          "GET / HTTP/1.1\r\nHost: example.test/path\r\n\r\n",
+          "GET / HTTP/1.1\r\nHost: example.test:invalid\r\n\r\n",
+          "GET / HTTP/1.1\r\nHost: example.test:65536\r\n\r\n",
+          "GET / HTTP/1.1\r\nHost: [not-ipv6]\r\n\r\n"};
 
       for (const std::string &request_head : invalid_request_heads)
       {
@@ -174,6 +179,22 @@ namespace VajraSpecCpp
       }
 
       expect_parse_success("GET /legacy HTTP/1.0\r\n\r\n", "GET", "/legacy", "HTTP/1.0", 0);
+      expect_parse_success("GET / HTTP/1.1\r\nHost: example.test:443 \t\r\n\r\n", "GET", "/", "HTTP/1.1", 1);
+      expect_parse_success("GET / HTTP/1.1\r\nHost: [::1]:443\r\n\r\n", "GET", "/", "HTTP/1.1", 1);
+    }
+
+    void test_parse_request_head_rejects_non_ascii_and_invalid_percent_encoded_targets()
+    {
+      const std::vector<std::string> invalid_request_heads = {
+          std::string("GET /raw-") + static_cast<char>(0xc3) + static_cast<char>(0xa9) + " HTTP/1.1\r\nHost: example.test\r\n\r\n",
+          "GET /bad%2 HTTP/1.1\r\nHost: example.test\r\n\r\n",
+          "GET /bad%ZZ HTTP/1.1\r\nHost: example.test\r\n\r\n",
+          "GET /path#fragment HTTP/1.1\r\nHost: example.test\r\n\r\n"};
+
+      for (const std::string &request_head : invalid_request_heads)
+      {
+        expect_parse_error(request_head, Vajra::request::HeadFailureKind::bad_request, "invalid request target");
+      }
     }
 
     void test_parse_request_head_rejects_invalid_header_variants()
@@ -510,6 +531,7 @@ namespace VajraSpecCpp
     test_parse_request_head_rejects_malformed_request_line_variants();
     test_parse_request_head_rejects_invalid_method_and_target_octets();
     test_parse_request_head_enforces_http_1_1_host();
+    test_parse_request_head_rejects_non_ascii_and_invalid_percent_encoded_targets();
     test_parse_request_head_rejects_invalid_header_variants();
     test_parse_request_head_rejects_invalid_http_version_variants();
     test_parse_request_head_accepts_http_1_0();

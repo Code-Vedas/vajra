@@ -8,7 +8,11 @@ module Vajra
   end
 
   module NativeExtension
-    def self.load!: (?loader: Proc, ?extension_path: String) -> bool
+    interface _Loader
+      def call: (String) -> bool
+    end
+
+    def self.load!: (?loader: _Loader, ?extension_path: String) -> bool
   end
 
   VERSION: String

@@ -27,7 +27,7 @@ module Vajra
       loader: method(:require),
       extension_path: File.expand_path("vajra/vajra.#{RbConfig::CONFIG.fetch('DLEXT')}", __dir__)
     )
-      loader.call(extension_path)
+      !!loader.call(extension_path)
     rescue LoadError => e
       raise LoadError, <<~MESSAGE, e.backtrace
         Unable to load the Vajra native extension.
@@ -275,6 +275,7 @@ module Vajra
 
     def validate_integer_options!(options)
       native_int_max = 2_147_483_647
+      native_poll_timeout_max = native_int_max / 1_000
       native_long_max = 9_223_372_036_854_775_807
       {
         port: [0, 65_535],
@@ -284,12 +285,12 @@ module Vajra
         max_keepalive_requests: [0, native_int_max],
         max_request_head_bytes: [1, native_int_max],
         max_request_body_bytes: [1, native_int_max],
-        request_timeout: [1, native_int_max],
-        request_head_timeout: [1, native_int_max],
-        first_data_timeout: [1, native_int_max],
-        request_body_timeout: [1, native_int_max],
-        persistent_timeout: [1, native_int_max],
-        worker_timeout: [1, native_int_max],
+        request_timeout: [1, native_poll_timeout_max],
+        request_head_timeout: [1, native_poll_timeout_max],
+        first_data_timeout: [1, native_poll_timeout_max],
+        request_body_timeout: [1, native_poll_timeout_max],
+        persistent_timeout: [1, native_poll_timeout_max],
+        worker_timeout: [1, native_poll_timeout_max],
         http2_max_concurrent_streams: [1, 1_000_000],
         http2_initial_window_size: [0, 2_147_483_647],
         http2_max_frame_size: [16_384, 16_777_215],
@@ -327,6 +328,7 @@ module Vajra
       alpn_protocols = options.fetch(:alpn_protocols, tls_enabled && http2_enabled ? %w[h2 http/1.1] : %w[http/1.1])
 
       validate_tls_credentials!(options) if tls_enabled
+      validate_tls_peer_ca!(options)
       return unless alpn_protocols.include?('h2') && !http2_enabled
 
       raise_start_validation_error('alpn_protocols cannot include h2 unless http2 is enabled')
@@ -336,6 +338,13 @@ module Vajra
       return unless options.fetch(:tls_certificate, '').empty? || options.fetch(:tls_private_key, '').empty?
 
       raise_start_validation_error('tls requires tls_certificate and tls_private_key')
+    end
+
+    def validate_tls_peer_ca!(options)
+      return unless options.fetch(:tls_verify_mode, 'none') == 'peer'
+      return unless options.fetch(:tls_ca_certificate, '').empty?
+
+      raise_start_validation_error('tls_verify_mode peer requires tls_ca_certificate')
     end
 
     def raise_start_validation_error(message)

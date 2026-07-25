@@ -6,6 +6,26 @@ permalink: /api-reference/
 
 # API Reference
 
+## `Vajra` Lifecycle
+
+The top-level Ruby API owns configuration and the blocking server lifecycle.
+
+| Method               | Returns | Behavior |
+| -------------------- | ------- | -------- |
+| `Vajra.configure`    | block result | Available only while the CLI loads `config/vajra.rb`; yields the current configuration object or evaluates a zero-argument block against it. |
+| `Vajra.start(**options)` | `nil` | Validates options, installs Rack execution and tracing, then blocks while the native runtime serves. It returns after shutdown and worker draining complete. |
+| `Vajra.stop`         | `nil` | Requests graceful native shutdown. It may be called from another Ruby thread while `Vajra.start` is blocking. |
+
+Invalid Ruby options raise `Vajra::Error` before native startup. Native startup
+or shutdown failures raise `RuntimeError` with an `Unable to start Vajra` or
+`Unable to stop Vajra` prefix. `Vajra.stop` requests shutdown; the thread
+running `Vajra.start` remains the owner of final drain and telemetry cleanup.
+
+The configuration keys and defaults are documented in
+[Configuration]({% link pages/03-configuration.md %}).
+
+## Rack APIs
+
 Vajra keeps application APIs Rack-compatible. The classes below are native
 objects exposed in the Rack environment for request-body transport, full hijack,
 and HTTP/2 stream tunnels.

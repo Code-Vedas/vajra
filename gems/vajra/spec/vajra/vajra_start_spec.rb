@@ -239,6 +239,9 @@ RSpec.describe Vajra, '.start' do
 
       expect { described_class.start(port: 65_536) }
         .to raise_error(Vajra::Error, 'Unable to start Vajra: invalid port option: 65536. Expected an integer between 0 and 65535')
+
+      expect { described_class.start(request_head_timeout: 2_147_484) }
+        .to raise_error(Vajra::Error, 'Unable to start Vajra: invalid request_head_timeout option: 2147484. Expected an integer between 1 and 2147483')
     end
 
     it 'rejects invalid thread ranges before native start' do
@@ -264,6 +267,9 @@ RSpec.describe Vajra, '.start' do
 
       expect { described_class.start(tls: true) }
         .to raise_error(Vajra::Error, 'Unable to start Vajra: tls requires tls_certificate and tls_private_key')
+
+      expect { described_class.start(tls_verify_mode: 'peer') }
+        .to raise_error(Vajra::Error, 'Unable to start Vajra: tls_verify_mode peer requires tls_ca_certificate')
 
       expect { described_class.start(alpn_protocols: %w[h2 http/1.1]) }
         .to raise_error(Vajra::Error, 'Unable to start Vajra: alpn_protocols cannot include h2 unless http2 is enabled')

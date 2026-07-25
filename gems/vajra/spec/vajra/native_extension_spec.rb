@@ -38,4 +38,10 @@ RSpec.describe Vajra::NativeExtension do
       File.expand_path("../../lib/vajra/vajra.#{RbConfig::CONFIG.fetch('DLEXT')}", __dir__)
     )
   end
+
+  it 'normalizes a callable loader result to a boolean' do
+    loader = instance_double(Method, call: Object.new)
+
+    expect(described_class.load!(loader: loader, extension_path: '/tmp/vajra.bundle')).to be(true)
+  end
 end

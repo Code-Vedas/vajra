@@ -43,7 +43,8 @@ all workers. Log reopen state is process-local; signalling only one PID leaves
 the other processes writing to their previous file descriptors.
 
 ```bash
-kill -USR1 <vajra-master-pid> <vajra-worker-pid>...
+VAJRA_PIDS="1200 1201 1202" # replace with the current master and worker PIDs
+kill -USR1 ${VAJRA_PIDS}
 ```
 
 Use the process IDs reported by your process supervisor or Vajra stats output;

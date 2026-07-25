@@ -84,8 +84,16 @@ Recommended starting points:
 | `request_body_timeout`   | Slow request body delivery.              |
 | `request_timeout`        | Excessive queue wait before Rack runs.   |
 
-Set larger body limits only on routes that need them, and prefer application
-authorization before accepting expensive uploads.
+`max_request_body_bytes` is a listener-wide Vajra limit. Set it no higher than
+the largest route requires, then enforce smaller route-specific limits and
+authorization in the application or reverse proxy before accepting expensive
+uploads.
+
+## Reporting Vulnerabilities
+
+Do not disclose suspected vulnerabilities in a public issue. Follow the private
+reporting process in the repository [Security Policy](https://github.com/Code-Vedas/vajra/security/policy),
+which directs reports through GitHub Security Advisories.
 
 ## Control Plane
 

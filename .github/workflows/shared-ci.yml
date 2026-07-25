@@ -176,7 +176,7 @@ jobs:
           go-version: 1.25.x
       - name: Install h2spec
         run: |
-          go install github.com/summerwind/h2spec/cmd/h2spec@latest
+          go install github.com/summerwind/h2spec/cmd/h2spec@v2.6.0
           echo "${HOME}/go/bin" >> "${GITHUB_PATH}"
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1

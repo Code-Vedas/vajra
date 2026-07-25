@@ -228,11 +228,17 @@ end
 For TLS, confirm the client offered `h2` in ALPN and that `http2` is enabled. If
 startup fails, remove `h2` from `alpn_protocols` or enable `http2`.
 
-Use `curl --http2 --insecure https://localhost:<port>/` to confirm ALPN and
-request handling against a self-signed local endpoint. For cleartext h2c, use
-`curl --http2-prior-knowledge http://localhost:<port>/` or an HTTP/1.1 upgrade
-client that sends `Upgrade: h2c`, `Connection: Upgrade, HTTP2-Settings`, and one
-valid `HTTP2-Settings` header.
+Set the local listener port, then use `curl` to confirm ALPN and request handling
+against a self-signed endpoint or a cleartext h2c endpoint:
+
+```bash
+VAJRA_PORT=3000 # replace with the configured listener port
+curl --http2 --insecure "https://localhost:${VAJRA_PORT}/"
+curl --http2-prior-knowledge "http://localhost:${VAJRA_PORT}/"
+```
+
+An HTTP/1.1 upgrade client must send `Upgrade: h2c`, `Connection: Upgrade,
+HTTP2-Settings`, and one valid `HTTP2-Settings` header.
 
 Extended CONNECT is advertised through HTTP/2 settings when `http2 true` is
 enabled. Clients that require RFC 8441 WebSocket-over-HTTP/2 support must wait
@@ -270,7 +276,8 @@ Vajra reopens configured access and error log files on `SIGUSR1`. Send the
 signal to the master and every worker because reopen state is process-local:
 
 ```bash
-kill -USR1 <vajra-master-pid> <vajra-worker-pid>...
+VAJRA_PIDS="1200 1201 1202" # replace with the current master and worker PIDs
+kill -USR1 ${VAJRA_PIDS}
 ```
 
 Obtain the complete PID list from the process supervisor or Vajra stats output.

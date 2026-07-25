@@ -914,6 +914,33 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
     expect(failure[:output]).to include('Expected an integer between 1 and 2147483647')
   end
 
+  it 'rejects native timeout environment values that overflow millisecond polling' do
+    failure = startup_failure_with_inline_start(
+      'RUBY_PORT' => disposable_listener_port.to_s,
+      'VAJRA_REQUEST_TIMEOUT' => '2147484'
+    )
+
+    expect(failure).to match(
+      exitstatus: be_positive,
+      output: a_string_including('Unable to start Vajra: invalid VAJRA_REQUEST_TIMEOUT: 2147484')
+    )
+    expect(failure[:output]).to include('Expected an integer between 1 and 2147483')
+  end
+
+  it 'rejects native TLS peer verification without a CA certificate' do
+    failure = startup_failure_with_inline_start(
+      'RUBY_PORT' => disposable_listener_port.to_s,
+      'VAJRA_TLS_VERIFY_MODE' => 'peer'
+    )
+
+    expect(failure).to match(
+      exitstatus: be_positive,
+      output: a_string_including(
+        'Unable to start Vajra: TLS peer verification requires tls_ca_certificate or VAJRA_TLS_CA_CERTIFICATE'
+      )
+    )
+  end
+
   it 'fails startup with actionable VAJRA_MAX_KEEPALIVE_REQUESTS validation errors' do
     failure = startup_failure_with_config_env('VAJRA_MAX_KEEPALIVE_REQUESTS' => '-1')
 
@@ -1218,7 +1245,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
       exitstatus: be_positive,
       output: a_string_including('Unable to start Vajra: invalid request_timeout option: 0')
     )
-    expect(failure[:output]).to include('Expected an integer between 1 and 2147483647')
+    expect(failure[:output]).to include('Expected an integer between 1 and 2147483')
   end
 
   it 'trims native string environment overrides before validation' do

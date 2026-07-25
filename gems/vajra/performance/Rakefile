@@ -553,6 +553,22 @@ module Performance
           end
         end
 
+        def h2_open_ready(tls: false, initial_window_size: nil, connection_window_size: nil)
+          attempts = 0
+          begin
+            attempts += 1
+            socket = tls ? h2_open_tls : h2_open_plain
+            h2_preface(socket, initial_window_size:, connection_window_size:)
+            h2_read_server_settings(socket)
+            socket
+          rescue EOFError, Errno::ECONNRESET
+            socket&.close
+            retry if attempts < 3
+
+            raise
+          end
+        end
+
         def h2_open_tls
           tcp = TCPSocket.new(URL.host, URL.port)
           context = OpenSSL::SSL::SSLContext.new
@@ -735,9 +751,7 @@ module Performance
         end
 
         def run_h2_prior
-          socket = h2_open_plain
-          h2_preface(socket)
-          h2_read_server_settings(socket)
+          socket = h2_open_ready
           completed = 0
           latencies = []
           while completed < STREAMS_PER_CONNECTION
@@ -774,18 +788,14 @@ module Performance
         end
 
         def run_h2_upload(tls: false)
-          socket = tls ? h2_open_tls : h2_open_plain
-          h2_preface(socket)
-          h2_read_server_settings(socket)
+          socket = h2_open_ready(tls:)
           run_h2_upload_stream(socket, 1)
         ensure
           socket&.close
         end
 
         def run_h2_upload_persistent_until(deadline)
-          socket = h2_open_plain
-          h2_preface(socket)
-          h2_read_server_settings(socket)
+          socket = h2_open_ready
           next_stream_id = 1
           while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
             yield run_h2_upload_stream(socket, next_stream_id)
@@ -812,17 +822,15 @@ module Performance
         end
 
         def run_h2_tunnel_persistent_until(deadline, tls:, websocket:, backpressure:)
-          socket = tls ? h2_open_tls : h2_open_plain
           if backpressure && tls
-            h2_preface(
-              socket,
+            socket = h2_open_ready(
+              tls:,
               initial_window_size: TUNNEL_BACKPRESSURE_WINDOW,
               connection_window_size: TUNNEL_BACKPRESSURE_WINDOW
             )
           else
-            h2_preface(socket)
+            socket = h2_open_ready(tls:)
           end
-          h2_read_server_settings(socket)
           next_stream_id = 1
           while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
             yield run_h2_tunnel_stream(socket, next_stream_id, websocket: websocket, backpressure: backpressure)
@@ -881,9 +889,7 @@ module Performance
         end
 
         def run_h2_concurrent(tls: false)
-          socket = tls ? h2_open_tls : h2_open_plain
-          h2_preface(socket)
-          h2_read_server_settings(socket)
+          socket = h2_open_ready(tls:)
           completed = 0
           latencies = []
           while completed < STREAMS_PER_CONNECTION
@@ -905,20 +911,42 @@ module Performance
           socket&.close
         end
 
+        def h2c_open_upgraded
+          attempts = 0
+          begin
+            attempts += 1
+            socket = h2_open_plain
+            settings = Base64.urlsafe_encode64([4, 65_535].pack('nN'), padding: false)
+            socket.write(
+              "GET /text HTTP/1.1\r\n" \
+              "Host: #{URL.host}\r\n" \
+              "Connection: Upgrade, HTTP2-Settings\r\n" \
+              "Upgrade: h2c\r\n" \
+              "HTTP2-Settings: #{settings}\r\n" \
+              "\r\n"
+            )
+            head = +''
+            until head.include?("\r\n\r\n")
+              byte = socket.read(1)
+              raise EOFError, 'h2c upgrade closed before response headers' unless byte
+
+              head << byte
+            end
+            unless head.start_with?("HTTP/1.1 101 Switching Protocols\r\n")
+              socket.close
+              raise "h2c upgrade failed: #{head.inspect}"
+            end
+            socket
+          rescue EOFError, Errno::ECONNRESET
+            socket&.close
+            retry if attempts < 3
+
+            raise
+          end
+        end
+
         def run_h2c_upgrade
-          socket = h2_open_plain
-          settings = Base64.urlsafe_encode64([4, 65_535].pack('nN'), padding: false)
-          socket.write(
-            "GET /text HTTP/1.1\r\n" \
-            "Host: #{URL.host}\r\n" \
-            "Connection: Upgrade, HTTP2-Settings\r\n" \
-            "Upgrade: h2c\r\n" \
-            "HTTP2-Settings: #{settings}\r\n" \
-            "\r\n"
-          )
-          head = +''
-          head << socket.read(1) until head.include?("\r\n\r\n")
-          raise "h2c upgrade failed: #{head.inspect}" unless head.start_with?("HTTP/1.1 101 Switching Protocols\r\n")
+          socket = h2c_open_upgraded
           socket.write(h2_frame(H2_SETTINGS, 0, 0, ''))
           completed = 0
           latencies = []

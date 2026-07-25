@@ -136,7 +136,8 @@ Send `SIGUSR1` to the master and every worker after external log rotation.
 Reopen state is process-local, so signalling one worker is insufficient:
 
 ```bash
-kill -USR1 <vajra-master-pid> <vajra-worker-pid>...
+VAJRA_PIDS="1200 1201 1202" # replace with the current master and worker PIDs
+kill -USR1 ${VAJRA_PIDS}
 ```
 
 Obtain the complete PID list from the process supervisor or Vajra stats output.

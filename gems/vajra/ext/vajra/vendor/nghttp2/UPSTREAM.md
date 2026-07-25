@@ -10,7 +10,8 @@ matches the latest upstream release. When updating the vendored source, update
 the version and release link in this file in the same change, then run:
 
 ```bash
-scripts/check-nghttp2-version v<new-version>
+new_version=v1.70.0
+scripts/check-nghttp2-version "${new_version}"
 scripts/run-ctest-all
 scripts/run-h2spec-all
 ```

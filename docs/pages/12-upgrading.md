@@ -64,8 +64,10 @@ When the optional control-plane endpoints are enabled, validate their configured
 paths as separate checks:
 
 ```bash
-curl -f http://127.0.0.1:3000/<configured-stats-path>
-curl -f http://127.0.0.1:3000/<configured-metrics-path>
+stats_path=/__vajra/stats
+metrics_path=/metrics
+curl -f "http://127.0.0.1:3000${stats_path}"
+curl -f "http://127.0.0.1:3000${metrics_path}"
 ```
 
 If HTTP/2 is enabled, validate TLS ALPN and h2c clients as applicable.

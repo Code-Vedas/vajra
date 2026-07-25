@@ -9,6 +9,7 @@ require_relative 'vajra/version'
 require_relative 'vajra/internal/boot'
 require_relative 'vajra/internal/rack_execution'
 require_relative 'vajra/internal/tracing'
+require 'rbconfig'
 
 # Ruby entrypoint for booting the native Vajra HTTP listener.
 module Vajra
@@ -22,7 +23,10 @@ module Vajra
   module NativeExtension
     module_function
 
-    def load!(loader: method(:require), extension_path: File.expand_path('vajra/vajra', __dir__))
+    def load!(
+      loader: method(:require),
+      extension_path: File.expand_path("vajra/vajra.#{RbConfig::CONFIG.fetch('DLEXT')}", __dir__)
+    )
       loader.call(extension_path)
     rescue LoadError => e
       raise LoadError, <<~MESSAGE, e.backtrace
@@ -148,11 +152,14 @@ module Vajra
       validate_start_options!(options)
       Vajra::Internal::RackExecution.configure_threads!(effective_max_threads(options))
       Vajra::Internal::Tracing.install_from_start_options!(options)
-      __native_start__(**options.slice(*NATIVE_START_OPTION_KEYS))
+      begin
+        __native_start__(**options.slice(*NATIVE_START_OPTION_KEYS))
+      ensure
+        Vajra::Internal::Tracing.shutdown!
+      end
     end
 
     def stop
-      Vajra::Internal::Tracing.shutdown!
       __native_stop__
     end
 

@@ -46,6 +46,5 @@ assignees: ""
 
 - [ ] I have searched for similar translation issues and didn't find any duplicates.
 - [ ] I have included all the relevant information.
-- [ ] I have tagged the issue with the label "translation."
 
 <!-- Feel free to add any additional details or context that might be helpful in addressing the translation issue. -->

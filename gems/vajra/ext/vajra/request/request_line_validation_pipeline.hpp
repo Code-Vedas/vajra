@@ -56,17 +56,66 @@ namespace Vajra
       }
     };
 
+    class RequestMethodValidator
+    {
+    public:
+      void validate(const std::string &request_line, const RequestLineTokens &tokens) const
+      {
+        for (std::size_t index = 0; index < tokens.first_space; ++index)
+        {
+          if (!is_token_character(static_cast<unsigned char>(request_line[index])))
+          {
+            throw bad_request_error("invalid request method");
+          }
+        }
+      }
+
+    private:
+      static bool is_token_character(unsigned char character)
+      {
+        if ((character >= '0' && character <= '9') ||
+            (character >= 'A' && character <= 'Z') ||
+            (character >= 'a' && character <= 'z'))
+        {
+          return true;
+        }
+
+        const std::string token_punctuation = "!#$%&'*+-.^_`|~";
+        return token_punctuation.find(static_cast<char>(character)) != std::string::npos;
+      }
+    };
+
+    class RequestTargetValidator
+    {
+    public:
+      void validate(const std::string &request_line, const RequestLineTokens &tokens) const
+      {
+        for (std::size_t index = tokens.first_space + 1; index < tokens.second_space; ++index)
+        {
+          const unsigned char character = static_cast<unsigned char>(request_line[index]);
+          if (character <= 0x20 || character == 0x7f)
+          {
+            throw bad_request_error("invalid request target");
+          }
+        }
+      }
+    };
+
     class RequestLineValidationPipeline
     {
     public:
       void validate(const std::string &request_line, const RequestLineTokens &tokens) const
       {
         structure_validator_.validate(request_line, tokens);
+        method_validator_.validate(request_line, tokens);
+        target_validator_.validate(request_line, tokens);
         http_version_validator_.validate(request_line, tokens);
       }
 
     private:
       RequestLineStructureValidator structure_validator_;
+      RequestMethodValidator method_validator_;
+      RequestTargetValidator target_validator_;
       HttpVersionValidator http_version_validator_;
     };
   }

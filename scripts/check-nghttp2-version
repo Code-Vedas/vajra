@@ -1,0 +1,35 @@
+#!/bin/sh
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
+VERSION_HEADER="${REPO_ROOT}/gems/vajra/ext/vajra/vendor/nghttp2/lib/includes/nghttp2/nghttp2ver.h"
+
+vendored_version=$(sed -n 's/^#define NGHTTP2_VERSION "\([^"]*\)"$/\1/p' "${VERSION_HEADER}")
+if [ "${vendored_version}" = "" ]; then
+  echo "Unable to read the vendored nghttp2 version from ${VERSION_HEADER}" >&2
+  exit 1
+fi
+
+upstream_version=${1:-}
+if [ "${upstream_version}" = "" ]; then
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "gh is required to query the latest nghttp2 release" >&2
+    exit 1
+  fi
+  upstream_version=$(gh api repos/nghttp2/nghttp2/releases/latest --jq .tag_name)
+fi
+upstream_version=${upstream_version#v}
+
+if [ "${vendored_version}" != "${upstream_version}" ]; then
+  echo "Vendored nghttp2 ${vendored_version} is stale; latest upstream release is ${upstream_version}." >&2
+  echo "Update ext/vajra/vendor/nghttp2 and its UPSTREAM.md provenance together." >&2
+  exit 1
+fi
+
+echo "Vendored nghttp2 ${vendored_version} matches the latest upstream release."

@@ -39,7 +39,7 @@ bin/rubocop
 bin/reek
 bin/clint
 bin/ctest
-rbs -I sig validate
+bundle exec rbs -I sig validate
 bundle exec exe/vajra
 ```
 

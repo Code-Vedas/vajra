@@ -97,7 +97,9 @@ clean_compile_vajra_native_extension() {
   echo "Preparing native extension for vajra"
   (
     cd "${suite_dir}"
-    bundle exec rake clobber && bundle exec rake compile
+    bundle exec rake clobber
+    find lib/vajra -maxdepth 1 -type f \( -name 'vajra.so' -o -name 'vajra.bundle' -o -name 'vajra.dll' \) -delete
+    bundle exec rake compile
   )
 }
 

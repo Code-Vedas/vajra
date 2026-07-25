@@ -266,11 +266,14 @@ For full hijack, consume the request body before calling `env["rack.hijack"]`.
 
 ## Access Logs Do Not Rotate
 
-Vajra reopens configured access and error log files on `SIGUSR1`:
+Vajra reopens configured access and error log files on `SIGUSR1`. Send the
+signal to the master and every worker because reopen state is process-local:
 
 ```bash
-kill -USR1 <vajra-worker-pid>
+kill -USR1 <vajra-master-pid> <vajra-worker-pid>...
 ```
+
+Obtain the complete PID list from the process supervisor or Vajra stats output.
 
 `/dev/null` and `nil` access logs remain disabled. If a reopened file cannot be
 opened, Vajra keeps the previous sink and writes a diagnostic to stderr.

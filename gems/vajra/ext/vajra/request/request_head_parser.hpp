@@ -10,6 +10,7 @@
 #include "request_head_types.hpp"
 #include "request_line_validation_pipeline.hpp"
 
+#include <cctype>
 #include <string_view>
 
 namespace Vajra
@@ -35,6 +36,7 @@ namespace Vajra
 
         ParsedRequest parsed_request{build_request_line(request_line, tokens), {}};
         parse_headers(request_head, request_line_end + 2, parsed_request);
+        validate_host_header(parsed_request);
         return parsed_request;
       }
 
@@ -112,6 +114,53 @@ namespace Vajra
         }
 
         return value.substr(first_non_whitespace);
+      }
+
+      bool header_name_equals(std::string_view actual, std::string_view expected) const
+      {
+        if (actual.size() != expected.size())
+        {
+          return false;
+        }
+
+        for (std::size_t index = 0; index < actual.size(); ++index)
+        {
+          if (std::tolower(static_cast<unsigned char>(actual[index])) !=
+              std::tolower(static_cast<unsigned char>(expected[index])))
+          {
+            return false;
+          }
+        }
+        return true;
+      }
+
+      void validate_host_header(const ParsedRequest &parsed_request) const
+      {
+        if (parsed_request.request_line.version != "HTTP/1.1")
+        {
+          return;
+        }
+
+        std::size_t host_count = 0;
+        for (const ParsedHeader &header : parsed_request.headers)
+        {
+          if (!header_name_equals(header.name, "Host"))
+          {
+            continue;
+          }
+
+          ++host_count;
+          if (header.value.empty() ||
+              header.value.find_first_of("\0\r\n\t ", 0, 5) != std::string::npos)
+          {
+            throw bad_request_error("invalid Host header");
+          }
+        }
+
+        if (host_count != 1)
+        {
+          throw bad_request_error("HTTP/1.1 requires exactly one Host header");
+        }
       }
 
       RequestLineValidationPipeline request_line_validators_;

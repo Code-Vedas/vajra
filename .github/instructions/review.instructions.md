@@ -7,38 +7,21 @@ high-signal semantic review over generic style feedback.
 
 - This file is for review work, not primary implementation guidance.
 - For coding instructions, prefer:
-  - `AGENTS.md`
   - `.github/copilot-instructions.md`
 - When reviewing, use those files as context for intended repository shape, but
   keep this file as the source of truth for review posture and review checks.
 
-## Future-State Docs
+## Documentation Contract
 
-- Treat everything under `docs/` as future-state product documentation with no
-  exceptions.
-- Treat `README.md` files as supporting documentation that may summarize current
-  package or repository posture unless a README clearly establishes its own
-  future-state stance.
-- For `docs/`, future-state product consistency takes precedence over
-  implementation-parity review heuristics.
-- Do not flag a PR just because the documentation describes product capability
-  that is not yet fully present in code.
-- Do not ask for `docs/` to be rewritten to match current runtime fields, CLI
-  commands, or API payloads solely because those details are not implemented
-  yet.
-- For `docs/`, only flag:
-  - contradictions inside the future-state story
-  - stale names or broken links
-  - impossible workflows even in the intended future product
-  - support-boundary confusion where the docs disagree about what is first
-    class, optional, governed, or extension-layer behavior
-  - wording that conflicts with explicit repository structure or package
-    ownership
-- Do flag contradictions, stale names, broken links, impossible workflows, or
-  claims that conflict with explicit repository structure and documented support
-  boundaries.
-- If a review comment depends on “this is not implemented today” and nothing
-  more, that comment is out of bounds for `docs/`.
+- Treat `docs/` and project-authored `README.md` files as current product and
+  package documentation.
+- Verify commands, paths, defaults, APIs, payloads, and operational procedures
+  against the implementation, tests, configuration, and workflows.
+- Flag unimplemented or stale claims. Put proposals in an explicitly marked
+  design document outside the production documentation path.
+- Review contradictions, broken links, support boundaries, prerequisites,
+  failure behavior, and package ownership with the same priority as code
+  contracts.
 
 ## Repo-Specific Review Supplement
 
@@ -164,13 +147,8 @@ For any code examples in README/docs:
   - Do code snippets match actual APIs?
   - Do docs and README files still match the current package ownership and
     naming?
-- For `docs/`, do not treat lack of current implementation as a failure by
-  itself. Only flag examples that are contradictory, internally impossible, or
-  inconsistent with the intended future-state product story.
-- **Required:** Flag any example that would fail if run as shown, except in
-  `docs/` where you should only flag examples that are contradictory,
-  internally impossible, or inconsistent with the intended future-state
-  product story.
+- For `docs/`, flag examples that do not work with the current supported product.
+- **Required:** Flag any example that would fail if run as shown.
 
 ### API Surface Consistency
 
@@ -369,9 +347,8 @@ These checks enforce architecture guidelines. Apply them to every code change.
   guidance, not correctness guidance.
 - Verify the docs site still builds successfully after changes when doc changes
   are material.
-- For `docs/`, prefer comments about future-state consistency, terminology,
-  navigation, and support-boundary clarity. Do not demand implementation-reality
-  caveats unless the docs contradict themselves or an explicit support boundary.
+- For `docs/`, review implementation parity, terminology, navigation, and
+  support-boundary clarity.
 
 ## Good Review Targets
 
@@ -382,7 +359,7 @@ These checks enforce architecture guidelines. Apply them to every code change.
 - cross-package contract drift
 - adapter assumptions not supported by the core
 - stale or contradictory docs
-- examples in `docs/` that contradict the intended future-state product story
+- examples in `docs/` that do not match current supported behavior
 - examples outside `docs/` that do not match actual supported APIs
 - ambiguous error messages that hinder debugging
 - duplicate or redundant logic that reduces clarity
@@ -412,10 +389,7 @@ These checks enforce architecture guidelines. Apply them to every code change.
 
 - formatting issues already covered by automated linting in CI
 - speculative product objections when the change is internally consistent
-- complaints that future-state docs are not yet fully implemented
-- requests to replace future-state `docs/` examples with current-state runtime
-  fields, commands, or payloads unless the current docs become self-contradictory
-  or violate explicit support boundaries
+- proposals clearly isolated from production documentation and labeled as such
 - suggesting Service/Command pattern where a constructor + method is already
   clear and explicit
 - requesting namespace renames purely for convention when existing names are

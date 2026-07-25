@@ -38,11 +38,16 @@ bytes, remote address, HTTP protocol, host, user agent, referer, request id,
 worker pid/index, connection outcome, and incoming `traceparent` trace/span ids
 when present.
 
-Send `SIGUSR1` to reopen configured access and error log files after rotation:
+After rotation, send `SIGUSR1` to every Vajra process, including the master and
+all workers. Log reopen state is process-local; signalling only one PID leaves
+the other processes writing to their previous file descriptors.
 
 ```bash
-kill -USR1 <vajra-worker-pid>
+kill -USR1 <vajra-master-pid> <vajra-worker-pid>...
 ```
+
+Use the process IDs reported by your process supervisor or Vajra stats output;
+do not use an unscoped process-name match on a shared host.
 
 ## Stats And Metrics
 

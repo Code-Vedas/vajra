@@ -88,8 +88,8 @@ namespace VajraSpecCpp
 
     std::string request_head_with_header_count(std::size_t header_count)
     {
-      std::string request_head = "GET / HTTP/1.1\r\n";
-      for (std::size_t index = 0; index < header_count; ++index)
+      std::string request_head = "GET / HTTP/1.1\r\nHost: example.test\r\n";
+      for (std::size_t index = 1; index < header_count; ++index)
       {
         request_head += "X-Test-" + std::to_string(index) + ": value\r\n";
       }
@@ -129,6 +129,51 @@ namespace VajraSpecCpp
       {
         expect_parse_error(request_head, Vajra::request::HeadFailureKind::bad_request, "invalid request line");
       }
+    }
+
+    void test_parse_request_head_rejects_invalid_method_and_target_octets()
+    {
+      const std::vector<std::string> invalid_request_heads = {
+          "GE\tT / HTTP/1.1\r\nHost: example.test\r\n\r\n",
+          "GE(T / HTTP/1.1\r\nHost: example.test\r\n\r\n",
+          std::string("GET /nul") + '\0' + "path HTTP/1.1\r\nHost: example.test\r\n\r\n",
+          "GET /tab\tpath HTTP/1.1\r\nHost: example.test\r\n\r\n",
+          std::string("GET /del") + static_cast<char>(0x7f) + "path HTTP/1.1\r\nHost: example.test\r\n\r\n"};
+
+      for (const std::string &request_head : invalid_request_heads)
+      {
+        try
+        {
+          Vajra::request::RequestHeadParser parser;
+          (void)parser.parse(request_head);
+        }
+        catch (const Vajra::request::HeadError &error)
+        {
+          if (error.kind() != Vajra::request::HeadFailureKind::bad_request)
+          {
+            fail("invalid request-line octet used the wrong failure kind");
+          }
+          continue;
+        }
+
+        fail("invalid request-line octet was accepted");
+      }
+    }
+
+    void test_parse_request_head_enforces_http_1_1_host()
+    {
+      const std::vector<std::string> invalid_request_heads = {
+          "GET / HTTP/1.1\r\nConnection: close\r\n\r\n",
+          "GET / HTTP/1.1\r\nHost:\r\n\r\n",
+          "GET / HTTP/1.1\r\nHost: example.test\r\nhost: duplicate.test\r\n\r\n",
+          "GET / HTTP/1.1\r\nHost: bad host\r\n\r\n"};
+
+      for (const std::string &request_head : invalid_request_heads)
+      {
+        expect_parse_error(request_head, Vajra::request::HeadFailureKind::bad_request, "Host");
+      }
+
+      expect_parse_success("GET /legacy HTTP/1.0\r\n\r\n", "GET", "/legacy", "HTTP/1.0", 0);
     }
 
     void test_parse_request_head_rejects_invalid_header_variants()
@@ -463,6 +508,8 @@ namespace VajraSpecCpp
     test_parse_request_head_accepts_exact_header_count_limit();
     test_parse_request_head_rejects_header_count_limit_plus_one();
     test_parse_request_head_rejects_malformed_request_line_variants();
+    test_parse_request_head_rejects_invalid_method_and_target_octets();
+    test_parse_request_head_enforces_http_1_1_host();
     test_parse_request_head_rejects_invalid_header_variants();
     test_parse_request_head_rejects_invalid_http_version_variants();
     test_parse_request_head_accepts_http_1_0();

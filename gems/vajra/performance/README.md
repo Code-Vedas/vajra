@@ -93,11 +93,19 @@ default run duration is 20 seconds per server/fixture pair.
 
 Each generated fixture uses the same request mix:
 
+- `HEAD /text`
 - `GET /text`
 - `GET /json`
+- `GET /headers`
 - `POST /json`
+- `POST /json-large`
 - `POST /form` with text fields and a file
 - `POST /upload` with a file
+- `POST /upload-large` with a file
+- `POST /raw-small`
+- `POST /raw-large`
+- `POST /stream-read`
+- `POST /line-read`
 
 Generated apps, k6 scripts, summaries, and logs are written under
 `tmp/<timestamp>/<fixture>/`. Each server/fixture pair writes

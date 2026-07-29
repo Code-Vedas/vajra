@@ -1,21 +1,14 @@
 # Vajra Copilot Instructions
 
-For implementation work in this repository, follow these rules first. Use
-`.github/instructions/review.instructions.md` as supplemental review guidance,
-not as the primary coding file.
+For implementation work in this repository, follow these rules first. Use `.github/instructions/review.instructions.md` as supplemental review guidance, not as the primary coding file.
 
-Detailed rules live in path-specific files under `.github/instructions/`.
-Prefer repository instruction files over client-specific config. Use client
-config only when a tool is known not to load repository instruction files
-reliably.
+Detailed rules live in path-specific files under `.github/instructions/`. Prefer repository instruction files over client-specific config. Use client config only when a tool is known not to load repository instruction files reliably.
 
 ## Placement
 
-- `gems/vajra` owns the canonical Ruby package, executable, and native
-  extension bridge.
+- `gems/vajra` owns the canonical Ruby package, executable, and native extension bridge.
 - Keep native sources under `gems/vajra/ext/vajra/`.
-- Put signatures in the mirrored `gems/vajra/sig/` path for every changed Ruby
-  surface.
+- Put signatures in the mirrored `gems/vajra/sig/` path for every changed Ruby surface.
 
 ## Structure
 
@@ -27,8 +20,7 @@ reliably.
 
 ## Implementation
 
-- Trace concrete state changes for time, retries, leases, shutdown, and shared
-  state.
+- Trace concrete state changes for time, retries, leases, shutdown, and shared state.
 - Validate raw input before normalization when order matters.
 - Keep types consistent from input to validation to runtime use.
 - Do not symbolize or cache unbounded input.

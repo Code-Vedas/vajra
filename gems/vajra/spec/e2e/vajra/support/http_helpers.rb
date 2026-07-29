@@ -45,7 +45,7 @@ module VajraE2EHttpHelpers
 
       [parse_http_response(http_complete_response(headers, body, content_length)), http_trailing_bytes(body, content_length)]
     end
-  rescue EOFError, Errno::ECONNRESET => e
+  rescue EOFError, Errno::ECONNRESET, Errno::ECONNABORTED => e
     raise e.class, http_read_failure_message(e, request_label, wait_thread, output, buffered_bytes, response), e.backtrace
   end
 
@@ -594,7 +594,7 @@ module VajraE2EHttpHelpers
       ensure
         socket&.close unless socket&.closed?
       end
-    rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH, Errno::ECONNRESET, EOFError, Timeout::Error
+    rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH, Errno::ECONNRESET, Errno::ECONNABORTED, EOFError, Timeout::Error
       if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
         raise Timeout::Error, "#{request_label} timed out: #{process_diagnostics(wait_thread, output)}"
       end

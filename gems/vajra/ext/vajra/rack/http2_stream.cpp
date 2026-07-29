@@ -184,13 +184,13 @@ namespace
     if (!NIL_P(headers_value))
     {
       Check_Type(headers_value, T_HASH);
-      VALUE keys = rb_funcall(headers_value, rb_intern("keys"), 0);
+      VALUE keys = rb_funcallv(headers_value, rb_intern("keys"), 0, nullptr);
       for (long index = 0; index < RARRAY_LEN(keys); ++index)
       {
         VALUE key = rb_ary_entry(keys, index);
         VALUE value = rb_hash_aref(headers_value, key);
-        VALUE key_string = rb_funcall(key, id_to_s, 0);
-        VALUE value_string = rb_funcall(value, id_to_s, 0);
+        VALUE key_string = rb_funcallv(key, id_to_s, 0, nullptr);
+        VALUE value_string = rb_funcallv(value, id_to_s, 0, nullptr);
         headers.push_back(Vajra::response::Header{
             std::string(RSTRING_PTR(key_string), static_cast<std::size_t>(RSTRING_LEN(key_string))),
             std::string(RSTRING_PTR(value_string), static_cast<std::size_t>(RSTRING_LEN(value_string)))});

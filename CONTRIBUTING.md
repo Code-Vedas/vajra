@@ -1,8 +1,6 @@
 # Contributing to Vajra
 
-Thank you for contributing to Vajra. This repository contains one canonical
-gem under `gems/vajra`, a product documentation site under `docs/`, and the
-automation and governance files used to validate and release the project.
+Thank you for contributing to Vajra. This repository contains one canonical gem under `gems/vajra`, a product documentation site under `docs/`, and the automation and governance files used to validate and release the project.
 
 ## Repository Layout
 
@@ -16,8 +14,7 @@ automation and governance files used to validate and release the project.
 
 ## Development Baseline
 
-Use Ruby `3.2+` and run package-local commands from `gems/vajra` unless a root
-script explicitly says otherwise.
+Use Ruby `3.2+` and run package-local commands from `gems/vajra` unless a root script explicitly says otherwise.
 
 ```bash
 cd gems/vajra
@@ -31,11 +28,7 @@ bundle exec rbs -I sig validate
 bundle exec exe/vajra
 ```
 
-The native extension source of truth lives under `gems/vajra/ext/vajra/`.
-When Ruby files are split by responsibility, mirror that split in direct specs
-under `gems/vajra/spec/` where the file owns behavior.
-Unit tests are unit tests with coverage. `bin/rspec-e2e` is the integration
-lane with `NO_COVERAGE=1`.
+The native extension source of truth lives under `gems/vajra/ext/vajra/`. When Ruby files are split by responsibility, mirror that split in direct specs under `gems/vajra/spec/` where the file owns behavior. Unit tests are unit tests with coverage. `bin/rspec-e2e` is the integration lane with `NO_COVERAGE=1`.
 
 ## Docs Development
 
@@ -47,16 +40,13 @@ bundle install
 bundle exec jekyll serve
 ```
 
-Update docs whenever commands, paths, runtime behavior, or support boundaries
-change.
-The intended public docs host is `vajra.codevedas.com`.
+Update docs whenever commands, paths, runtime behavior, or support boundaries change. The intended public docs host is `vajra.codevedas.com`.
 
 ## Pull Requests
 
 Before opening a PR:
 
-1. Create a branch using a meaningful prefix such as `feat/`, `bugfix/`,
-   `docs/`, `chore/`, or `ci/`.
+1. Create a branch using a meaningful prefix such as `feat/`, `bugfix/`, `docs/`, `chore/`, or `ci/`.
 2. Run the relevant local checks.
 3. Update docs when behavior or usage changes.
 4. Complete the PR template with enough detail for reviewers.
@@ -68,9 +58,7 @@ scripts/ci-install-bundles
 scripts/run-all
 ```
 
-That flow covers unit tests with coverage, e2e integration tests without
-coverage, clean native rebuild verification, package build validation, and docs
-build validation.
+That flow covers unit tests with coverage, e2e integration tests without coverage, clean native rebuild verification, package build validation, and docs build validation.
 
 ## Security
 
@@ -84,6 +72,5 @@ To report a security issue, follow [SECURITY.md](SECURITY.md).
 4. Run `scripts/run-all`.
 5. Open a PR to `main` and label it appropriately.
 6. After merge, create a GitHub Release with tag `v<version>`.
-7. Docs are published through `.github/workflows/jekyll-gh-pages.yml` to
-   `vajra.codevedas.com`.
+7. Docs are published through `.github/workflows/jekyll-gh-pages.yml` to `vajra.codevedas.com`.
 8. The release workflow publishes the gem from `gems/vajra`.

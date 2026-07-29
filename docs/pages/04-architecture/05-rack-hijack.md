@@ -7,16 +7,11 @@ permalink: /architecture/rack-hijack/
 
 # Rack Hijack
 
-Rack full hijack gives an application direct control of a client connection.
-Vajra exposes it through `env["rack.hijack"]` for HTTP/1.x requests, including
-TLS HTTP/1.1.
+Rack full hijack gives an application direct control of a client connection. Vajra exposes it through `env["rack.hijack"]` for HTTP/1.x requests, including TLS HTTP/1.1.
 
 ## Full Hijack
 
-The hijack callable is present in plain HTTP/1.0, plain HTTP/1.1, and TLS
-HTTP/1.1 Rack environments. Plain HTTP returns the client socket as a Ruby `IO`.
-TLS HTTP/1.1 returns an IO-like object backed by Vajra's TLS layer, so Ruby reads
-and writes decrypted bytes while Vajra handles encryption on the wire.
+The hijack callable is present in plain HTTP/1.0, plain HTTP/1.1, and TLS HTTP/1.1 Rack environments. On POSIX, plain HTTP returns the client descriptor as a Ruby `IO`. On Windows, a Winsock `SOCKET` is not a POSIX file descriptor, so plain HTTP uses Vajra's native socket-backed IO object. TLS HTTP/1.1 uses the same native IO class backed by Vajra's TLS layer, so Ruby reads and writes decrypted bytes while Vajra handles encryption on the wire.
 
 After a successful hijack:
 
@@ -30,21 +25,15 @@ The callable is single-use. Calling it twice raises an `IOError`.
 
 ## Request Body Requirement
 
-The request body must be drained before hijack. Vajra rejects hijack while
-unread body bytes remain, because native parsing has already consumed the
-request head and may have buffered body bytes. Returning a raw socket at that
-point would risk data loss or protocol corruption.
+The request body must be drained before hijack. Vajra rejects hijack while unread body bytes remain, because native parsing has already consumed the request head and may have buffered body bytes. Returning a raw socket at that point would risk data loss or protocol corruption.
 
 ## Partial Hijack
 
-Partial hijack through a response header is not implemented. Use full hijack for
-raw connection ownership.
+Partial hijack through a response header is not implemented. Use full hijack for raw connection ownership.
 
 ## HTTP/2 Stream IO
 
-HTTP/2 multiplexes many streams on one connection, so Vajra exposes per-stream
-IO through a stream object. Applications that need bidirectional HTTP/2 IO use
-[HTTP/2 Stream Tunnels](/architecture/http2-stream-tunnels/).
+HTTP/2 multiplexes many streams on one connection, so Vajra exposes per-stream IO through a stream object. Applications that need bidirectional HTTP/2 IO use [HTTP/2 Stream Tunnels](/architecture/http2-stream-tunnels/).
 
 ## Code Signposts
 

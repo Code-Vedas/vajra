@@ -17,6 +17,7 @@
 
 #include <cstddef>
 #include <exception>
+#include <functional>
 #include <memory>
 
 namespace Vajra
@@ -58,14 +59,18 @@ namespace Vajra
                 bool http2_enabled = false,
                 Http2Config http2_config = {});
 
-            RequestProcessingOutcome handle(Vajra::transport::Connection &connection, const SocketContext &socket_context) const;
+            RequestProcessingOutcome handle(
+                Vajra::transport::Connection &connection,
+                const SocketContext &socket_context,
+                const std::function<void(bool)> &request_activity_callback = {}) const;
             std::shared_ptr<Http2ExecutionPool> http2_execution_pool() const;
             RequestProcessingResult handle_one(
                 Vajra::transport::Connection &connection,
                 const SocketContext &socket_context,
                 std::string buffered_bytes = "",
                 bool first_request = true,
-                bool force_close_after_response = false) const;
+                bool force_close_after_response = false,
+                const std::function<void(bool)> &request_activity_callback = {}) const;
 
         private:
             Vajra::response::ConnectionBehavior connection_behavior_for(const ParsedRequest &request) const;

@@ -6,9 +6,7 @@ permalink: /command-reference/
 
 # Command Reference
 
-The `vajra` executable starts a Rack application from the application root.
-Rails applications can also start Vajra through the normal Rails server
-launcher.
+The `vajra` executable starts a Rack application from the application root. Rails applications can also start Vajra through the normal Rails server launcher.
 
 ## Synopsis
 
@@ -19,10 +17,10 @@ bundle exec vajra [-C PATH]
 
 The executable accepts one option:
 
-| Option              | Meaning                    |
-| ------------------- | -------------------------- |
-| `-C PATH`           | Load Vajra config at PATH. |
-| `--config PATH`     | Load Vajra config at PATH. |
+| Option          | Meaning                    |
+| --------------- | -------------------------- |
+| `-C PATH`       | Load Vajra config at PATH. |
+| `--config PATH` | Load Vajra config at PATH. |
 
 Unknown options or positional arguments are rejected before startup.
 
@@ -34,8 +32,7 @@ Vajra resolves application startup in this order:
 2. `config/vajra.rb`
 3. `config.ru`
 
-Use `config/vajra.rb` for Vajra server settings and application loading
-directives. Use `config.ru` for ordinary Rack boot.
+Use `config/vajra.rb` for Vajra server settings and application loading directives. Use `config.ru` for ordinary Rack boot.
 
 ```ruby
 # config/vajra.rb
@@ -48,9 +45,7 @@ Vajra.configure do |config|
 end
 ```
 
-If the config file contains an unsupported directive, startup fails while the
-file is loading. This is intentional: unsupported server features should fail
-before the native runtime starts.
+If the config file contains an unsupported directive, startup fails while the file is loading. This is intentional: unsupported server features should fail before the native runtime starts.
 
 ## Rack Applications
 
@@ -67,9 +62,7 @@ Start the server from the application root:
 bundle exec vajra
 ```
 
-Add `config/vajra.rb` only when the application needs explicit Vajra settings
-such as listener address, worker count, limits, TLS, logging, metrics, or
-tracing.
+Add `config/vajra.rb` only when the application needs explicit Vajra settings such as listener address, worker count, limits, TLS, logging, metrics, or tracing.
 
 ## Rails Applications
 
@@ -79,8 +72,7 @@ Rails applications use the standard Rails launcher:
 bin/rails server
 ```
 
-Vajra installs a Rails server handler when the gem is in the application bundle.
-Add `config/vajra.rb` for server-specific settings.
+Vajra installs a Rails server handler when the gem is in the application bundle. Add `config/vajra.rb` for server-specific settings.
 
 ```ruby
 # config/vajra.rb
@@ -95,39 +87,35 @@ end
 
 ## Startup Banner
 
-On successful startup, Vajra prints the runtime banner and the listener address.
-When `port 0` is configured, the operating system chooses an ephemeral port and
-the banner reports the actual bound port.
+On successful startup, Vajra prints the runtime banner and the listener address. When `port 0` is configured, the operating system chooses an ephemeral port and the banner reports the actual bound port.
 
-Use an explicit `PORT` in production. Use `port 0` for tests and local scripts
-that discover the port from the startup output.
+Use an explicit `PORT` in production. Use `port 0` for tests and local scripts that discover the port from the startup output.
 
 ## Failure Behavior
 
 Common startup failures:
 
-| Failure                         | Boundary                                             |
-| ------------------------------- | ---------------------------------------------------- |
-| Unknown CLI option              | Command-line parsing rejects the process.            |
-| Unknown config directive        | `config/vajra.rb` load fails.                        |
-| Invalid `Vajra.start` keyword   | Ruby validation raises before native startup.        |
-| TLS cert or key missing         | Native runtime validation rejects TLS startup.       |
-| Port already in use             | Listener bind fails before serving requests.         |
-| `config.ru` does not load a app | Rack application loading fails before native startup. |
+| Failure                          | Boundary                                              |
+| -------------------------------- | ----------------------------------------------------- |
+| Unknown CLI option               | Command-line parsing rejects the process.             |
+| Unknown config directive         | `config/vajra.rb` load fails.                         |
+| Invalid `Vajra.start` keyword    | Ruby validation raises before native startup.         |
+| TLS cert or key missing          | Native runtime validation rejects TLS startup.        |
+| Port already in use              | Listener bind fails before serving requests.          |
+| `config.ru` does not load an app | Rack application loading fails before native startup. |
 
 See [Troubleshooting](/troubleshooting/) for symptom-based recovery steps.
 
 ## Supported Config Directives
 
-The CLI config DSL supports the same native-backed server settings documented in
-[Configuration](/configuration/). Application loading directives are:
+The CLI config DSL supports the same native-backed server settings documented in [Configuration](/configuration/). Application loading directives are:
 
 | Directive       | Effect                                  |
 | --------------- | --------------------------------------- |
 | `rackup`        | Load `config.ru`.                       |
 | `rackup "path"` | Load a specific rackup file.            |
 | `rails`         | Load `config/environment`.              |
-| `rails "path"` | Load a specific Rails environment file. |
+| `rails "path"`  | Load a specific Rails environment file. |
 | `app object`    | Install an explicit Rack app.           |
 | `app { ... }`   | Build and install a Rack app.           |
 

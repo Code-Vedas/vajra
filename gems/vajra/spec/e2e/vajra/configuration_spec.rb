@@ -656,8 +656,15 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
           span = FakeSpan.new
           yield span
         ensure
+          append_span_log(name:, attributes: options.fetch(:attributes), status: span&.status)
+        end
+
+        private
+
+        def append_span_log(entry)
           File.open(ENV.fetch("SPAN_LOG_PATH"), "a") do |file|
-            file.puts(JSON.generate(name:, attributes: options.fetch(:attributes), status: span&.status))
+            file.flock(File::LOCK_EX)
+            file.puts(JSON.generate(entry))
           end
         end
       end
@@ -725,7 +732,6 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
         "GET /drain-native-observability HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n",
         'otel_observability_result:drain'
       )
-      wait_for_native_span_log(span_log_path) unless extra_env.fetch('UNSAMPLED_OTEL', '') == '1'
       stats_response = if include_stats
                          otel_observability_request(
                            selected_port,
@@ -748,14 +754,6 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
       }
     ensure
       cleanup_process(wait_thread, output)
-    end
-  end
-
-  def wait_for_native_span_log(span_log_path)
-    100.times do
-      return if File.exist?(span_log_path) && File.read(span_log_path).include?('request_parse_error')
-
-      sleep 0.01
     end
   end
 
@@ -871,7 +869,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
 
   it 'fails startup with actionable bind diagnostics and releases startup resources' do
     blocking_server = bind_port
-    blocked_port = blocking_server.addr[1]
+    blocked_port = blocking_server.local_address.ip_port
 
     begin
       failure = startup_failure(port: blocked_port)
@@ -1070,16 +1068,19 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
       Vajra.start
     RUBY
 
+    expected_boot_failure = if Gem.win_platform?
+                              'Unable to start Vajra: Ruby boot failed (worker_boot_failed/boot): worker activation exploded'
+                            else
+                              'Unable to start Vajra: Ruby worker boot failed (worker_boot_failed/boot): worker activation exploded'
+                            end
     expect(failure).to match(
       exitstatus: be_positive,
-      output: a_string_including(
-        'Unable to start Vajra: Ruby worker boot failed (worker_boot_failed/boot): worker activation exploded'
-      )
+      output: a_string_including(expected_boot_failure)
     )
     expect(failure[:output]).not_to include('listening on port')
   end
 
-  it 'preloads once in the master and exposes inherited state to the worker' do
+  it 'preloads once in the master and bootstraps worker state' do
     Dir.mktmpdir('vajra-preload-proof') do |dir|
       trace_path = File.join(dir, 'boot_trace.txt')
 
@@ -1097,7 +1098,13 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
           when "ruby_master_preload"
             $vajra_preloaded_marker = "preloaded-once"
           when "ruby_worker_bootstrap"
-            raise "worker did not inherit preloaded marker" unless $vajra_preloaded_marker == "preloaded-once"
+            if Gem.win_platform?
+              raise "Windows worker unexpectedly inherited process-local state" unless $vajra_preloaded_marker.nil?
+
+              $vajra_preloaded_marker = "worker-bootstrapped"
+            else
+              raise "worker did not inherit preloaded marker" unless $vajra_preloaded_marker == "preloaded-once"
+            end
           end
 
           { status: "ready", role: boot_request.fetch(:runtime_role) }
@@ -1504,7 +1511,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
   it 'prefers VAJRA_PORT over the Ruby port option even when the Ruby port would conflict' do
     blocking_server = nil
     blocking_server = bind_port
-    ruby_port = blocking_server.addr[1]
+    ruby_port = blocking_server.local_address.ip_port
 
     request = request_response_from_inline_start(
       env: { 'RUBY_PORT' => ruby_port.to_s, 'VAJRA_PORT' => disposable_listener_port.to_s }
@@ -1693,7 +1700,7 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
     native_error_span = spans.find do |span|
       span.fetch('attributes')['vajra.request.outcome'] == 'request_parse_error'
     end
-    expect(native_error_span).not_to be_nil
+    expect(native_error_span).not_to be_nil, "native spans: #{result[:span_lines].join(' | ')}"
     expect(native_error_span.fetch('attributes')).to include(
       'http.response.status_code' => 400,
       'vajra.response.sent' => true

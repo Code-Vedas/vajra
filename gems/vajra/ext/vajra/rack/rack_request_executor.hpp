@@ -6,6 +6,7 @@
 #ifndef VAJRA_RACK_REQUEST_EXECUTOR_HPP
 #define VAJRA_RACK_REQUEST_EXECUTOR_HPP
 
+#include "platform/socket.hpp"
 #include "request/rack_env.hpp"
 #include "request/request_executor.hpp"
 
@@ -57,18 +58,18 @@ namespace Vajra
       virtual bool async_completion_supported() const { return false; }
       virtual std::unique_ptr<RackExecutionSession> start(
           const std::vector<request::RackEnvEntry> &env_entries,
-          int client_fd,
+          platform::SocketHandle client_fd,
           std::shared_ptr<NativeHijackTransport> native_hijack_transport = nullptr) const;
       virtual std::optional<Vajra::response::Response> execute(
           const std::vector<request::RackEnvEntry> &env_entries,
           const std::string &request_body,
-          int client_fd,
+          platform::SocketHandle client_fd,
           std::shared_ptr<Http2StreamState> http2_stream = nullptr,
           std::shared_ptr<NativeHijackTransport> native_hijack_transport = nullptr) const = 0;
       virtual std::optional<Vajra::response::Response> execute(
           const std::vector<request::RackEnvEntry> &env_entries,
           std::string &&request_body,
-          int client_fd,
+          platform::SocketHandle client_fd,
           std::shared_ptr<Http2StreamState> http2_stream = nullptr,
           std::shared_ptr<NativeHijackTransport> native_hijack_transport = nullptr) const
       {
@@ -82,7 +83,7 @@ namespace Vajra
       virtual bool execute_async(
           std::vector<request::RackEnvEntry> env_entries,
           std::string request_body,
-          int client_fd,
+          platform::SocketHandle client_fd,
           std::shared_ptr<Http2StreamState> http2_stream,
           std::shared_ptr<NativeHijackTransport> native_hijack_transport,
           request::RequestExecutor::CompletionCallback callback) const

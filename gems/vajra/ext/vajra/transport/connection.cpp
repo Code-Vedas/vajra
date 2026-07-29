@@ -5,55 +5,29 @@
 
 #include "connection.hpp"
 
-#include <cerrno>
-#include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
-Vajra::transport::PlainConnection::PlainConnection(int client_fd) : client_fd_(client_fd)
+Vajra::transport::PlainConnection::PlainConnection(platform::SocketHandle client_fd) : client_fd_(client_fd)
 {
 }
 
-int Vajra::transport::PlainConnection::fd() const
+Vajra::platform::SocketHandle Vajra::transport::PlainConnection::fd() const
 {
   return client_fd_;
 }
 
 bool Vajra::transport::PlainConnection::wait_readable(int timeout_seconds)
 {
-  pollfd descriptor{client_fd_, POLLIN | POLLHUP | POLLERR, 0};
   const int timeout_milliseconds = timeout_seconds <= 0 ? 0 : timeout_seconds * 1000;
-
-  for (;;)
-  {
-    const int poll_result = poll(&descriptor, 1, timeout_milliseconds);
-    if (poll_result > 0)
-    {
-      return (descriptor.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
-    }
-    if (poll_result == 0)
-    {
-      return false;
-    }
-    if (errno != EINTR)
-    {
-      return false;
-    }
-  }
+  return platform::wait_socket(client_fd_, platform::WaitEvent::read, timeout_milliseconds);
 }
 
-ssize_t Vajra::transport::PlainConnection::read(char *buffer, std::size_t length)
+Vajra::platform::SignedSize Vajra::transport::PlainConnection::read(char *buffer, std::size_t length)
 {
-  return recv(client_fd_, buffer, length, 0);
+  return platform::receive_socket(client_fd_, buffer, length);
 }
 
-ssize_t Vajra::transport::PlainConnection::write(const char *buffer, std::size_t length)
+Vajra::platform::SignedSize Vajra::transport::PlainConnection::write(const char *buffer, std::size_t length)
 {
-#ifdef MSG_NOSIGNAL
-  return send(client_fd_, buffer, length, MSG_NOSIGNAL);
-#else
-  return send(client_fd_, buffer, length, 0);
-#endif
+  return platform::send_socket(client_fd_, buffer, length);
 }
 
 std::string Vajra::transport::PlainConnection::protocol() const

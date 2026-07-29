@@ -17,7 +17,6 @@
 #include <functional>
 #include <limits>
 #include <string>
-#include <sys/socket.h>
 #include <utility>
 #include <vector>
 
@@ -69,7 +68,7 @@ namespace
 
   void wait_for_body_bytes(Vajra::transport::Connection &connection, BodyReadDeadline deadline)
   {
-    if (connection.fd() < 0)
+    if (connection.fd() == Vajra::platform::kInvalidSocket)
     {
       throw Vajra::request::BodyReadIncompleteError();
     }
@@ -397,7 +396,7 @@ namespace
 }
 
 Vajra::request::BodyReadResult Vajra::request::RequestBodyReader::stream_read(
-    int client_fd,
+    platform::SocketHandle client_fd,
     const ParsedRequest &request,
     const BodyChunkCallback &on_body_chunk,
     std::string buffered_bytes) const
@@ -431,7 +430,7 @@ Vajra::request::BodyReadResult Vajra::request::RequestBodyReader::stream_read(
 }
 
 Vajra::request::BodyReadResult Vajra::request::RequestBodyReader::read(
-    int client_fd,
+    platform::SocketHandle client_fd,
     const ParsedRequest &request,
     std::string buffered_bytes) const
 {

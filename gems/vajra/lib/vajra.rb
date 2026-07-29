@@ -10,6 +10,7 @@ require_relative 'vajra/internal/boot'
 require_relative 'vajra/internal/rack_execution'
 require_relative 'vajra/internal/tracing'
 require 'rbconfig'
+require 'json'
 
 # Ruby entrypoint for booting the native Vajra HTTP listener.
 module Vajra
@@ -23,14 +24,110 @@ module Vajra
   module NativeExtension
     module_function
 
+    def package_platform
+      'x64-mingw-ucrt'
+    end
+
+    def ensure_supported_windows_abi!
+      return true unless Gem.win_platform?
+      return true if RUBY_PLATFORM.include?('mingw')
+
+      raise LoadError, <<~MESSAGE
+        Vajra does not support MSVC-built Ruby on Windows.
+        Install a RubyInstaller UCRT Ruby with platform x64-mingw-ucrt.
+      MESSAGE
+    end
+
+    def native_packages_root
+      File.expand_path('vajra/native', __dir__)
+    end
+
+    def packaged_native_metadata_path
+      paths = Dir.glob(File.join(native_packages_root, '*', '*', 'native_abi.json'))
+      return nil if paths.empty?
+
+      current_ruby_api = RbConfig::CONFIG.fetch('ruby_version')
+      paths_with_ruby_apis = paths.map { |path| [path, File.basename(File.dirname(path))] }
+      matching_paths = paths_with_ruby_apis.filter_map { |path, ruby_api| path if ruby_api == current_ruby_api }
+      if matching_paths.empty?
+        packaged_apis = paths_with_ruby_apis.map(&:last).uniq.sort
+        raise LoadError, <<~MESSAGE
+          Vajra native extension ABI mismatch.
+          Package Ruby APIs: #{packaged_apis.join(', ')}.
+          Runtime Ruby API: #{current_ruby_api}.
+          Install or build the Vajra gem for this Ruby API version.
+        MESSAGE
+      end
+
+      if matching_paths.length > 1
+        raise LoadError,
+              "Invalid Vajra native package: multiple ABI metadata files found for Ruby #{current_ruby_api}: #{matching_paths.join(', ')}"
+      end
+
+      matching_paths.fetch(0)
+    end
+
+    def packaged_native_root
+      metadata_path = packaged_native_metadata_path
+      return File.dirname(metadata_path) if metadata_path
+
+      File.join(native_packages_root, package_platform, RbConfig::CONFIG.fetch('ruby_version'))
+    end
+
+    def validate_abi!(metadata_path: packaged_native_metadata_path)
+      return true unless metadata_path
+      raise LoadError, "Invalid Vajra native package: ABI metadata is missing at #{metadata_path}" unless File.file?(metadata_path)
+
+      metadata = JSON.parse(File.read(metadata_path))
+      expected_platform = package_platform
+      actual_platform = metadata.fetch('platform')
+      actual_ruby_api = metadata.fetch('ruby_api_version')
+      current_ruby_api = RbConfig::CONFIG.fetch('ruby_version')
+      actual_architecture = metadata.fetch('architecture')
+      actual_compiler_family = metadata.fetch('compiler_family')
+      actual_runtime_abi = metadata.fetch('runtime_abi')
+      expected_compiler_family = 'mingw'
+      expected_runtime_abi = 'ucrt'
+      current_architecture = RbConfig::CONFIG.fetch('arch')
+      actual_abi = [actual_platform, actual_ruby_api, actual_architecture, actual_compiler_family, actual_runtime_abi]
+      expected_abi = [
+        expected_platform,
+        current_ruby_api,
+        current_architecture,
+        expected_compiler_family,
+        expected_runtime_abi
+      ]
+      return true if Gem.win_platform? && actual_abi == expected_abi
+
+      raise LoadError, <<~MESSAGE
+        Vajra native extension ABI mismatch.
+        Package ABI: #{actual_platform} / #{actual_architecture} / #{actual_compiler_family} / #{actual_runtime_abi} / Ruby #{actual_ruby_api}.
+        Runtime ABI: #{RUBY_PLATFORM} / #{current_architecture} / #{expected_compiler_family} / #{expected_runtime_abi} / Ruby #{current_ruby_api}.
+        Install the Vajra gem built for this exact Windows Ruby ABI.
+      MESSAGE
+    rescue JSON::ParserError, KeyError => e
+      raise LoadError, "Invalid Vajra native ABI metadata: #{e.message}"
+    end
+
     def load!(
       loader: method(:require),
-      extension_path: File.expand_path("vajra/vajra.#{RbConfig::CONFIG.fetch('DLEXT')}", __dir__)
+      extension_path: nil
     )
+      ensure_supported_windows_abi!
+      validate_abi!
+      extension_suffix = RbConfig::CONFIG.fetch('DLEXT')
+      packaged_extension = File.join(packaged_native_root, "vajra.#{extension_suffix}")
+      extension_path ||= if File.file?(packaged_extension)
+                           packaged_extension
+                         else
+                           File.expand_path("vajra/vajra.#{extension_suffix}", __dir__)
+                         end
       !!loader.call(extension_path)
     rescue LoadError => e
       raise LoadError, <<~MESSAGE, e.backtrace
         Unable to load the Vajra native extension.
+        Ruby ABI: #{RUBY_PLATFORM} (#{RbConfig::CONFIG.fetch('CC', 'unknown compiler')}).
+        On Windows, Vajra requires RubyInstaller UCRT Ruby (x64-mingw-ucrt).
         Run `bundle exec rake compile` from the `gems/vajra/` package directory and retry.
         Original error: #{e.message}
       MESSAGE

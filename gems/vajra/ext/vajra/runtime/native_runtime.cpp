@@ -152,7 +152,7 @@ namespace
     const VALUE tracing = rb_const_get(internal, rb_intern("Tracing"));
     if (rb_respond_to(tracing, id_after_fork))
     {
-      rb_funcall(tracing, id_after_fork, 0);
+      rb_funcallv(tracing, id_after_fork, 0, nullptr);
     }
     return Qnil;
   }
@@ -161,6 +161,29 @@ namespace
   {
     int state = 0;
     rb_protect(notify_tracing_after_fork_protected, Qnil, &state);
+    if (state != 0)
+    {
+      rb_set_errinfo(Qnil);
+    }
+  }
+
+  VALUE notify_tracing_before_worker_exit_protected(VALUE)
+  {
+    const ID id_before_worker_exit = rb_intern("before_worker_exit!");
+    const VALUE vajra = rb_const_get(rb_cObject, rb_intern("Vajra"));
+    const VALUE internal = rb_const_get(vajra, rb_intern("Internal"));
+    const VALUE tracing = rb_const_get(internal, rb_intern("Tracing"));
+    if (rb_respond_to(tracing, id_before_worker_exit))
+    {
+      rb_funcallv(tracing, id_before_worker_exit, 0, nullptr);
+    }
+    return Qnil;
+  }
+
+  void notify_tracing_before_worker_exit()
+  {
+    int state = 0;
+    rb_protect(notify_tracing_before_worker_exit_protected, Qnil, &state);
     if (state != 0)
     {
       rb_set_errinfo(Qnil);
@@ -3851,7 +3874,11 @@ void Vajra::runtime::NativeRuntime::run_worker_process(
     }
     const auto boot_finished_at = std::chrono::steady_clock::now();
     const std::chrono::duration<double> boot_elapsed = boot_finished_at - boot_started_at;
-    log_worker_booted(worker_index, getpid(), boot_elapsed.count());
+    log_worker_booted(
+        worker_index,
+        getpid(),
+        Vajra::platform::current_parent_process_id(),
+        boot_elapsed.count());
     close(readiness_write_fd);
 
     while (!shutdown_requested_or_runtime_draining())
@@ -3937,6 +3964,7 @@ void Vajra::runtime::NativeRuntime::run_worker_process(
       }
     }
     Vajra::rack::shutdown_same_process_rack_execution_threads();
+    notify_tracing_before_worker_exit();
     Vajra::runtime::stop_runtime_tracing_worker();
     Vajra::runtime::stop_runtime_logging_worker();
     _exit(0);

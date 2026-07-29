@@ -2,8 +2,7 @@
 
 `vajra` is the canonical Ruby package for the Vajra server runtime.
 
-It provides the Ruby entrypoints, packaging contract, executable, signatures,
-and native-extension bridge for the Vajra server implementation.
+It provides the Ruby entrypoints, packaging contract, executable, signatures, and native-extension bridge for the Vajra server implementation.
 
 ## Use This Package When
 
@@ -43,19 +42,11 @@ bundle exec rbs -I sig validate
 bundle exec exe/vajra
 ```
 
-`bin/rspec-unit` runs the committed package spec suite, including the clean
-Ruby/package behavior checks. `bin/rspec-e2e` runs the integration-style boot
-check without coverage. `bin/clint` runs the native C++ lint lane, and
-`bin/ctest` builds and runs the native C++ test suite, including lifecycle and
-IPC contract coverage.
+`bin/rspec-unit` runs the committed package spec suite, including the clean Ruby/package behavior checks. `bin/rspec-e2e` runs the integration-style boot check without coverage. `bin/clint` runs the native C++ lint lane, and `bin/ctest` builds and runs the native C++ test suite, including lifecycle and IPC contract coverage.
 
 ## Runtime Configuration
 
-Vajra accepts runtime config from both `Vajra.start(...)` and environment variables.
-Environment variables take precedence when both are present. The entries below
-are common examples; see the complete
-[configuration reference](https://vajra.codevedas.com/configuration/) for every
-supported setting and default.
+Vajra accepts runtime config from both `Vajra.start(...)` and environment variables. Environment variables take precedence when both are present. The entries below are common examples; see the complete [configuration reference](https://vajra.codevedas.com/configuration/) for every supported setting and default.
 
 - `port`
   - Ruby: `Vajra.start(port: 9292)`
@@ -77,9 +68,7 @@ The `vajra` executable looks for app startup files in this order:
 2. `config/vajra.rb`
 3. `config.ru`
 
-Use `config/vajra.rb` for Vajra-specific settings such as `port`,
-`max_request_head_bytes`, and the `rails` adapter directive. Use `config.ru`
-for Rack app boot in Sinatra, Roda, Hanami, and other Rack-first frameworks.
+Use `config/vajra.rb` for Vajra-specific settings such as `port`, `max_request_head_bytes`, and the `rails` adapter directive. Use `config.ru` for Rack app boot in Sinatra, Roda, Hanami, and other Rack-first frameworks.
 
 ## Native Extension
 
@@ -91,8 +80,9 @@ Use the package-local build flow to compile and refresh the extension:
 bundle exec rake clobber compile
 ```
 
-If the extension is missing or stale, `require "vajra"` raises an actionable
-load error that points back to the package-local compile command.
+If the extension is missing or stale, `require "vajra"` raises an actionable load error that points back to the package-local compile command.
+
+Windows requires a 64-bit RubyInstaller UCRT Ruby (`x64-mingw-ucrt`). MSVC-built Ruby (`x64-mswin64`) is not supported.
 
 ## Package Discipline
 

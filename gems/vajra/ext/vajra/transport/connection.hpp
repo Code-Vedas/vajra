@@ -6,6 +6,8 @@
 #ifndef VAJRA_TRANSPORT_CONNECTION_HPP
 #define VAJRA_TRANSPORT_CONNECTION_HPP
 
+#include "platform/socket.hpp"
+
 #include <cstddef>
 #include <string>
 
@@ -18,10 +20,10 @@ namespace Vajra
     public:
       virtual ~Connection() = default;
 
-      virtual int fd() const = 0;
+      virtual platform::SocketHandle fd() const = 0;
       virtual bool wait_readable(int timeout_seconds) = 0;
-      virtual ssize_t read(char *buffer, std::size_t length) = 0;
-      virtual ssize_t write(const char *buffer, std::size_t length) = 0;
+      virtual platform::SignedSize read(char *buffer, std::size_t length) = 0;
+      virtual platform::SignedSize write(const char *buffer, std::size_t length) = 0;
       virtual std::string protocol() const = 0;
       virtual bool tls() const = 0;
     };
@@ -29,17 +31,17 @@ namespace Vajra
     class PlainConnection final : public Connection
     {
     public:
-      explicit PlainConnection(int client_fd);
+      explicit PlainConnection(platform::SocketHandle client_fd);
 
-      int fd() const override;
+      platform::SocketHandle fd() const override;
       bool wait_readable(int timeout_seconds) override;
-      ssize_t read(char *buffer, std::size_t length) override;
-      ssize_t write(const char *buffer, std::size_t length) override;
+      platform::SignedSize read(char *buffer, std::size_t length) override;
+      platform::SignedSize write(const char *buffer, std::size_t length) override;
       std::string protocol() const override;
       bool tls() const override;
 
     private:
-      int client_fd_;
+      platform::SocketHandle client_fd_;
     };
   }
 }

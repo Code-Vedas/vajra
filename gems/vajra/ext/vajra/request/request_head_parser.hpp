@@ -9,8 +9,8 @@
 #include "request_head_error.hpp"
 #include "request_head_types.hpp"
 #include "request_line_validation_pipeline.hpp"
+#include "platform/socket.hpp"
 
-#include <arpa/inet.h>
 #include <cctype>
 #include <string_view>
 
@@ -224,8 +224,8 @@ namespace Vajra
         {
           const unsigned char character = static_cast<unsigned char>(host[index]);
           const bool ascii_alphanumeric = (character >= 'a' && character <= 'z') ||
-                                           (character >= 'A' && character <= 'Z') ||
-                                           (character >= '0' && character <= '9');
+                                          (character >= 'A' && character <= 'Z') ||
+                                          (character >= '0' && character <= '9');
           const bool unreserved = ascii_alphanumeric || character == '-' || character == '.' ||
                                   character == '_' || character == '~';
           if (unreserved)

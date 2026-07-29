@@ -9,6 +9,7 @@
 #include "rack/native_input.hpp"
 #include "rack/rack_execution_profiler.hpp"
 #include "rack/ruby_execution_bridge.hpp"
+#include "platform/process.hpp"
 #include "runtime/runtime_logging.hpp"
 #include "runtime/runtime_state.hpp"
 #include "runtime/traceparent.hpp"
@@ -22,7 +23,6 @@
 #include <mutex>
 #include <stdexcept>
 #include <vector>
-#include <unistd.h>
 
 namespace
 {
@@ -38,7 +38,7 @@ namespace
     const std::vector<Vajra::request::RackEnvEntry> *env_entries;
     std::string *request_body;
     VALUE rack_input = Qnil;
-    int client_fd = -1;
+    Vajra::platform::SocketHandle client_fd = Vajra::platform::kInvalidSocket;
     std::shared_ptr<Vajra::rack::NativeInputState> input_state;
     std::shared_ptr<Vajra::rack::NativeHijackState> hijack_state;
     std::shared_ptr<Vajra::rack::Http2StreamState> http2_stream;
@@ -130,7 +130,7 @@ namespace
     event.response_sent = true;
     event.connection_outcome = response.connection_behavior == Vajra::response::ConnectionBehavior::close ? "close" : "keepalive";
     event.worker_index = static_cast<int>(Vajra::runtime::current_worker_index());
-    event.worker_pid = getpid();
+    event.worker_pid = Vajra::platform::current_process_id();
     event.trace_id = Vajra::runtime::traceparent_part(fields.traceparent, 1);
     event.span_id = Vajra::runtime::traceparent_part(fields.traceparent, 2);
     return event;
@@ -367,7 +367,7 @@ namespace
   std::optional<Vajra::response::Response> execute_rack_request(
       const std::vector<Vajra::request::RackEnvEntry> &env_entries,
       std::string request_body,
-      int client_fd,
+      Vajra::platform::SocketHandle client_fd,
       std::shared_ptr<Vajra::rack::Http2StreamState> http2_stream,
       std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport,
       bool acquire_gvl)
@@ -399,7 +399,7 @@ namespace
   std::optional<Vajra::response::Response> execute_rack_request(
       const std::vector<Vajra::request::RackEnvEntry> &env_entries,
       VALUE rack_input,
-      int client_fd,
+      Vajra::platform::SocketHandle client_fd,
       std::shared_ptr<Vajra::rack::NativeInputState> input_state,
       std::shared_ptr<Vajra::rack::Http2StreamState> http2_stream,
       std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport,
@@ -448,7 +448,7 @@ namespace
     SameProcessRackTask(
         std::vector<Vajra::request::RackEnvEntry> env_entries,
         std::shared_ptr<Vajra::rack::NativeInputState> input_state,
-        int client_fd,
+        Vajra::platform::SocketHandle client_fd,
         std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport)
         : env_entries_(std::move(env_entries)),
           input_state_(std::move(input_state)),
@@ -534,7 +534,7 @@ namespace
 
     std::vector<Vajra::request::RackEnvEntry> env_entries_;
     std::shared_ptr<Vajra::rack::NativeInputState> input_state_;
-    int client_fd_ = -1;
+    Vajra::platform::SocketHandle client_fd_ = Vajra::platform::kInvalidSocket;
     std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport_;
     mutable std::mutex mutex_;
     std::condition_variable condition_;
@@ -549,7 +549,7 @@ namespace
     SameProcessDirectRackTask(
         std::vector<Vajra::request::RackEnvEntry> env_entries,
         std::string request_body,
-        int client_fd,
+        Vajra::platform::SocketHandle client_fd,
         std::shared_ptr<Vajra::rack::Http2StreamState> http2_stream = nullptr,
         std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport = nullptr,
         Vajra::request::RequestExecutor::CompletionCallback callback = nullptr)
@@ -655,7 +655,7 @@ namespace
 
     std::vector<Vajra::request::RackEnvEntry> env_entries_;
     std::string request_body_;
-    int client_fd_ = -1;
+    Vajra::platform::SocketHandle client_fd_ = Vajra::platform::kInvalidSocket;
     std::shared_ptr<Vajra::rack::Http2StreamState> http2_stream_;
     std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport_;
     Vajra::request::RequestExecutor::CompletionCallback callback_;
@@ -845,7 +845,7 @@ namespace
   public:
     SameProcessRackExecutionSession(
         std::vector<Vajra::request::RackEnvEntry> env_entries,
-        int client_fd,
+        Vajra::platform::SocketHandle client_fd,
         std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport)
         : input_state_(Vajra::rack::create_native_input_state()),
           task_(std::make_shared<SameProcessRackTask>(
@@ -980,7 +980,7 @@ namespace
 
     std::unique_ptr<Vajra::rack::RackExecutionSession> start(
         const std::vector<Vajra::request::RackEnvEntry> &env_entries,
-        int client_fd,
+        Vajra::platform::SocketHandle client_fd,
         std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport = nullptr) const override
     {
       return std::make_unique<SameProcessRackExecutionSession>(
@@ -992,7 +992,7 @@ namespace
     std::optional<Vajra::response::Response> execute(
         const std::vector<Vajra::request::RackEnvEntry> &env_entries,
         const std::string &request_body,
-        int client_fd,
+        Vajra::platform::SocketHandle client_fd,
         std::shared_ptr<Vajra::rack::Http2StreamState> http2_stream = nullptr,
         std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport = nullptr) const override
     {
@@ -1027,7 +1027,7 @@ namespace
     std::optional<Vajra::response::Response> execute(
         const std::vector<Vajra::request::RackEnvEntry> &env_entries,
         std::string &&request_body,
-        int client_fd,
+        Vajra::platform::SocketHandle client_fd,
         std::shared_ptr<Vajra::rack::Http2StreamState> http2_stream = nullptr,
         std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport = nullptr) const override
     {
@@ -1062,7 +1062,7 @@ namespace
     bool execute_async(
         std::vector<Vajra::request::RackEnvEntry> env_entries,
         std::string request_body,
-        int client_fd,
+        Vajra::platform::SocketHandle client_fd,
         std::shared_ptr<Vajra::rack::Http2StreamState> http2_stream,
         std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport,
         Vajra::request::RequestExecutor::CompletionCallback callback) const override
@@ -1158,7 +1158,7 @@ void Vajra::rack::shutdown_same_process_rack_execution_threads()
 std::optional<Vajra::response::Response> Vajra::rack::execute_current_thread_rack_request(
     const std::vector<Vajra::request::RackEnvEntry> &env_entries,
     const std::string &request_body,
-    int client_fd)
+    Vajra::platform::SocketHandle client_fd)
 {
   return execute_rack_request(env_entries, request_body, client_fd, nullptr, nullptr, false);
 }
@@ -1166,7 +1166,7 @@ std::optional<Vajra::response::Response> Vajra::rack::execute_current_thread_rac
 std::optional<Vajra::response::Response> Vajra::rack::execute_current_thread_rack_request(
     const std::vector<Vajra::request::RackEnvEntry> &env_entries,
     VALUE rack_input,
-    int client_fd,
+    Vajra::platform::SocketHandle client_fd,
     std::shared_ptr<Vajra::rack::NativeInputState> input_state)
 {
   return execute_rack_request(env_entries, rack_input, client_fd, std::move(input_state), nullptr, nullptr, false);

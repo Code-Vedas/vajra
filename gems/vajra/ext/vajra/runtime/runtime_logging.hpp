@@ -8,11 +8,11 @@
 
 #include "runtime/time_utils.hpp"
 #include "runtime/worker_pool.hpp"
+#include "platform/process.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <string>
-#include <sys/types.h>
 #include <vector>
 
 namespace Vajra
@@ -76,7 +76,7 @@ namespace Vajra
         void log_worker_lifecycle_event(
             const char *event_name,
             std::size_t worker_index,
-            pid_t pid,
+            platform::ProcessId pid,
             WorkerLifecycleState lifecycle_state,
             WorkerHealthState health_state,
             WorkerRecoveryState recovery_state,
@@ -90,7 +90,11 @@ namespace Vajra
             int port,
             const std::string &runtime_role,
             int worker_processes);
-        void log_worker_booted(int worker_index, pid_t pid, double boot_seconds);
+        void log_worker_booted(
+            int worker_index,
+            platform::ProcessId pid,
+            platform::ProcessId master_pid,
+            double boot_seconds);
         void log_runtime_error(const std::string &message);
         struct AccessLogEvent
         {
@@ -105,7 +109,7 @@ namespace Vajra
             std::string user_agent;
             std::string referer;
             std::string request_id;
-            pid_t worker_pid = -1;
+            platform::ProcessId worker_pid = platform::kInvalidProcessId;
             int worker_index = -1;
             std::string connection_outcome;
             std::string trace_id;
@@ -136,7 +140,7 @@ namespace Vajra
             bool response_sent = false;
             std::string connection_outcome;
             int worker_index = -1;
-            pid_t worker_pid = -1;
+            platform::ProcessId worker_pid = platform::kInvalidProcessId;
             std::string trace_id;
             std::string span_id;
             std::string error_message;

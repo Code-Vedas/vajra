@@ -45,7 +45,10 @@ Gem::Specification.new do |spec|
       '.ruby-version'
     ],
     base: File.expand_path(__dir__)
-  )
+  ).reject do |path|
+    path.match?(%r{\Aext/vajra/(?:Makefile|mkmf\.log)\z}) ||
+      path.match?(/\.(?:o|obj|lib|exp)\z/i)
+  end
   spec.require_paths = ['lib']
   spec.extensions = ['ext/vajra/extconf.rb']
 end

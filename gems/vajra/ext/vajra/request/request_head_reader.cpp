@@ -27,7 +27,7 @@ Vajra::request::HeadReader::HeadReader(std::size_t max_request_head_bytes, int c
 }
 
 Vajra::request::HeadReadResult Vajra::request::HeadReader::read(
-    int client_fd,
+    platform::SocketHandle client_fd,
     std::string buffered_bytes,
     int initial_timeout_seconds) const
 {

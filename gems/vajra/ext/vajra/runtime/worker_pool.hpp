@@ -11,7 +11,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
-#include <sys/types.h>
+#include "platform/process.hpp"
 #include <utility>
 #include <vector>
 
@@ -61,7 +61,7 @@ namespace Vajra
     {
       SharedWorkerState(
           std::size_t index,
-          pid_t worker_pid,
+          platform::ProcessId worker_pid,
           std::vector<int> parent_control_channels)
           : worker_index(index),
             control_channel_fds(std::move(parent_control_channels)),
@@ -77,7 +77,7 @@ namespace Vajra
       mutable std::mutex request_channel_mutex;
       std::vector<int> request_channel_fds;
       std::atomic<std::size_t> request_channel_count{0};
-      std::atomic<pid_t> pid;
+      std::atomic<platform::ProcessId> pid;
       std::atomic<WorkerLifecycleState> lifecycle_state{WorkerLifecycleState::booting};
       std::atomic<WorkerHealthState> health_state{WorkerHealthState::healthy};
       std::atomic_bool available{false};

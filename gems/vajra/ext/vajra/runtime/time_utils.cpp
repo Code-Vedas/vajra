@@ -15,7 +15,11 @@ std::string Vajra::runtime::utc_timestamp()
   const auto now = std::chrono::system_clock::now();
   const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
   std::tm utc_time{};
+#ifdef _WIN32
+  gmtime_s(&utc_time, &now_time);
+#else
   gmtime_r(&now_time, &utc_time);
+#endif
 
   std::ostringstream timestamp;
   timestamp << std::put_time(&utc_time, "%Y-%m-%dT%H:%M:%SZ");

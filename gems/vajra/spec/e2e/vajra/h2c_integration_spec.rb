@@ -147,8 +147,9 @@ RSpec.describe 'Vajra h2c integration', :e2e, :integration do
   end
 
   def h2_release_response_windows(socket, stream_ids, bytes: 400 * 1024)
-    h2_window_update(socket, 0, bytes)
-    stream_ids.each { |stream_id| h2_window_update(socket, stream_id, bytes) }
+    frames = [h2_frame(8, 0, 0, [bytes].pack('N'))]
+    frames.concat(stream_ids.map { |stream_id| h2_frame(8, 0, stream_id, [bytes].pack('N')) })
+    socket.write(frames.join)
   end
 
   def h2_first_data_stream(socket)

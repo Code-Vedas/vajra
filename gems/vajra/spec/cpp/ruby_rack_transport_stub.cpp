@@ -32,7 +32,7 @@ namespace
 
     std::optional<Vajra::response::Response> finish() override
     {
-      return transport_.execute(env_entries_, request_body_, -1, nullptr, nullptr);
+      return transport_.execute(env_entries_, request_body_, Vajra::platform::kInvalidSocket, nullptr, nullptr);
     }
 
   private:
@@ -47,7 +47,7 @@ namespace
     std::optional<Vajra::response::Response> execute(
         const std::vector<Vajra::request::RackEnvEntry> &,
         const std::string &,
-        int,
+        Vajra::platform::SocketHandle,
         std::shared_ptr<Vajra::rack::Http2StreamState>,
         std::shared_ptr<Vajra::rack::NativeHijackTransport>) const override
     {
@@ -58,7 +58,7 @@ namespace
 
 std::unique_ptr<Vajra::rack::RackExecutionSession> Vajra::rack::RackExecutionTransport::start(
     const std::vector<request::RackEnvEntry> &env_entries,
-    int,
+    platform::SocketHandle,
     std::shared_ptr<NativeHijackTransport>) const
 {
   return std::make_unique<TestRackExecutionSession>(*this, env_entries);
@@ -82,7 +82,7 @@ std::shared_ptr<const Vajra::rack::RackExecutionTransport> Vajra::rack::same_pro
 std::optional<Vajra::response::Response> Vajra::rack::execute_current_thread_rack_request(
     const std::vector<Vajra::request::RackEnvEntry> &,
     const std::string &,
-    int)
+    platform::SocketHandle)
 {
   throw std::logic_error("Ruby Rack transport is unavailable in native C++ tests");
 }

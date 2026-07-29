@@ -122,7 +122,19 @@ module VajraE2EStartupHelpers
       Vajra.start
       Timeout.timeout(5) { stopper_thread.join }
 
-      rebound_server = TCPServer.new(bind_host, port)
+      rebound_server = if Gem.win_platform?
+                         Socket.new(Socket::AF_INET, Socket::SOCK_STREAM, 0).tap do |socket|
+                           socket.setsockopt(
+                             Socket::SOL_SOCKET,
+                             #{VajraE2EProcessHelpers::WINDOWS_SO_EXCLUSIVEADDRUSE},
+                             true
+                           )
+                           socket.bind(Socket.sockaddr_in(port, bind_host))
+                           socket.listen(1)
+                         end
+                       else
+                         TCPServer.new(bind_host, port)
+                       end
       rebound_server.close
     RUBY
 

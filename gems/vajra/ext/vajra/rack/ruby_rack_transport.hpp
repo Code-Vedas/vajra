@@ -22,11 +22,11 @@ namespace Vajra
     std::optional<Vajra::response::Response> execute_current_thread_rack_request(
         const std::vector<Vajra::request::RackEnvEntry> &env_entries,
         const std::string &request_body,
-        int client_fd = -1);
+        platform::SocketHandle client_fd = platform::kInvalidSocket);
     std::optional<Vajra::response::Response> execute_current_thread_rack_request(
         const std::vector<Vajra::request::RackEnvEntry> &env_entries,
         VALUE rack_input,
-        int client_fd = -1,
+        platform::SocketHandle client_fd = platform::kInvalidSocket,
         std::shared_ptr<Vajra::rack::NativeInputState> input_state = nullptr);
   }
 }

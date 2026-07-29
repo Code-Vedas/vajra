@@ -131,6 +131,22 @@ namespace
     }
   }
 
+  void test_native_otlp_rejects_cleartext_endpoint()
+  {
+    Vajra::runtime::configure_runtime_tracing(
+        true,
+        "http://127.0.0.1:4318/v1/traces",
+        "vajra-test",
+        false);
+    Vajra::runtime::set_runtime_tracing_available(false);
+    Vajra::runtime::start_runtime_tracing_worker();
+    if (Vajra::runtime::runtime_tracing_available())
+    {
+      VajraSpecCpp::fail("native OTLP should reject cleartext endpoints");
+    }
+    Vajra::runtime::stop_runtime_tracing_worker();
+  }
+
   void test_runtime_trace_sampling_uses_ratio_and_parent_flags()
   {
     Vajra::runtime::set_runtime_request_observability_callback(reinterpret_cast<void *>(1));
@@ -412,6 +428,7 @@ void VajraSpecCpp::run_runtime_logging_tests()
   test_custom_access_log_needs_token_fields();
   test_tracing_forces_trace_context_need();
   test_active_context_required_follows_availability();
+  test_native_otlp_rejects_cleartext_endpoint();
   test_runtime_trace_sampling_uses_ratio_and_parent_flags();
   test_traceparent_part_allows_future_version_fields();
   test_async_logger_reuses_pooled_nodes();

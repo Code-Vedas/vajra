@@ -6,6 +6,8 @@
 #ifndef VAJRA_LIFECYCLE_CONTROLLER_HPP
 #define VAJRA_LIFECYCLE_CONTROLLER_HPP
 
+#include "platform/socket.hpp"
+
 #include <cstddef>
 #include <functional>
 #include <mutex>
@@ -56,7 +58,7 @@ namespace Vajra
       StopReason last_stop_reason;
       bool listener_owned;
       int port;
-      int listener_fd;
+      platform::SocketHandle listener_fd;
     };
 
     class Controller
@@ -67,7 +69,8 @@ namespace Vajra
       Controller();
 
       bool begin_startup();
-      bool mark_listening(int listener_fd, int port);
+      bool mark_listening(platform::SocketHandle listener_fd, int port);
+      bool mark_dispatch_ready(int port);
       void mark_boot_ready();
       void mark_serving();
       void request_stop(StopReason reason);
@@ -88,7 +91,7 @@ namespace Vajra
       bool listener_owned_;
       bool pending_stop_before_start_;
       int port_;
-      int listener_fd_;
+      platform::SocketHandle listener_fd_;
       Observer observer_;
     };
   }

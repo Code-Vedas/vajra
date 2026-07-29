@@ -7,7 +7,7 @@ has_children: true
 
 # Architecture
 
-Vajra has one public Ruby package and one native runtime. Ruby owns gem loading, configuration, and application boot. The C++ runtime owns listener sockets, connection dispatch, request parsing, request-body transport, response writing, logging transport, worker lifecycle, and shutdown.
+Vajra has one public Ruby package and one shared runtime contract with platform-specific native backends. Ruby owns gem loading, configuration, and application boot. The C++ runtime owns listener sockets, connection dispatch, request parsing, request-body transport, response writing, logging transport, worker lifecycle, and shutdown.
 
 ```mermaid
 flowchart TD
@@ -38,6 +38,8 @@ The runtime boundary is:
 - HTTP/2 stream tunnels expose multiplexed byte streams to Rack without transferring the underlying socket.
 - Failure handling is explicit at package load, listener bind, request parsing, worker lifecycle, and shutdown boundaries.
 
+The public Rack, protocol, lifecycle, and configuration contracts are shared, but the process and IO mechanisms are not. Linux uses `fork`, Unix control sockets, descriptor passing, shared `mmap`, and `epoll`. macOS uses the same POSIX process and handoff model with `kqueue`. Windows uses Winsock and `WSAPoll`; the master starts workers with `CreateProcessW`, transfers accepted sockets with `WSADuplicateSocketW`, uses framed named pipes for control and supervision, stores shared state in file mappings, and owns workers through a kill-on-close Job Object. Process identities remain distinct from owned process, thread, socket, mapping, and pipe handles.
+
 ## Sections
 
 1. [Request Path](/architecture/request-path/)
@@ -53,22 +55,19 @@ The runtime boundary is:
 
 Use these files when validating architecture claims against implementation:
 
-| Area                  | Source Files                                                                  |
-| --------------------- | ----------------------------------------------------------------------------- |
-| Runtime supervision   | `gems/vajra/ext/vajra/runtime/native_runtime.cpp`, `worker_pool.hpp`           |
-| Runtime configuration | `gems/vajra/lib/vajra.rb`, `gems/vajra/lib/vajra/cli.rb`, `runtime_config.cpp` |
-| Request path          | `request_processor.cpp`, `request_head_reader.cpp`, `request_body_reader.cpp`  |
-| Response writing      | `response_serializer.cpp`, `response_writer.cpp`                              |
-| HTTP/2 session        | `http2_session.cpp`, `http2_stream.cpp`                                        |
-| Rack bridge           | `ruby_execution_bridge.cpp`, `ruby_rack_transport.cpp`, `native_input.cpp`     |
-| Public types          | `gems/vajra/sig/vajra.rbs`, `gems/vajra/sig/vajra/internal/rack_execution.rbs` |
+- Runtime supervision: `gems/vajra/ext/vajra/runtime/native_runtime.cpp`, `gems/vajra/ext/vajra/runtime/native_runtime_windows.cpp`, and `gems/vajra/ext/vajra/runtime/windows_worker_backend.cpp`.
+- Platform contracts: `gems/vajra/ext/vajra/platform/socket.cpp` and `gems/vajra/ext/vajra/platform/process.cpp`.
+- Runtime configuration: `gems/vajra/lib/vajra.rb`, `gems/vajra/lib/vajra/cli.rb`, and `gems/vajra/ext/vajra/runtime/runtime_config.cpp`.
+- Request path: `gems/vajra/ext/vajra/request/request_processor.cpp`, `gems/vajra/ext/vajra/request/request_head_reader.cpp`, and `gems/vajra/ext/vajra/request/request_body_reader.cpp`.
+- Response writing: `gems/vajra/ext/vajra/response/response_serializer.cpp` and `gems/vajra/ext/vajra/response/response_writer.cpp`.
+- HTTP/2 session: `gems/vajra/ext/vajra/request/http2_session.cpp` and `gems/vajra/ext/vajra/rack/http2_stream.cpp`.
+- Rack bridge: `gems/vajra/ext/vajra/rack/ruby_execution_bridge.cpp`, `gems/vajra/ext/vajra/rack/ruby_rack_transport.cpp`, and `gems/vajra/ext/vajra/rack/native_input.cpp`.
+- Public types: `gems/vajra/sig/vajra.rbs` and `gems/vajra/sig/vajra/internal/rack_execution.rbs`.
 
 Core invariants:
 
 - Ruby longjmp-sensitive calls must not run while native mutexes are held.
 - HTTP request framing is validated before a Rack request is forwarded.
-- HTTP/2 response headers are validated and forbidden connection-specific
-  headers are stripped before submission.
+- HTTP/2 response headers are validated and forbidden connection-specific headers are stripped before submission.
 - Rack full hijack requires the request body to be fully consumed.
-- HTTP/2 stream tunnels keep ownership at the stream level; Vajra continues to
-  manage the shared HTTP/2 connection.
+- HTTP/2 stream tunnels keep ownership at the stream level; Vajra continues to manage the shared HTTP/2 connection.

@@ -106,6 +106,16 @@ RSpec.describe Vajra::Internal::RackExecution do
     expect(described_class.call([%w[REQUEST_METHOD GET]], ''.b)).to be_nil
   end
 
+  it 'cleans up safely when native extension loading failed' do
+    allow(described_class).to receive(:method).and_call_original
+    allow(described_class).to receive(:method)
+      .with(:__native_set_app__)
+      .and_raise(NameError)
+
+    expect { described_class.uninstall! }.not_to raise_error
+    expect(described_class.installed?).to be(false)
+  end
+
   it 'wraps native-built Rack env execution in request tracing' do
     env = { 'REQUEST_METHOD' => 'GET', 'rack.input' => Vajra::NativeInput.from_string('') }
     app = lambda { |rack_env|

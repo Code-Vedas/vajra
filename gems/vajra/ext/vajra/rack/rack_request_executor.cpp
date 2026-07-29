@@ -33,7 +33,7 @@ namespace
 
 std::unique_ptr<Vajra::rack::RackExecutionSession> Vajra::rack::RackExecutionTransport::start(
     const std::vector<request::RackEnvEntry> &env_entries,
-    int client_fd,
+    platform::SocketHandle client_fd,
     std::shared_ptr<NativeHijackTransport> native_hijack_transport) const
 {
   (void)env_entries;

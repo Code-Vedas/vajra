@@ -6,6 +6,7 @@
 #ifndef VAJRA_REQUEST_CONTEXT_HPP
 #define VAJRA_REQUEST_CONTEXT_HPP
 
+#include "platform/socket.hpp"
 #include "request_head_types.hpp"
 
 #include <memory>
@@ -34,7 +35,7 @@ namespace Vajra
     {
       ParsedRequest request;
       SocketContext socket;
-      int client_fd = -1;
+      platform::SocketHandle client_fd = platform::kInvalidSocket;
       std::string request_body = "";
       std::shared_ptr<Vajra::rack::Http2StreamState> http2_stream;
       std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport;

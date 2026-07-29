@@ -17,7 +17,17 @@ module Vajra
   end
 
   class NativeHijack
-    def call: () -> IO
+    def call: () -> (IO | NativeTlsHijackIO)
+  end
+
+  class NativeTlsHijackIO
+    def write: (String) -> Integer
+    def <<: (String) -> self
+    def read: (?Integer? length) -> String?
+    def readpartial: (Integer length) -> String
+    def flush: () -> self
+    def close: () -> nil
+    def closed?: () -> bool
   end
 
   module HTTP2
@@ -29,9 +39,9 @@ module Vajra
       def accept: (?Integer status, ?Hash[String | Symbol, _HeaderValue] headers) -> self
       def read: (?Integer? length, ?String? outbuf) -> String?
       def write: (String chunk) -> Integer
-      def flush: () -> nil
+      def flush: () -> self
       def close: () -> nil
-      def reset: (?Integer error_code) -> nil
+      def reset: (?(Integer | :cancel) error_code) -> nil
       def closed?: () -> bool
       def protocol: () -> String
       def stream_id: () -> Integer
@@ -44,14 +54,23 @@ module Vajra
         def to_s: () -> String
       end
 
+      type rack_env_value = String | bool | IO | _RackInput | NativeHijack | HTTP2::Stream | Array[Integer]
+      type rack_env = Hash[String, rack_env_value]
+      type rack_response = [
+        Integer | String,
+        Hash[String | Symbol, _RackHeaderValue] | Array[[String | Symbol, _RackHeaderValue]] | _RackHeaders,
+        Array[String] | _RackBody
+      ]
+
       interface _RackApp
-        def call: (Hash[String, String | bool | IO | _RackInput | NativeHijack | HTTP2::Stream | Array[Integer]]) -> [Integer | String, Hash[String | Symbol, _RackHeaderValue] | Array[[String | Symbol, _RackHeaderValue]] | _RackHeaders, Array[String] | _RackBody]
+        def call: (rack_env) -> rack_response
       end
 
       interface _RackInput
         def read: (?Integer? length, ?String? outbuf) -> String?
         def gets: (?String? separator) -> String?
         def each: () { (String) -> void } -> self
+                | () -> Enumerator[String, self]
         def rewind: () -> Integer
         def close: () -> nil
       end
@@ -78,6 +97,7 @@ module Vajra
       def self.configure_threads!: (Integer) -> Integer
       def self.installed?: () -> bool
       def self.call: (Array[[String, String]], String | _RackInput) -> [Integer, Array[[String, String]], Array[String]]?
+      def self.call_native: (_RackApp, rack_env) -> rack_response
       def self.__native_set_app__: (_RackApp? app) -> _RackApp?
       def self.__native_set_callback__: (Proc | nil) -> (Proc | nil)
       def self.__native_configure_threads__: (Integer max_threads) -> Integer

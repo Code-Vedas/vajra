@@ -10,13 +10,21 @@ unless ENV['NO_COVERAGE'] == '1'
   SimpleCov.start do
     enable_coverage :branch
     track_files 'lib/**/*.rb'
-    add_filter '/spec/'
+    project_lib = "#{File.expand_path('../lib', __dir__).tr('\\', '/')}/"
+    add_filter do |source_file|
+      !source_file.filename.tr('\\', '/').start_with?(project_lib)
+    end
     minimum_coverage line: 100, branch: 100
   end
 end
 
-require_relative '../lib/vajra/version'
-require_relative '../lib/vajra'
+if ENV['VAJRA_INSTALLED_GEM'] == '1'
+  require 'vajra/version'
+  require 'vajra'
+else
+  require_relative '../lib/vajra/version'
+  require_relative '../lib/vajra'
+end
 
 RSpec.configure do |config|
   # Enable flags like --only-failures and --next-failure

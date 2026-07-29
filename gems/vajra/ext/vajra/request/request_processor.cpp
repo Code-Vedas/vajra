@@ -12,6 +12,7 @@
 #include "runtime/runtime_state.hpp"
 #include "runtime/traceparent.hpp"
 #include "rack/native_input.hpp"
+#include "platform/process.hpp"
 #include "transport/tls_connection.hpp"
 
 #include <algorithm>
@@ -20,7 +21,11 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#ifdef _WIN32
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 #include <utility>
 #include <vector>
 
@@ -193,7 +198,7 @@ namespace
             headers.user_agent,
             headers.referer,
             headers.request_id,
-            getpid(),
+            Vajra::platform::current_process_id(),
             static_cast<int>(Vajra::runtime::current_worker_index()),
             connection_outcome,
             use_incoming_trace_context ? Vajra::runtime::traceparent_part(headers.traceparent, 1) : trace_id,
@@ -218,7 +223,7 @@ namespace
             "",
             "",
             "",
-            getpid(),
+            Vajra::platform::current_process_id(),
             static_cast<int>(Vajra::runtime::current_worker_index()),
             "close",
             "",
@@ -448,7 +453,11 @@ namespace
         {
             if (fd_ >= 0)
             {
+#ifdef _WIN32
+                _close(fd_);
+#else
                 close(fd_);
+#endif
             }
         }
 
@@ -468,6 +477,29 @@ namespace
 
     private:
         std::chrono::steady_clock::time_point started_at_;
+    };
+
+    class RequestActivityGuard
+    {
+    public:
+        explicit RequestActivityGuard(const std::function<void(bool)> &callback) : callback_(callback)
+        {
+            if (callback_)
+            {
+                callback_(true);
+            }
+        }
+
+        ~RequestActivityGuard()
+        {
+            if (callback_)
+            {
+                callback_(false);
+            }
+        }
+
+    private:
+        const std::function<void(bool)> &callback_;
     };
 }
 
@@ -521,7 +553,8 @@ Vajra::request::RequestProcessor::RequestProcessor(
 
 Vajra::request::RequestProcessingOutcome Vajra::request::RequestProcessor::handle(
     Vajra::transport::Connection &connection,
-    const SocketContext &socket_context) const
+    const SocketContext &socket_context,
+    const std::function<void(bool)> &request_activity_callback) const
 {
     std::string buffered_bytes;
     bool first_request = true;
@@ -534,7 +567,8 @@ Vajra::request::RequestProcessingOutcome Vajra::request::RequestProcessor::handl
             socket_context,
             std::move(buffered_bytes),
             first_request,
-            force_close);
+            force_close,
+            request_activity_callback);
 
         if (result.outcome != RequestProcessingOutcome::keep_alive)
         {
@@ -557,7 +591,8 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
     const SocketContext &socket_context,
     std::string buffered_bytes,
     bool first_request,
-    bool force_close_after_response) const
+    bool force_close_after_response,
+    const std::function<void(bool)> &request_activity_callback) const
 {
     const auto started_at = std::chrono::steady_clock::now();
     HeadReadResult head_read_result;
@@ -611,6 +646,21 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
             head_read_result.peer_closed ? RequestProcessingOutcome::close : RequestProcessingOutcome::await_read,
             std::move(head_read_result.request_head),
             first_request};
+    }
+
+    RequestActivityGuard request_activity_guard(request_activity_callback);
+    constexpr std::string_view http2_prior_knowledge_head = "PRI * HTTP/2.0\r\n\r\n";
+    if (http2_enabled_ && head_read_result.request_head == http2_prior_knowledge_head)
+    {
+        Http2Session session(
+            connection,
+            socket_context,
+            http2_config_,
+            request_executor_,
+            http2_execution_pool_,
+            head_read_result.request_head + std::move(head_read_result.trailing_bytes));
+        session.run();
+        return RequestProcessingResult{RequestProcessingOutcome::close, "", false};
     }
 
     RequestWallClockRecorder request_wall_clock_recorder;

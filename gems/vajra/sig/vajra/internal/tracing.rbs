@@ -16,13 +16,6 @@ module Vajra
 
       type start_options = Hash[Symbol, start_option_value]
 
-      type rack_env_value =
-        String |
-        bool |
-        IO |
-        StringIO |
-        Array[Integer]
-
       type lifecycle_event_key =
         :event |
         :worker_index |
@@ -162,7 +155,8 @@ module Vajra
       def self.install_from_start_options!: (start_options) -> bool
       def self.shutdown!: () -> void
       def self.after_fork!: () -> void
-      def self.with_request_span: [T] (Hash[String, rack_env_value]) { () -> T } -> T
+      def self.before_worker_exit!: () -> void
+      def self.with_request_span: [T] (Vajra::Internal::RackExecution::rack_env) { () -> T } -> T
       def self.current_trace_context: (?_TraceSpan? span) -> trace_context
       def self.emit_lifecycle_span: (lifecycle_event) -> nil
       def self.emit_native_request_span: (native_request_event) -> void

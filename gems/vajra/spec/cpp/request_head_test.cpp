@@ -10,7 +10,6 @@
 
 #include <random>
 #include <string>
-#include <unistd.h>
 #include <vector>
 
 namespace VajraSpecCpp
@@ -322,18 +321,8 @@ namespace VajraSpecCpp
 
     void test_head_reader_does_not_classify_local_descriptor_errors_as_peer_close()
     {
-      int pipe_fds[2];
-      if (pipe(pipe_fds) < 0)
-      {
-        fail("pipe failed while setting up invalid descriptor reader test");
-      }
-
-      const int read_fd = pipe_fds[0];
-      close(pipe_fds[0]);
-      close(pipe_fds[1]);
-
       Vajra::request::HeadReader reader(Vajra::request::kDefaultMaxRequestHeadBytes, 0);
-      const Vajra::request::HeadReadResult result = reader.read(read_fd, "", 0);
+      const Vajra::request::HeadReadResult result = reader.read(Vajra::platform::kInvalidSocket, "", 0);
 
       if (result.complete)
       {

@@ -2,14 +2,25 @@
 
 require 'fileutils'
 require 'etc'
+require 'fiddle/import' if Gem.win_platform?
 require 'json'
 require 'net/http'
 require 'openssl'
+require 'rbconfig'
 require 'socket'
 require 'time'
 require 'timeout'
 
 module Performance
+  if Gem.win_platform?
+    module WindowsConsoleControl
+      extend Fiddle::Importer
+
+      dlload 'kernel32.dll'
+      extern 'int GenerateConsoleCtrlEvent(unsigned long, unsigned long)'
+    end
+  end
+
   ROOT = File.expand_path(__dir__)
   TMP_ROOT = File.join(ROOT, 'tmp')
   DEFAULT_SERVERS = %w[vajra puma passenger falcon].freeze
@@ -147,6 +158,8 @@ module Performance
       options.fetch(:servers).filter_map do |server|
         start_server(fixture, server, fixture_root, options)
       rescue StandardError => e
+        raise if server == 'vajra'
+
         warn "[performance] #{fixture}/#{server}: skipped (#{e.message})"
         nil
       end
@@ -158,7 +171,8 @@ module Performance
       raise 'missing server' unless available?(server, env, fixture_root)
 
       log_path = File.join(fixture_root, "#{server}.log")
-      pid = Process.spawn(env, *command_for(server, port, options), chdir: fixture_root, pgroup: true, out: log_path, err: log_path)
+      group_option = Gem.win_platform? ? { new_pgroup: true } : { pgroup: true }
+      pid = Process.spawn(env, *command_for(server, port, options), chdir: fixture_root, out: log_path, err: log_path, **group_option)
       scheme = observability_mode&.config&.fetch(:tls, false) ? 'https' : 'http'
       handle = Handle.new(fixture:, server:, pid:, url: "#{scheme}://127.0.0.1:#{port}", mode: observability_mode&.name)
       wait_until_ready(handle)
@@ -1113,6 +1127,7 @@ module Performance
         requests_per_second:,
         requests: metric_value(metrics, 'http_reqs', 'count').to_i,
         error_rate: metric_value(metrics, 'http_req_failed', 'rate') * 100.0,
+        p50_ms: metric_value(metrics, 'http_req_duration', 'med'),
         p95_ms: metric_value(metrics, 'http_req_duration', 'p(95)'),
         p99_ms: metric_value(metrics, 'http_req_duration', 'p(99)'),
         route_metrics: route_metrics(metrics),
@@ -1804,10 +1819,7 @@ module Performance
       sampler = { pgid: handle.pid, stop: false, samples: [] }
       sampler[:thread] = Thread.new do
         until sampler.fetch(:stop)
-          sampler.fetch(:samples) << {
-            at: Time.now.utc.iso8601,
-            bytes: process_group_rss_bytes(sampler.fetch(:pgid))
-          }
+          sampler.fetch(:samples) << process_tree_sample(sampler.fetch(:pgid))
           sleep RSS_SAMPLE_INTERVAL_SECONDS
         end
       end
@@ -1819,10 +1831,7 @@ module Performance
 
       sampler[:stop] = true
       sampler.fetch(:thread).join
-      sampler.fetch(:samples) << {
-        at: Time.now.utc.iso8601,
-        bytes: process_group_rss_bytes(sampler.fetch(:pgid))
-      }
+      sampler.fetch(:samples) << process_tree_sample(sampler.fetch(:pgid))
       sampler
     rescue Errno::ESRCH
       sampler
@@ -1838,13 +1847,57 @@ module Performance
       0
     end
 
+    def process_tree_sample(pid)
+      return windows_process_tree_sample(pid) if Gem.win_platform?
+
+      { at: Time.now.utc.iso8601, bytes: process_group_rss_bytes(pid), private_bytes: 0, handle_count: 0 }
+    end
+
+    def windows_process_tree_sample(pid)
+      script = <<~POWERSHELL.delete("\n")
+        $root=#{Integer(pid)};
+        $all=@(Get-CimInstance Win32_Process);
+        $ids=@($root);
+        do {$before=$ids.Count; $ids+=@($all | Where-Object {$ids -contains $_.ParentProcessId} | ForEach-Object ProcessId); $ids=@($ids | Sort-Object -Unique)} while ($ids.Count -gt $before);
+        $processes=@(Get-Process -Id $ids -ErrorAction SilentlyContinue);
+        @{bytes=($processes | Measure-Object WorkingSet64 -Sum).Sum;private_bytes=($processes | Measure-Object PrivateMemorySize64 -Sum).Sum;handle_count=($processes | Measure-Object HandleCount -Sum).Sum} | ConvertTo-Json -Compress
+      POWERSHELL
+      payload = JSON.parse(IO.popen(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script], &:read))
+      {
+        at: Time.now.utc.iso8601,
+        bytes: payload.fetch('bytes', 0).to_i,
+        private_bytes: payload.fetch('private_bytes', 0).to_i,
+        handle_count: payload.fetch('handle_count', 0).to_i
+      }
+    rescue StandardError
+      { at: Time.now.utc.iso8601, bytes: 0, private_bytes: 0, handle_count: 0 }
+    end
+
     def rss_summary(samples)
       values = samples.map { |sample| sample.fetch(:bytes).to_i }
+      private_values = samples.map { |sample| sample.fetch(:private_bytes, 0).to_i }
+      handle_values = samples.map { |sample| sample.fetch(:handle_count, 0).to_i }
       {
-        min: values.min || 0,
-        max: values.max || 0,
-        final: values.last || 0
+        min: sample_min(values),
+        max: sample_max(values),
+        final: sample_final(values),
+        private_max: sample_max(private_values),
+        private_final: sample_final(private_values),
+        handles_max: sample_max(handle_values),
+        handles_final: sample_final(handle_values)
       }
+    end
+
+    def sample_min(values)
+      values.min || 0
+    end
+
+    def sample_max(values)
+      values.max || 0
+    end
+
+    def sample_final(values)
+      values.last || 0
     end
 
     def command_for(server, port, options)
@@ -1852,7 +1905,7 @@ module Performance
       threads = options.fetch(:thread_count).to_s
       case server
       when 'vajra'
-        %w[bundle exec vajra]
+        Gem.win_platform? ? [RbConfig.ruby, '-rbundler/setup', Gem.bin_path('vajra', 'vajra')] : %w[bundle exec vajra]
       when 'puma'
         ['bundle', 'exec', 'puma', '-b', "tcp://127.0.0.1:#{port}", '-w', workers, '-t', "#{threads}:#{threads}", 'config.ru']
       when 'passenger'
@@ -2150,12 +2203,17 @@ module Performance
     def stop_process_group(pid)
       return unless pid
 
-      Process.kill('INT', -pid)
+      if Gem.win_platform?
+        result = WindowsConsoleControl.GenerateConsoleCtrlEvent(1, pid)
+        raise SystemCallError.new('GenerateConsoleCtrlEvent', Fiddle.last_error) if result.zero?
+      else
+        Process.kill('INT', -pid)
+      end
       Timeout.timeout(5) { Process.wait(pid) }
     rescue Errno::ECHILD, Errno::ESRCH
       nil
     rescue Timeout::Error
-      Process.kill('KILL', -pid)
+      Process.kill('KILL', Gem.win_platform? ? pid : -pid)
       Process.wait(pid)
     end
   end

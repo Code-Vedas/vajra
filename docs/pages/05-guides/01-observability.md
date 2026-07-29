@@ -1,14 +1,13 @@
 ---
 title: Observability
-nav_order: 7
+parent: Guides
+nav_order: 1
 permalink: /observability/
 ---
 
 # Observability
 
-Vajra exposes request logging, runtime logs, a JSON stats endpoint, a
-Prometheus-compatible metrics endpoint, and optional OpenTelemetry request
-tracing.
+Vajra exposes request logging, runtime logs, a JSON stats endpoint, a Prometheus-compatible metrics endpoint, and optional OpenTelemetry request tracing.
 
 ## Logging
 
@@ -27,28 +26,22 @@ Supported access log formats:
 
 | Format       | Behavior                                                                                                 |
 | ------------ | -------------------------------------------------------------------------------------------------------- |
-| `text`       | Plain text Vajra access log lines.                                                                        |
+| `text`       | Plain text Vajra access log lines.                                                                       |
 | `json`       | Stable structured access events for ingestion.                                                           |
 | `common`     | Common-log-compatible request lines.                                                                     |
 | `combined`   | Combined-log-compatible request lines with referer and user agent.                                       |
 | token string | Small custom format using tokens such as `%m`, `%U`, `%s`, `%b`, `%a`, `%H`, `%i`, `%D`, `%T`, and `%S`. |
 
-Structured access logs include method, target, status, duration, response body
-bytes, remote address, HTTP protocol, host, user agent, referer, request id,
-worker pid/index, connection outcome, and incoming `traceparent` trace/span ids
-when present.
+Structured access logs include method, target, status, duration, response body bytes, remote address, HTTP protocol, host, user agent, referer, request id, worker pid/index, connection outcome, and incoming `traceparent` trace/span ids when present.
 
-After rotation, send `SIGUSR1` to every Vajra process, including the master and
-all workers. Log reopen state is process-local; signalling only one PID leaves
-the other processes writing to their previous file descriptors.
+On POSIX, send `SIGUSR1` to every Vajra process after rotation, including the master and all workers. Log reopen state is process-local; signalling only one PID leaves the other processes writing to their previous file descriptors. Windows does not implement a runtime log-reopen control event, so use stdout/stderr collection or a supervisor-managed restart instead of external file rotation.
 
 ```bash
 VAJRA_PIDS="1200 1201 1202" # replace with the current master and worker PIDs
 kill -USR1 ${VAJRA_PIDS}
 ```
 
-Use the process IDs reported by your process supervisor or Vajra stats output;
-do not use an unscoped process-name match on a shared host.
+Use the process IDs reported by your process supervisor or Vajra stats output; do not use an unscoped process-name match on a shared host.
 
 ## Stats And Metrics
 
@@ -61,14 +54,9 @@ Vajra.configure do |config|
 end
 ```
 
-The stats endpoint returns JSON with master state, tracing availability,
-scheduler pressure, worker health, worker lifecycle, request timing, execution
-counts, and restart/replacement counters.
+The stats endpoint returns JSON with master state, tracing availability, scheduler pressure, worker health, worker lifecycle, request timing, execution counts, and restart/replacement counters.
 
-The metrics endpoint remains Prometheus text. It includes runtime liveness,
-active connections, active/idle executions, accepts, dispatches, completed
-requests, request timing totals, local queue depth, worker lifecycle/health
-states, replacement counters, timeout escalations, and unexpected exits.
+The metrics endpoint returns Prometheus text exposition. It includes runtime liveness, active connections, active/idle executions, accepts, dispatches, completed requests, request timing totals, local queue depth, worker lifecycle/health states, replacement counters, timeout escalations, and unexpected exits.
 
 Stats response shape:
 
@@ -106,7 +94,7 @@ Operational fields:
 
 | Field                        | Meaning                                          |
 | ---------------------------- | ------------------------------------------------ |
-| `active_connections`         | Worker-owned connections in active processing.   |
+| `active_connections`         | Open connections owned by the worker.            |
 | `active_execution_count`     | Rack execution threads running application code. |
 | `idle_execution_count`       | Rack execution threads available for work.       |
 | `local_queue_depth`          | Worker-local queued work.                        |
@@ -118,21 +106,17 @@ Operational fields:
 
 Stats top-level fields:
 
-| Field                  | Meaning                                  |
-| ---------------------- | ---------------------------------------- |
-| `master_pid`           | Native runtime master process id.        |
-| `master_rss_bytes`     | Master process RSS when available.       |
-| `socket_queue_capacity` | Configured pending dispatch capacity.   |
-| `workers`              | Per-worker runtime state array.          |
-| `profiling`            | Cumulative timing and dispatch counters. |
-| `native_observability` | Native request/span event counters.      |
-| `health_counts`        | Worker count by health state.            |
+| Field                   | Meaning                                  |
+| ----------------------- | ---------------------------------------- |
+| `master_pid`            | Native runtime master process id.        |
+| `master_rss_bytes`      | Master process RSS when available.       |
+| `socket_queue_capacity` | Configured pending dispatch capacity.    |
+| `workers`               | Per-worker runtime state array.          |
+| `profiling`             | Cumulative timing and dispatch counters. |
+| `native_observability`  | Native request/span event counters.      |
+| `health_counts`         | Worker count by health state.            |
 
-Worker fields include `worker_index`, `pid`, `rss_bytes`, connection and
-execution counts, queue depth, availability, lifecycle/health/recovery names,
-accept/dispatch/receive counters, completed requests, replacement counters,
-timeout escalation counters, unexpected exit counters, recovery timing, and
-terminal replacement failure state.
+Worker fields include `worker_index`, `pid`, `rss_bytes`, connection and execution counts, queue depth, availability, lifecycle/health/recovery names, accept/dispatch/receive counters, completed requests, replacement counters, timeout escalation counters, unexpected exit counters, recovery timing, and terminal replacement failure state.
 
 Prometheus metric examples:
 
@@ -181,12 +165,9 @@ Metric catalog:
 | `vajra_worker_timeout_escalations_total`                    | Worker timeout escalations.                 |
 | `vajra_worker_unexpected_exits_total`                       | Unexpected worker exits.                    |
 
-Metric labels are intentionally low cardinality. `worker` is the worker index;
-`state` is the current lifecycle or health state. Do not add request path, user,
-host, or tenant labels at this layer.
+Metric labels are intentionally low cardinality. `worker` is the worker index; `state` is the current lifecycle or health state. Do not add request path, user, host, or tenant labels at this layer.
 
-Use stats for direct runtime inspection and Prometheus metrics for scraping,
-alerting, dashboards, and long-term storage.
+Use stats for direct runtime inspection and Prometheus metrics for scraping, alerting, dashboards, and long-term storage.
 
 Prometheus scrape example:
 
@@ -204,25 +185,24 @@ PromQL examples:
 ```promql
 sum(rate(vajra_worker_completed_requests_total[5m]))
 sum(vajra_worker_local_queue_depth)
-sum(vajra_worker_active_executions) / sum(vajra_worker_active_executions + vajra_worker_idle_executions)
+sum(vajra_worker_active_executions) / (sum(vajra_worker_active_executions) + sum(vajra_worker_idle_executions))
 increase(vajra_worker_unexpected_exits_total[10m])
 increase(vajra_worker_timeout_escalations_total[10m])
 ```
 
 Alert starting points:
 
-| Alert                       | Example Condition                                       |
-| --------------------------- | ------------------------------------------------------- |
-| Queue pressure              | `sum(vajra_worker_local_queue_depth) > 0` for 5 minutes |
-| Worker exits                | `increase(vajra_worker_unexpected_exits_total[10m]) > 0` |
+| Alert                       | Example Condition                                           |
+| --------------------------- | ----------------------------------------------------------- |
+| Queue pressure              | `sum(vajra_worker_local_queue_depth) > 0` for 5 minutes     |
+| Worker exits                | `increase(vajra_worker_unexpected_exits_total[10m]) > 0`    |
 | Timeout escalation          | `increase(vajra_worker_timeout_escalations_total[10m]) > 0` |
-| No idle execution capacity  | `sum(vajra_worker_idle_executions) == 0` for 5 minutes  |
-| Runtime metrics unavailable | scrape failure or missing `vajra_runtime_up`            |
+| No idle execution capacity  | `sum(vajra_worker_idle_executions) == 0` for 5 minutes      |
+| Runtime metrics unavailable | scrape failure or missing `vajra_runtime_up`                |
 
 ## OpenTelemetry
 
-Tracing is optional. Vajra boots when OpenTelemetry gems are absent; tracing is
-reported as unavailable until the required SDK/exporter components are present.
+Tracing is optional. Vajra boots when OpenTelemetry gems are absent; tracing is reported as unavailable until the required SDK/exporter components are present.
 
 ```ruby
 Vajra.configure do |config|
@@ -233,10 +213,7 @@ Vajra.configure do |config|
 end
 ```
 
-When `trace_otel_owner` is false, Vajra uses the application's existing global
-OpenTelemetry provider so application and library spans share the same active
-Rack context. When it is true, Vajra owns request-span export through its native
-OTLP/HTTP pipeline and shuts that native exporter down during `Vajra.stop`.
+When `trace_otel_owner` is false, Vajra uses the application's existing global OpenTelemetry provider so application and library spans share the same active Rack context. When it is true, Vajra owns request-span export through its native OTLP/HTTP pipeline and shuts that native exporter down during `Vajra.stop`. Native export requires HTTPS and verifies the collector's certificate chain and hostname.
 
 Collector example:
 
@@ -258,10 +235,7 @@ service:
       exporters: [logging]
 ```
 
-Tracing follows the same runtime precedence as the rest of Vajra config:
-`VAJRA_*` environment variables override explicit Ruby settings. Standard
-`OTEL_*` variables provide tracing defaults when no Vajra-specific setting is
-present. Vajra reads:
+Tracing follows the same runtime precedence as the rest of Vajra config: `VAJRA_*` environment variables override explicit Ruby settings. Standard `OTEL_*` variables provide tracing defaults when no Vajra-specific setting is present. Vajra reads:
 
 - `OTEL_SERVICE_NAME`
 - `OTEL_RESOURCE_ATTRIBUTES`
@@ -272,30 +246,20 @@ present. Vajra reads:
 - `OTEL_TRACES_SAMPLER`
 - `OTEL_TRACES_SAMPLER_ARG`
 
-Request spans use stable HTTP server attributes for the active request path:
-`http.request.method`, `url.path`, `url.scheme`,
-`http.response.status_code` where available, `server.address`, `server.port`,
-`network.protocol.name`, and `network.protocol.version`.
+Request spans use stable HTTP server attributes for the active request path: `http.request.method`, `url.path`, `url.scheme`, `http.response.status_code` where available, `server.address`, `server.port`, `network.protocol.name`, and `network.protocol.version`.
 
-Native request failures, such as malformed request heads, request-body
-disconnects, queue-capacity rejections, queue wait timeouts, and execution
-errors, emit server spans with `vajra.request.outcome`, `vajra.failure.kind`,
-and `vajra.response.sent`.
+Native request failures, such as malformed request heads, request-body disconnects, queue-capacity rejections, queue wait timeouts, and execution errors, emit server spans with `vajra.request.outcome`, `vajra.failure.kind`, and `vajra.response.sent`.
 
-Lifecycle spans use `vajra.<event>` names and include worker attributes such as
-`vajra.worker.lifecycle_event`, `vajra.worker.lifecycle_state`,
-`health_state`, `recovery_state`, worker index, worker pid, availability,
-replacement state, exit classification, and exit detail.
+Lifecycle spans use `vajra.<event>` names and include worker attributes such as `vajra.worker.lifecycle_event`, `vajra.worker.lifecycle_state`, `health_state`, `recovery_state`, worker index, worker pid, availability, replacement state, exit classification, and exit detail.
 
 Exporter ownership:
 
-| `trace_otel_owner` | Behavior |
-| ------------------ | -------- |
+| `trace_otel_owner` | Behavior                                                                                    |
+| ------------------ | ------------------------------------------------------------------------------------------- |
 | `false`            | Vajra uses the application's OpenTelemetry provider and active Rack context when available. |
-| `true`             | Vajra owns native OTLP/HTTP export to `trace_endpoint`. |
+| `true`             | Vajra owns native OTLP/HTTP export to `trace_endpoint`.                                     |
 
-Protect tracing endpoints as internal infrastructure. Spans can include request
-paths, hosts, status codes, failure kinds, worker ids, and lifecycle state.
+Protect tracing endpoints as internal infrastructure. Spans can include request paths, hosts, status codes, failure kinds, worker ids, and lifecycle state.
 
 ## Log Correlation
 
@@ -320,9 +284,7 @@ Structured JSON access logs are the stable ingestion format:
 }
 ```
 
-When an active OpenTelemetry request span exists, Vajra uses that span's
-`trace_id` and `span_id` for access-log correlation. If no active span id is
-available, Vajra falls back to valid incoming `traceparent` ids.
+When an active OpenTelemetry request span exists, Vajra uses that span's `trace_id` and `span_id` for access-log correlation. If no active span id is available, Vajra falls back to valid incoming `traceparent` ids.
 
 Common access-log requirements map to Vajra formats:
 

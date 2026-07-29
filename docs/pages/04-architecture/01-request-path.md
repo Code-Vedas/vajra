@@ -13,8 +13,8 @@ A request moves through Vajra from the master-owned listener to a worker-owned s
 flowchart TD
   client["Client"]
   master["Native Master<br/>Accept and dispatch"]
-  handoff["FD Handoff<br/>worker receives socket"]
-  worker_reactor["Worker Reactor<br/>epoll/kqueue readiness"]
+  handoff["Platform Socket Handoff<br/>SCM_RIGHTS or WSADuplicateSocketW"]
+  worker_reactor["Platform Worker Reactor<br/>epoll, kqueue, or WSAPoll"]
   parser["Native Parser<br/>request head and body plan"]
   input["Vajra::NativeInput<br/>body bytes and backpressure"]
   execution_pool["Ruby Execution Pool<br/>Fixed thread pool"]
@@ -34,15 +34,15 @@ flowchart TD
 
 ## Ownership
 
-| Stage          | Owner                     | Responsibility                                                                              |
-| -------------- | ------------------------- | ------------------------------------------------------------------------------------------- |
-| Acceptance     | Master process, C++       | Accept TCP connections and choose a worker.                                                 |
-| Dispatch       | Master and worker, C++    | Transfer the accepted client file descriptor to the worker.                                 |
-| IO readiness   | Worker process, C++       | Register idle sockets with `epoll` or `kqueue`.                                             |
-| Request head   | Worker process, C++       | Read and parse the request line and headers within configured limits.                       |
-| Request body   | `Vajra::NativeInput`, C++ | Buffer body bytes, spill large rewindable bodies, apply watermarks, and unblock Rack reads. |
-| Rack execution | Worker process, Ruby      | Run the Rack app on a fixed execution pool.                                                 |
-| Response       | Worker process, C++       | Validate Rack response shape, serialize HTTP framing, and write bytes to the client socket. |
+| Stage          | Owner                     | Responsibility                                                                                       |
+| -------------- | ------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Acceptance     | Master process, C++       | Accept TCP connections and choose a worker.                                                          |
+| Dispatch       | Master and worker, C++    | Transfer ownership of the accepted client socket to the worker through the platform control channel. |
+| IO readiness   | Worker process, C++       | Register idle sockets with `epoll` on Linux, `kqueue` on macOS, or `WSAPoll` on Windows.             |
+| Request head   | Worker process, C++       | Read and parse the request line and headers within configured limits.                                |
+| Request body   | `Vajra::NativeInput`, C++ | Buffer body bytes, spill large rewindable bodies, apply watermarks, and unblock Rack reads.          |
+| Rack execution | Worker process, Ruby      | Run the Rack app on a fixed execution pool.                                                          |
+| Response       | Worker process, C++       | Validate Rack response shape, serialize HTTP framing, and write bytes to the client socket.          |
 
 ## Body Paths
 
@@ -52,10 +52,7 @@ Rack code pulls bytes from `rack.input`. Native producers append bytes as they a
 
 ## HTTP/2 Stream Tunnels
 
-Extended CONNECT requests create a Rack environment with
-`env["vajra.http2.stream"]`. When the application accepts the stream, Vajra
-sends HTTP/2 response headers and switches that request to stream IO. From
-there, DATA frames move through the stream object's `read` and `write` methods.
+Extended CONNECT requests create a Rack environment with `env["vajra.http2.stream"]`. When the application accepts the stream, Vajra sends HTTP/2 response headers and switches that request to stream IO. From there, DATA frames move through the stream object's `read` and `write` methods.
 
 ## Keep-Alive
 
@@ -63,10 +60,14 @@ After a response, reusable HTTP/1.x sockets return to the worker reactor. The co
 
 Access logging is outside the request execution path. When access logging is enabled, request threads enqueue compact log events and return to serving. A background logger formats and writes the log lines.
 
+## Platform Handoff
+
+On POSIX systems, the master sends the accepted descriptor over the worker control socket. On Windows, the master creates a `WSAPROTOCOL_INFOW` payload with `WSADuplicateSocketW`, sends that payload over the worker's framed named pipe, waits for an acknowledgement, and then closes its copy. In both paths, the selected worker becomes the request socket owner after a successful handoff.
+
 ## Code Signposts
 
-- Listener dispatch and worker ownership: `gems/vajra/ext/vajra/runtime/native_runtime.cpp`.
+- Listener dispatch and worker ownership: `gems/vajra/ext/vajra/runtime/native_runtime.cpp` on POSIX and `gems/vajra/ext/vajra/runtime/windows_worker_backend.cpp` on Windows.
 - HTTP/1 request processing: `gems/vajra/ext/vajra/request/request_processor.cpp`.
-- Request-head and request-body parsing: `request_head_reader.cpp` and `request_body_reader.cpp`.
+- Request-head and request-body parsing: `gems/vajra/ext/vajra/request/request_head_reader.cpp` and `gems/vajra/ext/vajra/request/request_body_reader.cpp`.
 - Rack execution bridge: `gems/vajra/ext/vajra/rack/ruby_rack_transport.cpp`.
-- Response serialization and writing: `response_serializer.cpp` and `response_writer.cpp`.
+- Response serialization and writing: `gems/vajra/ext/vajra/response/response_serializer.cpp` and `gems/vajra/ext/vajra/response/response_writer.cpp`.

@@ -7,6 +7,7 @@
 #define VAJRA_RUNTIME_NATIVE_RUNTIME_HPP
 
 #include "runtime/boot_contract.hpp"
+#include "platform/process.hpp"
 #include "request/request_body_reader.hpp"
 #include "runtime/runtime_config.hpp"
 #include "runtime/runtime_state.hpp"
@@ -19,7 +20,6 @@
 #include <memory>
 #include <mutex>
 #include <string>
-#include <sys/types.h>
 #include <thread>
 #include <vector>
 
@@ -27,6 +27,9 @@ namespace Vajra
 {
   namespace runtime
   {
+#ifdef _WIN32
+    class WindowsWorkerSupervisor;
+#endif
     struct HealthPolicy
     {
       std::int64_t overload_oldest_queue_age_nanoseconds = 0;
@@ -97,7 +100,7 @@ namespace Vajra
       void replay_pending_stop_if_needed();
       std::shared_ptr<SharedWorkerState> register_worker_runtime(
           std::size_t worker_index,
-          pid_t pid,
+          platform::ProcessId pid,
           std::vector<int> control_channel_fds);
       void mark_worker_ready(const std::shared_ptr<SharedWorkerState> &worker_state);
       void mark_worker_stopping(const std::shared_ptr<SharedWorkerState> &worker_state);
@@ -119,14 +122,14 @@ namespace Vajra
       bool spawn_worker_from_single_thread(
           std::size_t worker_index,
           const WorkerSpawnConfig &spawn_config,
-          pid_t &pid,
+          platform::ProcessId &pid,
           std::vector<int> &parent_control_channels,
           BootDiagnostic &failure_diagnostic,
           int inherited_control_fd);
       bool boot_replacement_worker(
           const std::shared_ptr<SharedWorkerState> &worker_state,
           const WorkerSpawnConfig &spawn_config,
-          pid_t &pid,
+          platform::ProcessId &pid,
           std::vector<int> &parent_control_channels,
           BootDiagnostic &failure_diagnostic);
       void clear_worker_runtime();
@@ -201,11 +204,14 @@ namespace Vajra
       std::atomic_bool debug_logging_{false};
       std::vector<std::shared_ptr<SharedWorkerState>> pending_replacements_;
       RuntimeState *runtime_state_ = nullptr;
-      pid_t worker_spawner_pid_ = -1;
+      platform::ProcessId worker_spawner_pid_ = platform::kInvalidProcessId;
       int worker_spawner_fd_ = -1;
       bool worker_exit_watcher_stop_requested_ = false;
       bool worker_exit_watcher_running_ = false;
       std::thread worker_exit_watcher_;
+#ifdef _WIN32
+      std::shared_ptr<WindowsWorkerSupervisor> windows_supervisor_;
+#endif
     };
   }
 }

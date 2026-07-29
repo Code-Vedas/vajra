@@ -59,5 +59,4 @@ HTTP/2 uses the same body abstraction. Consumed-byte accounting is used to relea
 - HTTP/1 body producer: `gems/vajra/ext/vajra/request/request_body_reader.cpp`.
 - HTTP/2 body producer and consumed-byte flow control: `gems/vajra/ext/vajra/request/http2_session.cpp`.
 
-The input object must not allocate Ruby strings while holding native locks; read
-paths copy native bytes first, then build Ruby strings after releasing mutexes.
+The input object must not allocate Ruby strings while holding native locks; read paths copy native bytes first, then build Ruby strings after releasing mutexes.

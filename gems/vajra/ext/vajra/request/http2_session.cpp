@@ -8,10 +8,12 @@
 #include "http_field_utils.hpp"
 #include "rack/http2_stream.hpp"
 #include "rack/native_input.hpp"
+#include "platform/process.hpp"
 #include "response/http_header_utils.hpp"
 #include "response/response_serializer.hpp"
 #include "runtime/runtime_logging.hpp"
 #include "runtime/runtime_state.hpp"
+#include "vajra.hpp"
 
 #include <nghttp2/nghttp2.h>
 
@@ -39,7 +41,6 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
-#include <unistd.h>
 
 namespace
 {
@@ -410,11 +411,18 @@ public:
       const bool has_work = has_pending_executions() || has_finished_executions();
       const bool has_active_body_flow_control = has_active_request_body_flow_control();
 
+      const bool runtime_stopping =
+          Vajra::runtime::runtime_shutdown_requested() || VajraNative::shutdown_requested();
+      if (runtime_stopping && !has_work && !has_active_body_flow_control)
+      {
+        return;
+      }
+
       if (!wants_read)
       {
         if (peer_goaway_received_)
         {
-          if (connection_.fd() >= 0 && connection_.wait_readable(0))
+          if (platform::socket_open(connection_.fd()) && connection_.wait_readable(0))
           {
             if (!receive_once(buffer))
             {
@@ -459,7 +467,7 @@ public:
           std::this_thread::sleep_for(std::chrono::milliseconds(kHttp2ActiveBodySleepMilliseconds));
           continue;
         }
-        if (connection_.fd() < 0)
+        if (!platform::socket_open(connection_.fd()))
         {
           return;
         }
@@ -1167,9 +1175,25 @@ private:
       const ssize_t result = connection_.write(
           reinterpret_cast<const char *>(data + written),
           length - written);
-      if (result <= 0)
+      if (result < 0)
       {
-        throw std::runtime_error("HTTP/2 serialized write failed");
+        const int error_number = Vajra::platform::socket_last_error();
+        if (Vajra::platform::socket_error_interrupted(error_number))
+        {
+          continue;
+        }
+        if (Vajra::platform::socket_error_would_block(error_number) &&
+            Vajra::platform::wait_socket(connection_.fd(), Vajra::platform::WaitEvent::write, 1000))
+        {
+          continue;
+        }
+        throw std::runtime_error(
+            "HTTP/2 serialized write failed: error=" + std::to_string(error_number) +
+            " message=" + Vajra::platform::socket_error_message(error_number));
+      }
+      if (result == 0)
+      {
+        throw std::runtime_error("HTTP/2 serialized write failed: peer closed the connection");
       }
       written += static_cast<std::size_t>(result);
     }
@@ -2664,13 +2688,16 @@ private:
     std::vector<std::shared_ptr<ExecutionTask>> finished;
     {
       std::unique_lock<std::mutex> lock(finished_executions_mutex_);
-      if (!finished_executions_.empty() &&
-          (pending_execution_count_.load(std::memory_order_acquire) > finished_executions_.size() ||
-           has_higher_priority_pending_execution(finished_executions_)))
+      const auto coalesce_deadline = std::chrono::steady_clock::now() +
+                                     std::chrono::milliseconds(kHttp2PriorityCoalesceWaitMilliseconds);
+      while (!finished_executions_.empty() &&
+             (pending_execution_count_.load(std::memory_order_acquire) > finished_executions_.size() ||
+              has_higher_priority_pending_execution(finished_executions_)))
       {
-        finished_executions_condition_.wait_for(
-            lock,
-            std::chrono::milliseconds(kHttp2PriorityCoalesceWaitMilliseconds));
+        if (finished_executions_condition_.wait_until(lock, coalesce_deadline) == std::cv_status::timeout)
+        {
+          break;
+        }
       }
       finished.swap(finished_executions_);
     }
@@ -2904,7 +2931,10 @@ private:
         check(
             nghttp2_submit_data(
                 session_.get(),
-                stream.tunnel_end_stream_queued && stream.response_chunk_index >= stream.response_body_chunks.size() ? NGHTTP2_FLAG_END_STREAM : NGHTTP2_FLAG_NONE,
+                static_cast<std::uint8_t>(
+                    stream.tunnel_end_stream_queued && stream.response_chunk_index >= stream.response_body_chunks.size()
+                        ? NGHTTP2_FLAG_END_STREAM
+                        : NGHTTP2_FLAG_NONE),
                 stream_id,
                 &provider),
             "nghttp2_submit_data");
@@ -3261,7 +3291,7 @@ private:
         "",
         "",
         "",
-        getpid(),
+        Vajra::platform::current_process_id(),
         static_cast<int>(Vajra::runtime::current_worker_index()),
         "keepalive",
         "",

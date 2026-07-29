@@ -32,7 +32,7 @@ namespace Vajra
           int continuation_timeout_seconds = 5);
 
       HeadReadResult read(
-          int client_fd,
+          platform::SocketHandle client_fd,
           std::string buffered_bytes = "",
           int initial_timeout_seconds = 30) const;
       HeadReadResult read(

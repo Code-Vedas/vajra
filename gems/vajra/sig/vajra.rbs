@@ -12,7 +12,13 @@ module Vajra
       def call: (String) -> bool
     end
 
-    def self.load!: (?loader: _Loader, ?extension_path: String) -> bool
+    def self.package_platform: () -> String
+    def self.ensure_supported_windows_abi!: () -> true
+    def self.native_packages_root: () -> String
+    def self.packaged_native_metadata_path: () -> String?
+    def self.packaged_native_root: () -> String
+    def self.validate_abi!: (?metadata_path: String?) -> true
+    def self.load!: (?loader: _Loader, ?extension_path: String?) -> bool
   end
 
   VERSION: String

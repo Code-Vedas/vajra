@@ -6,8 +6,7 @@ permalink: /configuration/
 
 # Configuration
 
-Vajra reads server configuration at startup. Change a setting in
-`config/vajra.rb` or the process environment, then restart the server.
+Vajra reads server configuration at startup. Change a setting in `config/vajra.rb` or the process environment, then restart the server.
 
 The configuration file has two responsibilities:
 
@@ -16,8 +15,7 @@ The configuration file has two responsibilities:
 
 ## Minimal Configuration
 
-Rack, Sinatra, Roda, and Hanami applications can start from a standard
-`config.ru`:
+Rack, Sinatra, Roda, and Hanami applications can start from a standard `config.ru`:
 
 ```bash
 bundle exec vajra
@@ -42,8 +40,7 @@ Vajra.configure do |config|
 end
 ```
 
-Production deployments should set listener address, worker count, thread count,
-request limits, and observability outputs explicitly:
+Production deployments should set listener address, worker count, thread count, request limits, and observability outputs explicitly:
 
 ```ruby
 Vajra.configure do |config|
@@ -142,8 +139,7 @@ Vajra.configure do |config|
 end
 ```
 
-The certificate file should contain the served certificate chain. The private
-key must be readable by the runtime user.
+The certificate file should contain the served certificate chain. The private key must be readable by the runtime user.
 
 ### HTTP/2 And h2c
 
@@ -157,8 +153,7 @@ Vajra.configure do |config|
 end
 ```
 
-With `http2 true`, TLS listeners negotiate HTTP/2 through ALPN and plain
-listeners accept h2c prior knowledge and HTTP/1.1 upgrade.
+With `http2 true`, TLS listeners negotiate HTTP/2 through ALPN and plain listeners accept h2c prior knowledge and HTTP/1.1 upgrade.
 
 ### Observability
 
@@ -176,8 +171,7 @@ Vajra.configure do |config|
 end
 ```
 
-Protect `stats_path` and `metrics_endpoint` at the network or reverse-proxy
-layer.
+Protect `stats_path` and `metrics_endpoint` at the network or reverse-proxy layer.
 
 ### Strict Public Listener
 
@@ -192,8 +186,7 @@ Vajra.configure do |config|
 end
 ```
 
-Use stricter limits for internet-facing deployments and raise them only for
-routes that need larger uploads or longer body delivery windows.
+Use stricter limits for internet-facing deployments and raise them only for routes that need larger uploads or longer body delivery windows.
 
 ### Environment Overrides
 
@@ -203,13 +196,11 @@ Environment variables override Ruby config:
 VAJRA_PORT=4000 VAJRA_WORKERS=4 bundle exec vajra
 ```
 
-With that command, `port` and `workers` from `config/vajra.rb` are ignored for
-the process.
+With that command, `port` and `workers` from `config/vajra.rb` are ignored for the process.
 
 ### Invalid Config
 
-Unknown start keywords and unsupported config-file directives fail before the
-server begins serving:
+Unknown start keywords and unsupported config-file directives fail before the server begins serving:
 
 ```ruby
 Vajra.start(bind: "tcp://0.0.0.0:3000")
@@ -231,9 +222,7 @@ unsupported configuration directive: bind
 
 ## Full Runtime Reference
 
-These settings are the supported runtime configuration surface. The table tracks
-the Ruby `Vajra.start` keyword arguments, the `config/vajra.rb` DSL, and the
-native runtime loader.
+These settings are the supported runtime configuration surface. The table tracks the Ruby `Vajra.start` keyword arguments, the `config/vajra.rb` DSL, and the native runtime loader.
 
 ### Listener And Concurrency
 
@@ -246,21 +235,21 @@ native runtime loader.
 | `max_connections`       | `256`       | none                               | Integer `>= 1`    | Worker-side active connection capacity.              |
 | `socket_queue_capacity` | `256`       | `VAJRA_SOCKET_QUEUE_CAPACITY`      | Integer `>= 1`    | Pending dispatch capacity before admission pressure. |
 
-Vajra keeps listener ownership in the master process. Accepted connections are dispatched to workers through controlled file-descriptor handoff.
+Vajra keeps listener ownership in the master process. Linux and macOS dispatch accepted descriptors through Unix control sockets. Windows dispatches `WSADuplicateSocketW` metadata through framed named pipes so the worker can reconstruct its own socket handle.
 
 ### Request Limits And Timeouts
 
-| Setting                  | Default      | Env Override                   | Valid Values   | Effect                                                                            |
-| ------------------------ | ------------ | ------------------------------ | -------------- | --------------------------------------------------------------------------------- |
-| `max_request_head_bytes` | `16_384`     | `VAJRA_MAX_REQUEST_HEAD_BYTES` | Integer `>= 1` | Maximum request-head bytes before parser rejection.                               |
-| `max_request_body_bytes` | `16_777_216` | `VAJRA_MAX_REQUEST_BODY_BYTES` | Integer `>= 1` | Maximum accepted request-body bytes.                                              |
-| `request_timeout`        | `25`         | `VAJRA_REQUEST_TIMEOUT`        | `1..2_147_483` | Maximum queue wait before execution starts.                                       |
-| `request_head_timeout`   | `5`          | `VAJRA_REQUEST_HEAD_TIMEOUT`   | `1..2_147_483` | Time allowed to receive a complete request head.                                  |
-| `request_body_timeout`   | `30`         | `VAJRA_REQUEST_BODY_TIMEOUT`   | `1..2_147_483` | Time allowed to receive a complete request body after the request head.           |
-| `first_data_timeout`     | `30`         | `VAJRA_FIRST_DATA_TIMEOUT`     | `1..2_147_483` | Time allowed for first bytes on a new connection.                                 |
-| `persistent_timeout`     | `30`         | `VAJRA_PERSISTENT_TIMEOUT`     | `1..2_147_483` | Idle keep-alive timeout between requests.                                         |
-| `worker_timeout`         | `60`         | `VAJRA_WORKER_TIMEOUT`         | `1..2_147_483` | Worker health timeout.                                                            |
-| `max_keepalive_requests` | `0`          | `VAJRA_MAX_KEEPALIVE_REQUESTS` | Integer `>= 0` | Maximum sequential requests on one keep-alive connection. `0` disables the limit. |
+| Setting                  | Default      | Env Override                   | Valid Values   | Effect                                                                                          |
+| ------------------------ | ------------ | ------------------------------ | -------------- | ----------------------------------------------------------------------------------------------- |
+| `max_request_head_bytes` | `16_384`     | `VAJRA_MAX_REQUEST_HEAD_BYTES` | Integer `>= 1` | Maximum request-head bytes before parser rejection.                                             |
+| `max_request_body_bytes` | `16_777_216` | `VAJRA_MAX_REQUEST_BODY_BYTES` | Integer `>= 1` | Maximum accepted request-body bytes.                                                            |
+| `request_timeout`        | `25`         | `VAJRA_REQUEST_TIMEOUT`        | `1..2_147_483` | Maximum queue wait before execution starts.                                                     |
+| `request_head_timeout`   | `5`          | `VAJRA_REQUEST_HEAD_TIMEOUT`   | `1..2_147_483` | Time allowed to receive a complete request head.                                                |
+| `request_body_timeout`   | `30`         | `VAJRA_REQUEST_BODY_TIMEOUT`   | `1..2_147_483` | Time allowed to receive a complete request body after the request head.                         |
+| `first_data_timeout`     | `30`         | `VAJRA_FIRST_DATA_TIMEOUT`     | `1..2_147_483` | Time allowed for first bytes on a new connection.                                               |
+| `persistent_timeout`     | `30`         | `VAJRA_PERSISTENT_TIMEOUT`     | `1..2_147_483` | Idle keep-alive timeout between requests.                                                       |
+| `worker_timeout`         | `60`         | `VAJRA_WORKER_TIMEOUT`         | `1..2_147_483` | Worker lifecycle deadline used for readiness, recovery, shutdown drain, and timeout escalation. |
+| `max_keepalive_requests` | `0`          | `VAJRA_MAX_KEEPALIVE_REQUESTS` | Integer `>= 0` | Maximum sequential requests on one keep-alive connection. `0` disables the limit.               |
 
 Request bodies are exposed to Rack through `Vajra::NativeInput`. The native input layer buffers in bounded chunks, spills large bodies to temporary storage, and wakes Rack readers when bytes, EOF, close, or errors are available.
 
@@ -271,8 +260,8 @@ Request bodies are exposed to Rack through `Vajra::NativeInput`. The native inpu
 | `tls`                          | `false`                                                | `VAJRA_TLS`                          | `true`, `false`                                   | Enable TLS on the listener.                                                                   |
 | `tls_certificate`              | `""`                                                   | `VAJRA_TLS_CERTIFICATE`              | String path                                       | Certificate chain file. Required when `tls` is true.                                          |
 | `tls_private_key`              | `""`                                                   | `VAJRA_TLS_PRIVATE_KEY`              | String path                                       | Private key file. Required when `tls` is true.                                                |
-| `tls_ca_certificate`           | `""`                                                   | `VAJRA_TLS_CA_CERTIFICATE`           | String path                                       | CA bundle; required when peer verification is enabled.                                         |
-| `tls_verify_mode`              | `"none"`                                               | `VAJRA_TLS_VERIFY_MODE`              | `"none"`, `"peer"`                                | TLS peer verification mode. `peer` requires `tls_ca_certificate`.                              |
+| `tls_ca_certificate`           | `""`                                                   | `VAJRA_TLS_CA_CERTIFICATE`           | String path                                       | CA bundle; required when peer verification is enabled.                                        |
+| `tls_verify_mode`              | `"none"`                                               | `VAJRA_TLS_VERIFY_MODE`              | `"none"`, `"peer"`                                | TLS peer verification mode. `peer` requires `tls_ca_certificate`.                             |
 | `tls_min_version`              | `"TLSv1_2"`                                            | `VAJRA_TLS_MIN_VERSION`              | `"TLSv1_2"`, `"TLSv1_3"`                          | Minimum TLS protocol version.                                                                 |
 | `alpn_protocols`               | `["http/1.1"]` or `["h2", "http/1.1"]` with TLS HTTP/2 | `VAJRA_ALPN_PROTOCOLS`               | Array or comma-separated list of protocol strings | Advertised TLS ALPN protocols.                                                                |
 | `http2`                        | `false`                                                | `VAJRA_HTTP2`                        | `true`, `false`                                   | Enable HTTP/2 over TLS ALPN and cleartext h2c on plain listeners.                             |
@@ -281,12 +270,7 @@ Request bodies are exposed to Rack through `Vajra::NativeInput`. The native inpu
 | `http2_max_frame_size`         | `1_048_576`                                            | `VAJRA_HTTP2_MAX_FRAME_SIZE`         | `16_384..16_777_215`                              | Maximum HTTP/2 DATA frame size; HEADERS frames are capped separately for request-head safety. |
 | `http2_header_table_size`      | `4096`                                                 | `VAJRA_HTTP2_HEADER_TABLE_SIZE`      | `0..2_147_483_647`                                | HPACK dynamic table size.                                                                     |
 
-When `http2` is enabled, TLS listeners negotiate HTTP/2 through ALPN and plain
-listeners accept h2c prior knowledge and HTTP/1.1 `Upgrade: h2c`. Ordinary
-textual `HTTP/2.0` request lines remain invalid HTTP/1.x requests. Extended
-CONNECT provides bidirectional HTTP/2 stream IO, including
-WebSocket-over-HTTP/2. Priority scheduling applies to response DATA and tunnel
-DATA; server push is not implemented.
+When `http2` is enabled, TLS listeners negotiate HTTP/2 through ALPN and plain listeners accept h2c prior knowledge and HTTP/1.1 `Upgrade: h2c`. Ordinary textual `HTTP/2.0` request lines remain invalid HTTP/1.x requests. Extended CONNECT provides bidirectional HTTP/2 stream IO, including WebSocket-over-HTTP/2. Priority scheduling applies to response DATA and tunnel DATA; server push is not implemented.
 
 ### Logging, Metrics, And Tracing
 
@@ -300,15 +284,11 @@ DATA; server push is not implemented.
 | `stats_path`         | `""`      | `VAJRA_STATS_PATH`         | String path                                                   | JSON stats endpoint. Empty disables the endpoint.               |
 | `metrics_endpoint`   | `""`      | `VAJRA_METRICS_ENDPOINT`   | String path                                                   | Prometheus metrics endpoint. Empty disables the endpoint.       |
 | `trace_enabled`      | `false`   | `VAJRA_TRACE_ENABLED`      | `true`, `false`                                               | Enable request tracing.                                         |
-| `trace_endpoint`     | `""`      | `VAJRA_TRACE_ENDPOINT`     | String URL                                                    | OTLP/HTTP trace endpoint when Vajra exports spans.              |
+| `trace_endpoint`     | `""`      | `VAJRA_TRACE_ENDPOINT`     | HTTPS URL                                                     | OTLP/HTTP endpoint for Vajra-owned native export.               |
 | `trace_service_name` | `"vajra"` | `VAJRA_TRACE_SERVICE_NAME` | String                                                        | OpenTelemetry service name.                                     |
 | `trace_otel_owner`   | `false`   | `VAJRA_TRACE_OTEL_OWNER`   | `true`, `false`                                               | Let Vajra own native OTLP export.                               |
 
-Vajra also reads standard OpenTelemetry environment variables:
-`OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`,
-`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_TRACES_EXPORTER`,
-`OTEL_METRICS_EXPORTER`, `OTEL_PROPAGATORS`, `OTEL_TRACES_SAMPLER`, and
-`OTEL_TRACES_SAMPLER_ARG`.
+Vajra also reads standard OpenTelemetry environment variables: `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_TRACES_EXPORTER`, `OTEL_METRICS_EXPORTER`, `OTEL_PROPAGATORS`, `OTEL_TRACES_SAMPLER`, and `OTEL_TRACES_SAMPLER_ARG`.
 
 ## Environment Precedence
 
@@ -319,6 +299,4 @@ Configuration precedence is:
 3. standard `OTEL_*` environment variables for tracing defaults when no Vajra-specific tracing override is present
 4. Vajra defaults
 
-Environment variables are process-level runtime settings and override explicit
-Ruby configuration. Use them for deployment-owned values such as ports, worker
-counts, TLS file paths, or OpenTelemetry endpoints.
+Environment variables are process-level runtime settings and override explicit Ruby configuration. Use them for deployment-owned values such as ports, worker counts, TLS file paths, or OpenTelemetry endpoints.

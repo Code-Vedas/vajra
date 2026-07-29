@@ -6,6 +6,18 @@
 # LICENSE file in the root directory of this source tree.
 
 module VajraE2EProcessHelpers
+  WINDOWS_SO_EXCLUSIVEADDRUSE = -5
+  WINDOWS_CTRL_BREAK_EVENT = 1
+
+  if Gem.win_platform?
+    module WindowsConsoleControl
+      extend Fiddle::Importer
+
+      dlload 'kernel32.dll'
+      extern 'int GenerateConsoleCtrlEvent(unsigned long, unsigned long)'
+    end
+  end
+
   def read_available_output(output)
     captured = +''
 
@@ -41,12 +53,33 @@ module VajraE2EProcessHelpers
     wait_for_exit(wait_thread, timeout: timeout)
   rescue Errno::ESRCH
     wait_thread.value
+  rescue Timeout::Error
+    output = windows_process_outputs[wait_thread.pid]
+    diagnostic = output.nil? ? "pid=#{wait_thread.pid}" : process_diagnostics(wait_thread, output)
+    raise Timeout::Error, "process did not exit after #{signal}: #{diagnostic}"
   end
 
   def signal_process_group(wait_thread, signal)
-    Process.kill(signal, -wait_thread.pid)
+    if Gem.win_platform?
+      return Process.kill('KILL', wait_thread.pid) if signal == 'KILL'
+
+      if %w[INT TERM].include?(signal)
+        result = WindowsConsoleControl.GenerateConsoleCtrlEvent(WINDOWS_CTRL_BREAK_EVENT, wait_thread.pid)
+        raise SystemCallError.new('GenerateConsoleCtrlEvent', Fiddle.last_error) if result.zero?
+
+        return 1
+      end
+
+      return Process.kill(signal, wait_thread.pid)
+    end
+
+    signal_posix_process_group(wait_thread.pid, signal)
+  end
+
+  def signal_posix_process_group(pid, signal)
+    Process.kill(signal, -pid)
   rescue Errno::ESRCH, Errno::EINVAL
-    Process.kill(signal, wait_thread.pid)
+    Process.kill(signal, pid)
   end
 
   def cleanup_process(wait_thread, output)
@@ -75,6 +108,14 @@ module VajraE2EProcessHelpers
   end
 
   def bind_port(port: disposable_listener_port)
+    if Gem.win_platform?
+      socket = Socket.new(Socket::AF_INET, Socket::SOCK_STREAM, 0)
+      socket.setsockopt(Socket::SOL_SOCKET, WINDOWS_SO_EXCLUSIVEADDRUSE, true)
+      socket.bind(Socket.sockaddr_in(port, VajraE2EHelpers::LISTENER_BIND_HOST))
+      socket.listen(1)
+      return socket
+    end
+
     TCPServer.new(VajraE2EHelpers::LISTENER_BIND_HOST, port)
   end
 
@@ -118,7 +159,7 @@ module VajraE2EProcessHelpers
         socket.close_write
         response = begin
           Timeout.timeout(timeout) { socket.read }
-        rescue Errno::ECONNRESET
+        rescue Errno::ECONNRESET, Errno::ECONNABORTED
           ''
         end
       ensure
@@ -192,7 +233,7 @@ module VajraE2EProcessHelpers
     end
   rescue Timeout::Error
     false
-  rescue Errno::ECONNRESET
+  rescue Errno::ECONNRESET, Errno::ECONNABORTED
     true
   end
 
@@ -248,7 +289,11 @@ module VajraE2EProcessHelpers
       Timeout.timeout(5) { stopper_thread.join }
     RUBY
 
-    managed_popen2e(vajra_env(port:).merge(env), *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |stdin, output, wait_thread|
+    managed_popen2e(
+      vajra_env(port:).merge(env),
+      *inline_ruby_command(script),
+      chdir: VajraE2EHelpers::PACKAGE_ROOT
+    ) do |stdin, output, wait_thread|
       startup_output = []
       selected_port = wait_for_banner(output, captured_lines: startup_output)
 
@@ -260,10 +305,10 @@ module VajraE2EProcessHelpers
         end
         socket.close_write
         response = Timeout.timeout(timeout) { socket.read }
-      rescue Errno::EPIPE, Errno::ECONNRESET
+      rescue Errno::EPIPE, Errno::ECONNRESET, Errno::ECONNABORTED
         begin
           response = Timeout.timeout(timeout) { socket.read }
-        rescue Errno::ECONNRESET
+        rescue Errno::ECONNRESET, Errno::ECONNABORTED
           response = ''
         end
       ensure

@@ -116,15 +116,19 @@ RSpec.describe Vajra, 'Rack hijack integration', :e2e, :integration do
     )
 
     body = +''.b
+    received_frames = []
     Timeout.timeout(5) do
       loop do
         frame = h2_read_frame(socket)
+        received_frames << frame.slice(:length, :type, :flags, :stream_id)
         socket.write(h2_frame(4, 0x1, 0, '')) if frame[:type] == 4 && frame[:flags].nobits?(0x1)
         body << frame[:payload] if frame[:type].zero?
         break if frame[:type].zero? && frame[:flags].anybits?(0x1)
       end
     end
     body
+  rescue Timeout::Error => e
+    raise Timeout::Error, "#{e.message}; received_frames=#{received_frames.inspect}"
   end
 
   it 'lets an HTTP/1.1 Rack app take over the raw connection' do
@@ -241,7 +245,7 @@ RSpec.describe Vajra, 'Rack hijack integration', :e2e, :integration do
       request: "GET /once HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
     )
 
-    expect(result[:response]).to include('IOError:rack.hijack was already called')
+    expect(result[:response]).to include('IOError:rack.hijack was already called'), result[:output]
   end
 
   it 'lets an HTTP/1.0 Rack app take over the raw connection' do
@@ -507,6 +511,8 @@ RSpec.describe Vajra, 'Rack hijack integration', :e2e, :integration do
 
         expect(status.exitstatus).to eq(0), "#{startup_output.join}#{output.read}"
         expect(body).to eq('hijack-absent')
+      rescue Timeout::Error => e
+        raise Timeout::Error, "#{e.message}; #{process_diagnostics(wait_thread, output)}"
       ensure
         socket&.close unless socket&.closed?
         cleanup_process(wait_thread, output)

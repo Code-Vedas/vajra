@@ -11,6 +11,7 @@
 #include "request/request_head_reader.hpp"
 #include "request/request_head_types.hpp"
 #include "response/response.hpp"
+#include "platform/socket.hpp"
 
 #include <array>
 #include <cstddef>
@@ -23,19 +24,20 @@ namespace VajraSpecCpp
 {
   [[noreturn]] void fail(const std::string &message);
 
-  class FileDescriptorGuard
+  class SocketGuard
   {
   public:
-    explicit FileDescriptorGuard(int fd);
-    FileDescriptorGuard(const FileDescriptorGuard &) = delete;
-    FileDescriptorGuard &operator=(const FileDescriptorGuard &) = delete;
-    ~FileDescriptorGuard();
+    explicit SocketGuard(Vajra::platform::SocketHandle fd);
+    SocketGuard(const SocketGuard &) = delete;
+    SocketGuard &operator=(const SocketGuard &) = delete;
+    ~SocketGuard();
 
-    int get() const;
+    Vajra::platform::SocketHandle get() const;
+    Vajra::platform::SocketHandle release();
     void close_if_open();
 
   private:
-    int fd_;
+    Vajra::platform::SocketHandle fd_;
   };
 
   struct ReaderOutcome
@@ -46,14 +48,15 @@ namespace VajraSpecCpp
 
   bool bind_conflict(const std::exception_ptr &error);
   int available_port();
-  int connect_to_listener(int port);
-  void suppress_sigpipe(int fd);
-  bool send_all(int fd, const std::string &payload);
-  bool complete_probe_request(int fd);
-  std::string read_all(int fd);
+  Vajra::platform::SocketHandle connect_to_listener(int port);
+  std::array<Vajra::platform::SocketHandle, 2> connected_socket_pair();
+  void suppress_sigpipe(Vajra::platform::SocketHandle fd);
+  bool send_all(Vajra::platform::SocketHandle fd, const std::string &payload);
+  bool complete_probe_request(Vajra::platform::SocketHandle fd);
+  std::string read_all(Vajra::platform::SocketHandle fd);
   std::size_t parse_content_length(const std::string &response);
-  std::string read_http_response(int fd);
-  bool peer_closed_within(int fd, int timeout_ms);
+  std::string read_http_response(Vajra::platform::SocketHandle fd);
+  bool peer_closed_within(Vajra::platform::SocketHandle fd, int timeout_ms);
   void wait_until_listening(int port);
   void assert_can_rebind(int port);
   ReaderOutcome read_request_head_from_chunks(

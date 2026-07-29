@@ -9,6 +9,7 @@
 #include "request/http2_session.hpp"
 #include "request/request_processor.hpp"
 #include "rack/http2_stream.hpp"
+#include "platform/process.hpp"
 #include "response/response_serializer.hpp"
 #include "response/response_writer.hpp"
 #include "runtime/runtime_logging.hpp"
@@ -21,14 +22,16 @@
 #include <condition_variable>
 #include <cstdio>
 #include <fstream>
+#include <filesystem>
 #include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <sys/socket.h>
 #include <thread>
 #include <utility>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <vector>
 
 namespace VajraSpecCpp
@@ -507,9 +510,9 @@ namespace VajraSpecCpp
       {
       }
 
-      int fd() const override
+      Vajra::platform::SocketHandle fd() const override
       {
-        return -1;
+        return Vajra::platform::kInvalidSocket;
       }
 
       bool wait_readable(int) override
@@ -878,18 +881,12 @@ namespace VajraSpecCpp
 
     std::thread start_request_processor_thread(
         const Vajra::request::RequestProcessor &processor,
-        FileDescriptorGuard &server_socket)
+        SocketGuard &server_socket)
     {
-      const int owned_fd = dup(server_socket.get());
-      if (owned_fd < 0)
-      {
-        fail("dup failed while transferring request processor socket ownership");
-      }
-
-      server_socket.close_if_open();
+      const Vajra::platform::SocketHandle owned_fd = server_socket.release();
       return std::thread([&processor, owned_fd]()
                          {
-                           FileDescriptorGuard guard(owned_fd);
+                           SocketGuard guard(owned_fd);
                            Vajra::transport::PlainConnection connection(owned_fd);
                            processor.handle(connection, Vajra::request::SocketContext{"127.0.0.1", 12'345, "127.0.0.1", 3000, "http"});
                          });
@@ -970,7 +967,15 @@ namespace VajraSpecCpp
 
     std::shared_ptr<Vajra::response::ResponseBodyFile> response_body_file_from(const std::string &body)
     {
-      FILE *file = std::tmpfile();
+      FILE *file = nullptr;
+#ifdef _WIN32
+      if (tmpfile_s(&file) != 0)
+      {
+        file = nullptr;
+      }
+#else
+      file = std::tmpfile();
+#endif
       if (file == nullptr)
       {
         fail("tmpfile failed while creating response body fixture");
@@ -1241,14 +1246,10 @@ namespace VajraSpecCpp
 
     void test_response_writer_send_returns_false_on_serialization_failure()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up invalid response writer test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard reader_socket(sockets[0]);
-      FileDescriptorGuard writer_socket(sockets[1]);
+      SocketGuard reader_socket(sockets[0]);
+      SocketGuard writer_socket(sockets[1]);
 
       Vajra::response::ResponseWriter writer;
       const bool sent = writer.send(
@@ -1332,14 +1333,10 @@ namespace VajraSpecCpp
 
     void test_request_processor_keeps_connection_open_for_sequential_requests()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up sequential request processor test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
       const Vajra::request::RequestProcessor processor(Vajra::request::kDefaultMaxRequestHeadBytes);
@@ -1430,14 +1427,10 @@ namespace VajraSpecCpp
 
     void test_request_processor_handles_pipelined_read_ahead_without_losing_the_next_request()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up pipelined request processor test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
       const Vajra::request::RequestProcessor processor(Vajra::request::kDefaultMaxRequestHeadBytes);
@@ -1503,14 +1496,10 @@ namespace VajraSpecCpp
 
     void test_control_response_closes_instead_of_reinterpreting_request_body()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up control response framing test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
       const std::string hidden_request =
           "GET /poisoned HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n";
@@ -1561,14 +1550,10 @@ namespace VajraSpecCpp
 
     void test_request_processor_closes_after_parse_error_response()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up parse error request processor test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
       const Vajra::request::RequestProcessor processor(Vajra::request::kDefaultMaxRequestHeadBytes);
@@ -1617,14 +1602,10 @@ namespace VajraSpecCpp
 
     void test_request_processor_keeps_connection_open_after_request_body_framing()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up request body framing test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
       const auto request_executor = std::make_shared<EchoRequestBodyExecutor>();
@@ -1711,14 +1692,10 @@ namespace VajraSpecCpp
 
     void test_request_processor_closes_http_1_0_without_keep_alive()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up HTTP/1.0 close test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
       const Vajra::request::RequestProcessor processor(Vajra::request::kDefaultMaxRequestHeadBytes);
@@ -1765,14 +1742,10 @@ namespace VajraSpecCpp
 
     void test_request_processor_keeps_http_1_0_alive_when_requested()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up HTTP/1.0 keep-alive test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
       const Vajra::request::RequestProcessor processor(Vajra::request::kDefaultMaxRequestHeadBytes);
@@ -1835,7 +1808,7 @@ namespace VajraSpecCpp
           {Vajra::request::ParsedHeader{"Content-Length", "4"}}};
 
       const Vajra::request::BodyReadResult result = reader.read(
-          -1,
+          Vajra::platform::kInvalidSocket,
           request,
           "bodyGET /next HTTP/1.1\r\nHost: example.test\r\n\r\n");
 
@@ -1858,7 +1831,7 @@ namespace VajraSpecCpp
           {Vajra::request::ParsedHeader{"Transfer-Encoding", "chunked"}}};
 
       const Vajra::request::BodyReadResult result = reader.read(
-          -1,
+          Vajra::platform::kInvalidSocket,
           request,
           "3\r\nabc\r\n0\r\nX-Trailer: done\r\n\r\nGET /next HTTP/1.1\r\nHost: example.test\r\n\r\n");
 
@@ -1974,7 +1947,7 @@ namespace VajraSpecCpp
 
       try
       {
-        (void)reader.read(-1, request, "3 junk\r\nabc\r\n0\r\n\r\n");
+        (void)reader.read(Vajra::platform::kInvalidSocket, request, "3 junk\r\nabc\r\n0\r\n\r\n");
       }
       catch (const Vajra::request::HeadError &error)
       {
@@ -1998,7 +1971,7 @@ namespace VajraSpecCpp
 
       try
       {
-        (void)reader.read(-1, request, "");
+        (void)reader.read(Vajra::platform::kInvalidSocket, request, "");
       }
       catch (const Vajra::request::HeadError &error)
       {
@@ -2073,7 +2046,7 @@ namespace VajraSpecCpp
 
       try
       {
-        (void)reader.read(-1, request, "12345");
+        (void)reader.read(Vajra::platform::kInvalidSocket, request, "12345");
       }
       catch (const Vajra::request::HeadError &error)
       {
@@ -2101,7 +2074,7 @@ namespace VajraSpecCpp
 
       try
       {
-        (void)reader.read(-1, request, "1234");
+        (void)reader.read(Vajra::platform::kInvalidSocket, request, "1234");
       }
       catch (const Vajra::request::BodyReadIncompleteError &)
       {
@@ -2120,7 +2093,7 @@ namespace VajraSpecCpp
 
       try
       {
-        (void)reader.read(-1, request, "");
+        (void)reader.read(Vajra::platform::kInvalidSocket, request, "");
       }
       catch (const Vajra::request::BodyReadIncompleteError &)
       {
@@ -2136,14 +2109,10 @@ namespace VajraSpecCpp
 
     void test_request_processor_reads_fragmented_fixed_length_request_body()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up fragmented fixed-length body test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
       const auto request_executor = std::make_shared<EchoRequestBodyExecutor>();
@@ -2192,14 +2161,10 @@ namespace VajraSpecCpp
 
     void test_request_processor_decodes_chunked_request_body()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up chunked body test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
       const auto request_executor = std::make_shared<EchoRequestBodyExecutor>();
@@ -2245,14 +2210,10 @@ namespace VajraSpecCpp
 
     void test_request_processor_decodes_chunked_request_body_with_extensions_and_trailers()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up chunked extension test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
       const auto request_executor = std::make_shared<EchoRequestBodyExecutor>();
@@ -2345,14 +2306,10 @@ namespace VajraSpecCpp
 
     void test_request_processor_rejects_conflicting_request_body_framing()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up conflicting request body framing test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
       const Vajra::request::RequestProcessor processor(Vajra::request::kDefaultMaxRequestHeadBytes);
@@ -2394,14 +2351,10 @@ namespace VajraSpecCpp
 
     void test_request_processor_rejects_malformed_chunked_request_body()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up malformed chunked body test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
       const Vajra::request::RequestProcessor processor(Vajra::request::kDefaultMaxRequestHeadBytes);
@@ -2442,14 +2395,10 @@ namespace VajraSpecCpp
 
     void test_request_processor_rejects_oversized_request_body()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up oversized request body test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
       const Vajra::request::RequestProcessor processor(Vajra::request::kDefaultMaxRequestHeadBytes);
@@ -2489,14 +2438,10 @@ namespace VajraSpecCpp
 
     void test_request_processor_closes_quietly_when_request_body_is_incomplete()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up incomplete request body test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
       const auto request_executor = std::make_shared<EchoRequestBodyExecutor>();
@@ -2518,7 +2463,7 @@ namespace VajraSpecCpp
           fail("failed to send partial request body");
         }
 
-        if (shutdown(client_socket.get(), SHUT_WR) < 0)
+        if (!Vajra::platform::shutdown_socket_write(client_socket.get()))
         {
           fail("failed to half-close partial request body socket");
         }
@@ -2550,14 +2495,10 @@ namespace VajraSpecCpp
 
     void test_request_processor_times_out_stalled_fixed_length_request_body()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up fixed-length request body timeout test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
       const auto request_executor = std::make_shared<EchoRequestBodyExecutor>();
@@ -2607,14 +2548,10 @@ namespace VajraSpecCpp
 
     void test_request_processor_times_out_stalled_chunked_request_body()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up chunked request body timeout test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
       const auto request_executor = std::make_shared<EchoRequestBodyExecutor>();
@@ -2664,14 +2601,10 @@ namespace VajraSpecCpp
 
     void test_request_processor_suppresses_head_response_body()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up HEAD response body suppression test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
       const auto request_executor = std::make_shared<HeadBodyRequestExecutor>();
@@ -2723,14 +2656,10 @@ namespace VajraSpecCpp
 
     void test_request_processor_returns_internal_server_error_when_executor_raises()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up executor failure test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
       const auto request_executor = std::make_shared<RaisingRequestExecutor>();
@@ -2778,14 +2707,10 @@ namespace VajraSpecCpp
 
     void test_request_processor_returns_bad_request_when_executor_raises_head_error()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up head error executor test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
       const auto request_executor = std::make_shared<HeadErrorRequestExecutor>();
@@ -2828,14 +2753,10 @@ namespace VajraSpecCpp
 
     void test_request_processor_returns_internal_server_error_when_executor_response_is_invalid()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up invalid response executor test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
       const auto request_executor = std::make_shared<InvalidResponseRequestExecutor>();
@@ -2878,14 +2799,10 @@ namespace VajraSpecCpp
 
     void test_request_processor_strips_executor_framing_headers_before_sending()
     {
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        fail("socketpair failed while setting up framing header executor test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
 
       const auto request_executor = std::make_shared<FramingHeadersRequestExecutor>();
@@ -2943,23 +2860,21 @@ namespace VajraSpecCpp
 
     void test_request_processor_does_not_mix_partial_internal_trace_context_with_traceparent()
     {
-      char log_path[] = "/tmp/vajra-access-log-XXXXXX";
-      const int log_fd = mkstemp(log_path);
-      if (log_fd < 0)
+      const std::string log_path = (
+          std::filesystem::temp_directory_path() /
+          ("vajra-access-log-" + std::to_string(Vajra::platform::current_process_id()) + ".jsonl"))
+                                       .string();
+      std::ofstream log_file(log_path, std::ios::trunc);
+      if (!log_file)
       {
-        fail("mkstemp failed while setting up access log correlation test");
+        fail("temporary file creation failed while setting up access log correlation test");
       }
-      close(log_fd);
+      log_file.close();
 
-      int sockets[2];
-      if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-      {
-        std::remove(log_path);
-        fail("socketpair failed while setting up access log correlation test");
-      }
+      const auto sockets = connected_socket_pair();
 
-      FileDescriptorGuard client_socket(sockets[0]);
-      FileDescriptorGuard server_socket(sockets[1]);
+      SocketGuard client_socket(sockets[0]);
+      SocketGuard server_socket(sockets[1]);
       suppress_sigpipe(client_socket.get());
       Vajra::runtime::stop_runtime_logging_worker();
       Vajra::runtime::configure_runtime_logging(false, log_path, "", "json");
@@ -2996,8 +2911,8 @@ namespace VajraSpecCpp
         client_socket.close_if_open();
         processor_thread.join();
         Vajra::runtime::stop_runtime_logging_worker();
-        std::ifstream log_file(log_path);
-        const std::string access_log((std::istreambuf_iterator<char>(log_file)), std::istreambuf_iterator<char>());
+        std::ifstream access_log_file(log_path);
+        const std::string access_log((std::istreambuf_iterator<char>(access_log_file)), std::istreambuf_iterator<char>());
         if (access_log.find("\"trace_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"") == std::string::npos)
         {
           fail("access log did not preserve app-provided trace id");
@@ -3008,7 +2923,7 @@ namespace VajraSpecCpp
           fail("access log mixed incoming traceparent span id with app-provided trace id");
         }
         Vajra::runtime::configure_runtime_logging(false, "/dev/null", "", "text");
-        std::remove(log_path);
+        (void)std::remove(log_path.c_str());
       }
       catch (...)
       {
@@ -3019,7 +2934,7 @@ namespace VajraSpecCpp
         }
         Vajra::runtime::stop_runtime_logging_worker();
         Vajra::runtime::configure_runtime_logging(false, "/dev/null", "", "text");
-        std::remove(log_path);
+        (void)std::remove(log_path.c_str());
         throw;
       }
     }
@@ -3153,7 +3068,7 @@ namespace VajraSpecCpp
                   Vajra::request::ParsedRequestLine{"GET", "/upgrade", "HTTP/1.1"},
                   {Vajra::request::ParsedHeader{"Host", "localhost"}}},
               Vajra::request::SocketContext{"127.0.0.1", 12'345, "127.0.0.1", 3000, "http"},
-              -1,
+              Vajra::platform::kInvalidSocket,
               "",
               nullptr,
               nullptr},
@@ -3401,9 +3316,9 @@ namespace VajraSpecCpp
         {
         }
 
-        int fd() const override
+        Vajra::platform::SocketHandle fd() const override
         {
-          return -1;
+          return Vajra::platform::kInvalidSocket;
         }
 
         bool wait_readable(int) override

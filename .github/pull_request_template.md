@@ -2,18 +2,11 @@
 The title of the GitHub must follow the following format:
 <type>: Briefly describe the changes made in this pull request.
 
-Supported title prefixes:
-feat:, bugfix:, docs:, release:, chore:, refactor:, test:, style:, ci:, perf:, build:
+Supported title prefixes: feat:, bugfix:, docs:, release:, chore:, refactor:, test:, style:, ci:, perf:, build:
 
-For example:
-feat: Add a new feature to the project
-bugfix: Fix bug in the project
-docs: Update documentation
-ci: Update GitHub Actions workflow
-build: Update package build configuration
+For example: feat: Add a new feature to the project bugfix: Fix bug in the project docs: Update documentation ci: Update GitHub Actions workflow build: Update package build configuration
 
-A CLA is required for this pull request. Please read and sign the CLA at https://cla.developers.codevedas.com
--->
+A CLA is required for this pull request. Please read and sign the CLA at https://cla.developers.codevedas.com -->
 
 # Pull Request
 

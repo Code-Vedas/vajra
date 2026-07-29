@@ -1,35 +1,27 @@
 # Vajra
 
-Vajra is a native Ruby application server implemented in C++ and packaged as a
-Ruby extension.
+Vajra is a native Ruby application server implemented in C++ and packaged as a Ruby extension.
 
-The repository contains the canonical gem under `gems/vajra`, the published
-documentation site under `docs/`, and the GitHub automation and contributor
-guidance needed to build, validate, and release the project.
+The repository contains the canonical gem under `gems/vajra`, the published documentation site under `docs/`, and the GitHub automation and contributor guidance needed to build, validate, and release the project.
 
 ## Product Shape
 
 Vajra keeps one deliberate ownership split:
 
 - Ruby owns packaging, executable boot, signatures, and build diagnostics.
-- C++ owns the native listener, request loop, connection handling, and shutdown
-  behavior.
-- `docs/` owns the full product story for installation, runtime behavior,
-  observability, troubleshooting, and development workflow.
+- C++ owns the native listener, request loop, connection handling, and shutdown behavior.
+- `docs/` owns the full product story for installation, runtime behavior, observability, troubleshooting, and development workflow.
 
 ## Repository Map
 
-- `gems/vajra`: canonical gem, executable, signatures, and native extension
-  sources
+- `gems/vajra`: canonical gem, executable, signatures, and native extension sources
 - `docs/`: product documentation site built with Jekyll and Just the Docs
-- `.github/`: issue templates, workflows, release drafting, and repository
-  instructions
+- `.github/`: issue templates, workflows, release drafting, and repository instructions
 - `scripts/`: root-level convenience commands for CI and local verification
 
 ## Local Development
 
-Install dependencies and run the shared repository validation flow from the
-repository root:
+Install dependencies and run the shared repository validation flow from the repository root:
 
 ```bash
 scripts/ci-install-bundles
@@ -48,13 +40,11 @@ bin/reek
 bundle exec exe/vajra
 ```
 
-`bin/rspec-unit` is the covered unit lane. `bin/rspec-e2e` is the integration
-lane and runs without coverage.
+`bin/rspec-unit` is the covered unit lane. `bin/rspec-e2e` is the integration lane and runs without coverage.
 
 ## Documentation
 
-The docs site under `docs/` is the authoritative product documentation surface
-for installation, runtime behavior, operations, and troubleshooting.
+The docs site under `docs/` is the authoritative product documentation surface for installation, runtime behavior, operations, and troubleshooting.
 
 Start with:
 
@@ -63,10 +53,9 @@ Start with:
 - [`docs/pages/03-configuration.md`](docs/pages/03-configuration.md)
 - [`docs/pages/04-architecture/02-runtime-model.md`](docs/pages/04-architecture/02-runtime-model.md)
 - [`docs/pages/04-architecture.md`](docs/pages/04-architecture.md)
-- [`docs/pages/06-troubleshooting.md`](docs/pages/06-troubleshooting.md)
-- [`docs/pages/05-development.md`](docs/pages/05-development.md)
+- [`docs/pages/05-guides/09-troubleshooting.md`](docs/pages/05-guides/09-troubleshooting.md)
+- [`docs/pages/05-guides/10-development.md`](docs/pages/05-guides/10-development.md)
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, workflow, documentation, and
-release guidance.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, workflow, documentation, and release guidance.

@@ -5,6 +5,10 @@
 
 #include "runtime/runtime_logging.hpp"
 #include "runtime/traceparent.hpp"
+#include "platform/socket.hpp"
+#include "transport/tls_connection.hpp"
+
+#include <openssl/ssl.h>
 
 #if __has_include("ruby.h")
 #include "ruby.h"
@@ -26,23 +30,32 @@
 #include <cstdlib>
 #include <ctime>
 #include <deque>
+#ifdef _WIN32
 #include <fcntl.h>
+#include <io.h>
+#include <process.h>
+#else
+#include <fcntl.h>
+#endif
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <mutex>
-#include <netdb.h>
 #include <optional>
+#ifndef _WIN32
+#include <netdb.h>
 #include <signal.h>
+#endif
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
-#include <sys/socket.h>
 #include <thread>
 #include <utility>
 #include <vector>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 std::string Vajra::runtime::runtime_environment_name()
 {
@@ -107,7 +120,11 @@ namespace
       {
         if (owned_ && fd_ >= 0)
         {
+#ifdef _WIN32
+          _close(fd_);
+#else
           close(fd_);
+#endif
         }
       }
 
@@ -177,7 +194,7 @@ namespace
     std::atomic_bool running{false};
     std::atomic_bool stopping{false};
     std::size_t in_flight = 0;
-    std::atomic<pid_t> owner_pid{-1};
+    std::atomic<Vajra::platform::ProcessId> owner_pid{Vajra::platform::kInvalidProcessId};
     std::atomic<std::size_t> pending{0};
     LogNode *head = nullptr;
     std::atomic<LogNode *> tail{nullptr};
@@ -238,7 +255,7 @@ namespace
     std::thread worker;
     std::atomic_bool running{false};
     std::atomic_bool stopping{false};
-    std::atomic<pid_t> owner_pid{-1};
+    std::atomic<Vajra::platform::ProcessId> owner_pid{Vajra::platform::kInvalidProcessId};
     NativeOtlpEndpoint endpoint;
     std::string service_name;
     std::string resource_attributes;
@@ -360,7 +377,7 @@ namespace
     VALUE callback = Qnil;
     std::string event_name;
     std::size_t worker_index = 0;
-    pid_t pid = 0;
+    Vajra::platform::ProcessId pid = Vajra::platform::kInvalidProcessId;
     std::string lifecycle_state;
     std::string health_state;
     std::string recovery_state;
@@ -651,7 +668,11 @@ namespace
     std::size_t written = 0;
     while (written < length)
     {
+#ifdef _WIN32
+      const int result = _write(fd, data + written, static_cast<unsigned int>(length - written));
+#else
       const ssize_t result = ::write(fd, data + written, length - written);
+#endif
       if (result < 0)
       {
         if (errno == EINTR)
@@ -669,7 +690,7 @@ namespace
     return true;
   }
 
-  void prepare_socket_write(int fd)
+  void prepare_socket_write(Vajra::platform::SocketHandle fd)
   {
 #ifdef SO_NOSIGPIPE
     int opt = 1;
@@ -677,34 +698,6 @@ namespace
 #else
     (void)fd;
 #endif
-  }
-
-  bool send_all(int fd, const char *data, std::size_t length)
-  {
-#ifdef MSG_NOSIGNAL
-    constexpr int send_flags = MSG_NOSIGNAL;
-#else
-    constexpr int send_flags = 0;
-#endif
-    std::size_t sent_total = 0;
-    while (sent_total < length)
-    {
-      const ssize_t result = ::send(fd, data + sent_total, length - sent_total, send_flags);
-      if (result < 0)
-      {
-        if (errno == EINTR)
-        {
-          continue;
-        }
-        return false;
-      }
-      if (result == 0)
-      {
-        return false;
-      }
-      sent_total += static_cast<std::size_t>(result);
-    }
-    return true;
   }
 
   void write_line_fd(int fd, const std::string &line)
@@ -724,7 +717,11 @@ namespace
 
   int open_log_fd(const std::string &path)
   {
+#ifdef _WIN32
+    return _open(path.c_str(), _O_WRONLY | _O_CREAT | _O_APPEND | _O_BINARY, _S_IREAD | _S_IWRITE);
+#else
     return open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+#endif
   }
 
   const std::string &cached_utc_timestamp()
@@ -736,7 +733,11 @@ namespace
     if (now_time != cached_time || cached_timestamp.empty())
     {
       std::tm utc_time{};
+#ifdef _WIN32
+      gmtime_s(&utc_time, &now_time);
+#else
       gmtime_r(&now_time, &utc_time);
+#endif
       std::ostringstream timestamp;
       timestamp << std::put_time(&utc_time, "%Y-%m-%dT%H:%M:%SZ");
       cached_time = now_time;
@@ -826,18 +827,21 @@ namespace
     access_need_trace_context.store(needs.trace_context, std::memory_order_release);
   }
 
-  void signal_reopen_handler(int)
-  {
-    reopen_requested.store(true, std::memory_order_release);
-  }
-
   void install_reopen_signal_handler()
   {
+#ifdef _WIN32
+    return;
+#else
+    static const auto signal_reopen_handler = [](int)
+    {
+      reopen_requested.store(true, std::memory_order_release);
+    };
     struct sigaction action{};
     action.sa_handler = signal_reopen_handler;
     sigemptyset(&action.sa_mask);
     action.sa_flags = SA_RESTART;
     (void)sigaction(SIGUSR1, &action, nullptr);
+#endif
   }
 
   bool reopen_configured_logs_locked(std::string &warning_message)
@@ -1090,7 +1094,7 @@ namespace
   bool async_logger_owned_by_current_process()
   {
     return async_logger.running.load(std::memory_order_acquire) &&
-           async_logger.owner_pid.load(std::memory_order_acquire) == getpid();
+           async_logger.owner_pid.load(std::memory_order_acquire) == Vajra::platform::current_process_id();
   }
 
   void release_log_node(LogNode *node)
@@ -1356,7 +1360,7 @@ namespace
   void emit_runtime_lifecycle_callback(
       const char *event_name,
       std::size_t worker_index,
-      pid_t pid,
+      Vajra::platform::ProcessId pid,
       Vajra::runtime::WorkerLifecycleState lifecycle_state,
       Vajra::runtime::WorkerHealthState health_state,
       Vajra::runtime::WorkerRecoveryState recovery_state,
@@ -1436,12 +1440,12 @@ namespace
 
   std::optional<NativeOtlpEndpoint> parse_native_otlp_endpoint(const std::string &endpoint)
   {
-    constexpr const char *prefix = "http://";
-    if (endpoint.rfind(prefix, 0) != 0)
+    const std::size_t scheme_separator = endpoint.find("://");
+    if (scheme_separator == std::string::npos || endpoint.substr(0, scheme_separator) != "https")
     {
       return std::nullopt;
     }
-    const std::string rest = endpoint.substr(std::char_traits<char>::length(prefix));
+    const std::string rest = endpoint.substr(scheme_separator + 3);
     const std::size_t slash = rest.find('/');
     const std::string authority = slash == std::string::npos ? rest : rest.substr(0, slash);
     if (authority.empty())
@@ -1460,7 +1464,7 @@ namespace
       parsed.host = authority.substr(1, bracket - 1);
       if (bracket + 1 == authority.size())
       {
-        parsed.port = "80";
+        parsed.port = "443";
       }
       else if (authority[bracket + 1] == ':' && bracket + 2 < authority.size())
       {
@@ -1480,7 +1484,7 @@ namespace
         return std::nullopt;
       }
       parsed.host = first_colon == std::string::npos ? authority : authority.substr(0, first_colon);
-      parsed.port = first_colon == std::string::npos ? "80" : authority.substr(first_colon + 1);
+      parsed.port = first_colon == std::string::npos ? "443" : authority.substr(first_colon + 1);
     }
     parsed.path = slash == std::string::npos ? "/" : rest.substr(slash);
     if (parsed.host.empty() || parsed.port.empty())
@@ -1783,26 +1787,84 @@ namespace
       return false;
     }
     const std::unique_ptr<addrinfo, decltype(&freeaddrinfo)> addresses(result, freeaddrinfo);
-    int fd = -1;
+    Vajra::platform::ensure_socket_runtime();
+    Vajra::platform::SocketHandle fd = Vajra::platform::kInvalidSocket;
     for (addrinfo *cursor = addresses.get(); cursor != nullptr; cursor = cursor->ai_next)
     {
-      fd = socket(cursor->ai_family, cursor->ai_socktype, cursor->ai_protocol);
-      if (fd < 0)
+      fd = Vajra::platform::create_tcp_socket(cursor->ai_family, cursor->ai_socktype, cursor->ai_protocol);
+      if (!Vajra::platform::socket_valid(fd))
       {
         continue;
       }
-      if (connect(fd, cursor->ai_addr, cursor->ai_addrlen) == 0)
+      if (Vajra::platform::connect_socket(
+              fd,
+              cursor->ai_addr,
+              static_cast<socklen_t>(cursor->ai_addrlen)))
       {
         break;
       }
-      close(fd);
-      fd = -1;
+      Vajra::platform::close_socket(fd);
+      fd = Vajra::platform::kInvalidSocket;
     }
-    if (fd < 0)
+    if (!Vajra::platform::socket_valid(fd))
     {
       return false;
     }
     prepare_socket_write(fd);
+    const std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)> context(SSL_CTX_new(TLS_client_method()), SSL_CTX_free);
+    if (context == nullptr ||
+        SSL_CTX_set_min_proto_version(context.get(), TLS1_2_VERSION) != 1 ||
+        SSL_CTX_set_default_verify_paths(context.get()) != 1)
+    {
+      Vajra::platform::close_socket(fd);
+      return false;
+    }
+    SSL_CTX_set_verify(context.get(), SSL_VERIFY_PEER, nullptr);
+
+    const std::unique_ptr<SSL, decltype(&SSL_free)> ssl(SSL_new(context.get()), SSL_free);
+    if (ssl == nullptr)
+    {
+      Vajra::platform::close_socket(fd);
+      return false;
+    }
+    in_addr ipv4{};
+    in6_addr ipv6{};
+    const bool numeric_host = inet_pton(AF_INET, endpoint.host.c_str(), &ipv4) == 1 ||
+                              inet_pton(AF_INET6, endpoint.host.c_str(), &ipv6) == 1;
+    X509_VERIFY_PARAM *verification = SSL_get0_param(ssl.get());
+    const bool identity_configured = numeric_host
+                                         ? X509_VERIFY_PARAM_set1_ip_asc(verification, endpoint.host.c_str()) == 1
+                                         : SSL_set1_host(ssl.get(), endpoint.host.c_str()) == 1 &&
+                                               SSL_set_tlsext_host_name(ssl.get(), endpoint.host.c_str()) == 1;
+    if (!identity_configured)
+    {
+      Vajra::platform::close_socket(fd);
+      return false;
+    }
+#ifdef _WIN32
+    try
+    {
+      BIO *bio = Vajra::transport::new_socket_bio(fd);
+      SSL_set_bio(ssl.get(), bio, bio);
+    }
+    catch (const std::exception &)
+    {
+      Vajra::platform::close_socket(fd);
+      return false;
+    }
+#else
+    if (SSL_set_fd(ssl.get(), Vajra::platform::openssl_socket_descriptor(fd)) != 1)
+    {
+      Vajra::platform::close_socket(fd);
+      return false;
+    }
+#endif
+    if (SSL_connect(ssl.get()) != 1 || SSL_get_verify_result(ssl.get()) != X509_V_OK)
+    {
+      Vajra::platform::close_socket(fd);
+      return false;
+    }
+
     std::ostringstream request;
     request << "POST " << endpoint.path << " HTTP/1.1\r\n"
             << "Host: " << endpoint.host_header << "\r\n"
@@ -1810,8 +1872,28 @@ namespace
             << "Content-Length: " << body.size() << "\r\n"
             << "Connection: close\r\n\r\n";
     const std::string head = request.str();
-    const bool ok = send_all(fd, head.data(), head.size()) && send_all(fd, body.data(), body.size());
-    close(fd);
+    const auto send_tls = [&ssl](const std::string &payload)
+    {
+      std::size_t written_total = 0;
+      while (written_total < payload.size())
+      {
+        std::size_t written = 0;
+        if (SSL_write_ex(
+                ssl.get(),
+                payload.data() + written_total,
+                payload.size() - written_total,
+                &written) != 1 ||
+            written == 0)
+        {
+          return false;
+        }
+        written_total += written;
+      }
+      return true;
+    };
+    const bool ok = send_tls(head) && send_tls(body);
+    (void)SSL_shutdown(ssl.get());
+    Vajra::platform::close_socket(fd);
     return ok;
   }
 
@@ -1913,12 +1995,12 @@ namespace
     }
     std::lock_guard<std::mutex> lock(native_otlp_exporter.mutex);
     if (native_otlp_exporter.running.load(std::memory_order_acquire) &&
-        native_otlp_exporter.owner_pid.load(std::memory_order_acquire) == getpid())
+        native_otlp_exporter.owner_pid.load(std::memory_order_acquire) == Vajra::platform::current_process_id())
     {
       return;
     }
     if (native_otlp_exporter.running.load(std::memory_order_acquire) &&
-        native_otlp_exporter.owner_pid.load(std::memory_order_acquire) != getpid())
+        native_otlp_exporter.owner_pid.load(std::memory_order_acquire) != Vajra::platform::current_process_id())
     {
       if (native_otlp_exporter.worker.joinable())
       {
@@ -1927,7 +2009,7 @@ namespace
       native_otlp_export_enabled.store(false, std::memory_order_release);
       native_otlp_exporter.stopping.store(false, std::memory_order_release);
       native_otlp_exporter.running.store(false, std::memory_order_release);
-      native_otlp_exporter.owner_pid.store(-1, std::memory_order_release);
+      native_otlp_exporter.owner_pid.store(Vajra::platform::kInvalidProcessId, std::memory_order_release);
       {
         const std::lock_guard<std::mutex> queue_lock(request_observability_mutex);
         clear_native_otlp_span_events_locked();
@@ -1937,7 +2019,7 @@ namespace
     native_otlp_exporter.service_name = service_name.empty() ? "vajra" : service_name;
     native_otlp_exporter.resource_attributes = resource_attributes;
     native_otlp_exporter.stopping.store(false, std::memory_order_release);
-    native_otlp_exporter.owner_pid.store(getpid(), std::memory_order_release);
+    native_otlp_exporter.owner_pid.store(Vajra::platform::current_process_id(), std::memory_order_release);
     native_otlp_exporter.running.store(true, std::memory_order_release);
     native_otlp_export_enabled.store(true, std::memory_order_release);
     native_otlp_exporter.worker = std::thread(native_otlp_export_loop);
@@ -1950,13 +2032,13 @@ namespace
       std::lock_guard<std::mutex> lock(native_otlp_exporter.mutex);
       native_otlp_export_enabled.store(false, std::memory_order_release);
       native_otlp_exporter.stopping.store(true, std::memory_order_release);
-      if (native_otlp_exporter.owner_pid.load(std::memory_order_acquire) == getpid() &&
+      if (native_otlp_exporter.owner_pid.load(std::memory_order_acquire) == Vajra::platform::current_process_id() &&
           native_otlp_exporter.worker.joinable())
       {
         worker = std::move(native_otlp_exporter.worker);
       }
       native_otlp_exporter.running.store(false, std::memory_order_release);
-      native_otlp_exporter.owner_pid.store(-1, std::memory_order_release);
+      native_otlp_exporter.owner_pid.store(Vajra::platform::kInvalidProcessId, std::memory_order_release);
     }
     request_span_condition.notify_all();
     if (worker.joinable())
@@ -2066,7 +2148,7 @@ namespace
   void enqueue_runtime_lifecycle_span_event(
       const char *event_name,
       std::size_t worker_index,
-      pid_t pid,
+      Vajra::platform::ProcessId pid,
       Vajra::runtime::WorkerLifecycleState lifecycle_state,
       Vajra::runtime::WorkerHealthState health_state,
       Vajra::runtime::WorkerRecoveryState recovery_state,
@@ -2305,12 +2387,12 @@ void Vajra::runtime::start_runtime_logging_worker()
 
   std::lock_guard<std::mutex> lock(async_logger.mutex);
   if (async_logger.running.load(std::memory_order_acquire) &&
-      async_logger.owner_pid.load(std::memory_order_acquire) == getpid())
+      async_logger.owner_pid.load(std::memory_order_acquire) == Vajra::platform::current_process_id())
   {
     return;
   }
   if (async_logger.running.load(std::memory_order_acquire) &&
-      async_logger.owner_pid.load(std::memory_order_acquire) != getpid())
+      async_logger.owner_pid.load(std::memory_order_acquire) != Vajra::platform::current_process_id())
   {
     async_logger.running.store(false, std::memory_order_release);
     async_logger.stopping.store(false, std::memory_order_release);
@@ -2327,7 +2409,7 @@ void Vajra::runtime::start_runtime_logging_worker()
   if (stub == nullptr)
   {
     async_logger.running.store(false, std::memory_order_release);
-    async_logger.owner_pid.store(-1, std::memory_order_release);
+    async_logger.owner_pid.store(Vajra::platform::kInvalidProcessId, std::memory_order_release);
     return;
   }
   async_logger.head = stub;
@@ -2339,7 +2421,7 @@ void Vajra::runtime::start_runtime_logging_worker()
   async_logger.access_log_fd = config_snapshot.access_log_fd;
   async_logger.error_log_fd = config_snapshot.error_log_fd;
   async_logger.runtime_log_fd = config_snapshot.error_log_path.empty() ? STDOUT_FILENO : config_snapshot.error_log_fd;
-  async_logger.owner_pid.store(getpid(), std::memory_order_release);
+  async_logger.owner_pid.store(Vajra::platform::current_process_id(), std::memory_order_release);
   async_logger.stopping.store(false, std::memory_order_release);
   async_logger.running.store(true, std::memory_order_release);
   async_logger.worker = std::thread(async_logger_loop);
@@ -2375,7 +2457,7 @@ void Vajra::runtime::stop_runtime_logging_worker()
       std::lock_guard<std::mutex> pool_lock(async_logger.pool_mutex);
       reset_log_node_pool_locked();
     }
-    async_logger.owner_pid.store(-1, std::memory_order_release);
+    async_logger.owner_pid.store(Vajra::platform::kInvalidProcessId, std::memory_order_release);
   }
 }
 
@@ -2568,7 +2650,7 @@ void Vajra::runtime::log_runtime_banner_start(
     std::size_t min_threads,
     std::size_t max_threads)
 {
-  const pid_t pid = getpid();
+  const Vajra::platform::ProcessId pid = Vajra::platform::current_process_id();
   std::ostringstream line;
   line << "[" << pid << "] === vajra boot: " << utc_timestamp() << " ===";
   write_runtime_line(line.str());
@@ -2585,7 +2667,7 @@ void Vajra::runtime::log_runtime_banner_start(
 void Vajra::runtime::log_worker_lifecycle_event(
     const char *event_name,
     std::size_t worker_index,
-    pid_t pid,
+    Vajra::platform::ProcessId pid,
     WorkerLifecycleState lifecycle_state,
     WorkerHealthState health_state,
     WorkerRecoveryState recovery_state,
@@ -2733,10 +2815,14 @@ void Vajra::runtime::log_worker_bootstrap_ready(
   flush_runtime_streams();
 }
 
-void Vajra::runtime::log_worker_booted(int worker_index, pid_t pid, double boot_seconds)
+void Vajra::runtime::log_worker_booted(
+    int worker_index,
+    Vajra::platform::ProcessId pid,
+    Vajra::platform::ProcessId master_pid,
+    double boot_seconds)
 {
   std::ostringstream message;
-  message << "[" << getppid() << "] - Worker " << worker_index
+  message << "[" << platform::process_id_value(master_pid) << "] - Worker " << worker_index
           << " (PID: " << pid << ") booted in "
           << std::fixed << std::setprecision(2) << boot_seconds << "s";
   write_runtime_line(message.str());
@@ -2841,7 +2927,7 @@ void Vajra::runtime::emit_runtime_request_span_event(const RequestSpanEvent &eve
 
 void Vajra::runtime::log_runtime_shutdown_begin()
 {
-  write_runtime_line("[" + std::to_string(getpid()) + "] - Gracefully shutting down workers...");
+  write_runtime_line("[" + std::to_string(Vajra::platform::current_process_id()) + "] - Gracefully shutting down workers...");
   flush_runtime_streams();
 }
 
@@ -2853,7 +2939,7 @@ void Vajra::runtime::log_runtime_stop_completed()
 
 void Vajra::runtime::log_runtime_shutdown_complete()
 {
-  write_runtime_line("[" + std::to_string(getpid()) + "] === vajra shutdown: " + utc_timestamp() + " ===");
-  write_runtime_line("[" + std::to_string(getpid()) + "] - Goodbye!");
+  write_runtime_line("[" + std::to_string(Vajra::platform::current_process_id()) + "] === vajra shutdown: " + utc_timestamp() + " ===");
+  write_runtime_line("[" + std::to_string(Vajra::platform::current_process_id()) + "] - Goodbye!");
   flush_runtime_streams();
 }

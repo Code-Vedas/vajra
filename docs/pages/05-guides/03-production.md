@@ -1,24 +1,23 @@
 ---
 title: Production Deployment
-nav_order: 10
+parent: Guides
+nav_order: 3
 permalink: /production/
 ---
 
 # Production Deployment
 
-Production deployments should make listener ownership, process supervision,
-logging, shutdown, and limits explicit.
+Production deployments should make listener ownership, process supervision, logging, shutdown, and limits explicit.
 
 ## Process Supervision
 
-Run Vajra under a supervisor such as systemd, a container runtime, or a
-platform process manager. The supervisor should:
+Run Vajra under a supervisor such as systemd, a container runtime, or a platform process manager. The supervisor should:
 
 - start the process from the application root
 - provide environment variables for port, worker count, and trace endpoints
 - restart the process after unexpected exit
 - route stdout and stderr to the platform log sink
-- send normal termination signals during deploy and shutdown
+- request graceful termination during deploy and shutdown with `SIGINT`/`SIGTERM` on POSIX or a Windows console control event
 
 Example command:
 
@@ -56,8 +55,7 @@ TimeoutStopSec=70
 WantedBy=multi-user.target
 ```
 
-Set `TimeoutStopSec` longer than `worker_timeout` so Vajra can drain active
-Rack execution before the supervisor sends a hard kill.
+Set `TimeoutStopSec` longer than `worker_timeout` so Vajra can drain active Rack execution before the supervisor sends a hard kill.
 
 ## Core Runtime Settings
 
@@ -81,8 +79,7 @@ Vajra.configure do |config|
 end
 ```
 
-Tune `workers` for CPU and memory budget. Tune `threads` for the concurrency
-profile of the Rack app. IO-heavy apps can use more threads than CPU-heavy apps.
+Tune `workers` for CPU and memory budget. Tune `threads` for the concurrency profile of the Rack app. IO-heavy apps can use more threads than CPU-heavy apps.
 
 ## TLS
 
@@ -97,14 +94,11 @@ Vajra.configure do |config|
 end
 ```
 
-Certificate and key files must be readable by the runtime user. Use
-`tls_verify_mode "peer"` only when the deployment requires client certificate
-verification and a CA bundle is configured.
+Certificate and key files must be readable by the runtime user. Use `tls_verify_mode "peer"` only when the deployment requires client certificate verification and a CA bundle is configured.
 
 ## HTTP/2
 
-Enable HTTP/2 deliberately on deployments that need TLS ALPN `h2`, cleartext
-h2c, Extended CONNECT, or WebSocket-over-HTTP/2:
+Enable HTTP/2 deliberately on deployments that need TLS ALPN `h2`, cleartext h2c, Extended CONNECT, or WebSocket-over-HTTP/2:
 
 ```ruby
 Vajra.configure do |config|
@@ -113,11 +107,7 @@ Vajra.configure do |config|
 end
 ```
 
-Plain listeners accept h2c prior knowledge and HTTP/1.1 `Upgrade: h2c` when
-`http2` is enabled. Extended CONNECT gives applications a bidirectional HTTP/2
-stream object while Vajra keeps the shared connection. Applications using
-WebSocket-over-HTTP/2 should close or reset accepted streams during their own
-shutdown path.
+Plain listeners accept h2c prior knowledge and HTTP/1.1 `Upgrade: h2c` when `http2` is enabled. Extended CONNECT gives applications a bidirectional HTTP/2 stream object while Vajra keeps the shared connection. Applications using WebSocket-over-HTTP/2 should close or reset accepted streams during their own shutdown path.
 
 ## Logs
 
@@ -132,8 +122,7 @@ Vajra.configure do |config|
 end
 ```
 
-Send `SIGUSR1` to the master and every worker after external log rotation.
-Reopen state is process-local, so signalling one worker is insufficient:
+On POSIX, send `SIGUSR1` to the master and every worker after external log rotation. Reopen state is process-local, so signalling one worker is insufficient:
 
 ```bash
 VAJRA_PIDS="1200 1201 1202" # replace with the current master and worker PIDs
@@ -142,8 +131,9 @@ kill -USR1 ${VAJRA_PIDS}
 
 Obtain the complete PID list from the process supervisor or Vajra stats output.
 
-Container platforms can collect stdout and stderr. Use file logs when the host
-handles rotation and retention.
+Windows does not implement `SIGUSR1` log reopening. Prefer stdout/stderr collection on Windows, or restart the supervised process when a file-backed sink must be replaced.
+
+Container platforms can collect stdout and stderr. Use file logs when the host handles rotation and retention.
 
 ## Control Plane
 
@@ -156,16 +146,13 @@ Vajra.configure do |config|
 end
 ```
 
-Protect these endpoints at the network or reverse-proxy layer. They expose
-runtime process state and operational counters.
+Protect these endpoints at the network or reverse-proxy layer. They expose runtime process state and operational counters.
 
-Use an app-owned health route, such as `/up`, for load balancer health checks.
-Use `stats_path` and `metrics_endpoint` for internal runtime inspection.
+Use an app-owned health route, such as `/up`, for load balancer health checks. Use `stats_path` and `metrics_endpoint` for internal runtime inspection.
 
 ## Containers
 
-Build the native extension inside the target Linux image. Do not copy a
-host-built extension into a Linux container.
+Build the native extension inside the target Linux image. Do not copy a host-built extension into a Linux container.
 
 Container checklist:
 
@@ -173,7 +160,7 @@ Container checklist:
 - run `bundle install` for the application bundle
 - compile Vajra in the container image
 - set `PORT`, `WEB_CONCURRENCY`, and trace/log environment variables at deploy
-- send termination signals during rollout so Vajra can drain
+- request graceful termination during rollout so Vajra can drain
 
 Minimal Dockerfile shape:
 
@@ -272,14 +259,8 @@ backend vajra
   server app1 127.0.0.1:3000 check
 ```
 
-If the proxy terminates TLS, keep Vajra on a private listener. If Vajra
-terminates TLS directly, configure `tls true`, certificate paths, and ALPN in
-`config/vajra.rb`.
+If the proxy terminates TLS, keep Vajra on a private listener. If Vajra terminates TLS directly, configure `tls true`, certificate paths, and ALPN in `config/vajra.rb`.
 
 ## Shutdown
 
-During shutdown, Vajra stops listener admission, drains active Rack execution
-within `worker_timeout`, closes idle keep-alive sockets, and releases native
-runtime resources. After full hijack, Ruby owns the returned connection object
-and must close it. Accepted HTTP/2 tunnels are stream-owned; Vajra resets any
-remaining HTTP/2 streams during process shutdown.
+During shutdown, Vajra stops listener admission, drains active Rack execution within `worker_timeout`, closes idle keep-alive sockets, and releases native runtime resources. After full hijack, Ruby owns the returned connection object and must close it. Accepted HTTP/2 tunnels are stream-owned; Vajra resets any remaining HTTP/2 streams during process shutdown.

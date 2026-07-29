@@ -270,8 +270,8 @@ namespace VajraSpecCpp
     {
       run_stop_interrupt_test(
           [&](int port, Vajra::Server &server) {
-            FileDescriptorGuard client_socket(connect_to_listener(port));
-            if (client_socket.get() < 0)
+            SocketGuard client_socket(connect_to_listener(port));
+            if (client_socket.get() == Vajra::platform::kInvalidSocket)
             {
               fail("failed to connect keep-alive test client");
             }
@@ -302,8 +302,8 @@ namespace VajraSpecCpp
     {
       run_stop_interrupt_test(
           [&](int port, Vajra::Server &server) {
-            FileDescriptorGuard client_socket(connect_to_listener(port));
-            if (client_socket.get() < 0)
+            SocketGuard client_socket(connect_to_listener(port));
+            if (client_socket.get() == Vajra::platform::kInvalidSocket)
             {
               fail("failed to connect partial-next-request test client");
             }
@@ -342,8 +342,8 @@ namespace VajraSpecCpp
     {
       run_stop_interrupt_test(
           [&](int port, Vajra::Server &server) {
-            FileDescriptorGuard client_socket(connect_to_listener(port));
-            if (client_socket.get() < 0)
+            SocketGuard client_socket(connect_to_listener(port));
+            if (client_socket.get() == Vajra::platform::kInvalidSocket)
             {
               fail("failed to connect disconnect-before-stop test client");
             }

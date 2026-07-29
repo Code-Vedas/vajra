@@ -69,7 +69,7 @@ namespace Vajra
       }
 
       BodyReadResult stream_read(
-          int client_fd,
+          platform::SocketHandle client_fd,
           const ParsedRequest &request,
           const BodyChunkCallback &on_body_chunk,
           std::string buffered_bytes = "") const;
@@ -80,7 +80,7 @@ namespace Vajra
           std::string buffered_bytes = "") const;
 
       BodyReadResult read(
-          int client_fd,
+          platform::SocketHandle client_fd,
           const ParsedRequest &request,
           std::string buffered_bytes = "") const;
       BodyReadResult read(

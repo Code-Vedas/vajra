@@ -10,6 +10,17 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/tmp/cpp-tests"
 
 rm -rf "$BUILD_DIR"
-cmake -S "$ROOT_DIR/spec/cpp" -B "$BUILD_DIR"
+configure_args=()
+if [[ "${OS:-}" == "Windows_NT" && -n "$(command -v ninja 2>/dev/null)" ]]; then
+  configure_args+=("-G" "Ninja")
+  if command -v pkg-config >/dev/null 2>&1; then
+    configure_args+=("-DOPENSSL_ROOT_DIR=$(pkg-config --variable=prefix openssl)")
+  fi
+fi
+if (( ${#configure_args[@]} > 0 )); then
+  cmake -S "$ROOT_DIR/spec/cpp" -B "$BUILD_DIR" "${configure_args[@]}"
+else
+  cmake -S "$ROOT_DIR/spec/cpp" -B "$BUILD_DIR"
+fi
 cmake --build "$BUILD_DIR"
 ctest --test-dir "$BUILD_DIR" --output-on-failure "$@"

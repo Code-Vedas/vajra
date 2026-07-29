@@ -14,10 +14,19 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <openssl/bio.h>
+#endif
+
 namespace Vajra
 {
   namespace transport
   {
+#ifdef _WIN32
+    BIO *new_socket_bio(platform::SocketHandle socket);
+    platform::SocketHandle socket_bio_handle(BIO *bio);
+#endif
+
     struct TlsConfig
     {
       std::string certificate;
@@ -66,17 +75,17 @@ namespace Vajra
     class TlsConnection final : public Connection
     {
     public:
-      TlsConnection(int client_fd, const TlsContext &context);
+      TlsConnection(platform::SocketHandle client_fd, const TlsContext &context);
       ~TlsConnection() override;
 
       TlsConnection(const TlsConnection &) = delete;
       TlsConnection &operator=(const TlsConnection &) = delete;
 
       void handshake();
-      int fd() const override;
+      platform::SocketHandle fd() const override;
       bool wait_readable(int timeout_seconds) override;
-      ssize_t read(char *buffer, std::size_t length) override;
-      ssize_t write(const char *buffer, std::size_t length) override;
+      platform::SignedSize read(char *buffer, std::size_t length) override;
+      platform::SignedSize write(const char *buffer, std::size_t length) override;
       std::string protocol() const override;
       bool tls() const override;
       std::unique_ptr<SSL, SslConnectionDeleter> release_ssl();
@@ -84,13 +93,13 @@ namespace Vajra
       int write_timeout_seconds() const;
 
     private:
-      bool wait_for_events(short events, int timeout_seconds);
-      bool wait_for_events_milliseconds(short events, int timeout_milliseconds);
+      bool wait_for_event(platform::WaitEvent event, int timeout_seconds);
+      bool wait_for_event_milliseconds(platform::WaitEvent event, int timeout_milliseconds);
       bool wait_for_ssl_error(int ssl_error, int timeout_seconds);
       bool wait_for_ssl_error_milliseconds(int ssl_error, int timeout_milliseconds);
       [[noreturn]] void raise_ssl_error(const char *operation, int ssl_result) const;
 
-      int client_fd_;
+      platform::SocketHandle client_fd_;
       std::unique_ptr<SSL, SslConnectionDeleter> ssl_;
       std::string negotiated_protocol_ = "http/1.1";
       bool handshake_complete_ = false;

@@ -19,7 +19,7 @@ namespace Vajra
           listener_owned_(false),
           pending_stop_before_start_(false),
           port_(-1),
-          listener_fd_(-1),
+          listener_fd_(platform::kInvalidSocket),
           observer_()
     {
     }
@@ -44,11 +44,11 @@ namespace Vajra
       listener_owned_ = false;
       pending_stop_before_start_ = false;
       port_ = -1;
-      listener_fd_ = -1;
+      listener_fd_ = platform::kInvalidSocket;
       return true;
     }
 
-    bool Controller::mark_listening(int listener_fd, int port)
+    bool Controller::mark_listening(platform::SocketHandle listener_fd, int port)
     {
       {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -73,6 +73,30 @@ namespace Vajra
       return true;
     }
 
+    bool Controller::mark_dispatch_ready(int port)
+    {
+      Snapshot snapshot_value;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (state_ == State::draining)
+        {
+          return false;
+        }
+        if (state_ != State::booting)
+        {
+          throw std::logic_error("dispatch worker can only become ready from booting");
+        }
+        state_ = State::listening;
+        boot_readiness_ = BootReadiness::ready;
+        listener_owned_ = false;
+        port_ = port;
+        listener_fd_ = platform::kInvalidSocket;
+        snapshot_value = snapshot_unlocked();
+      }
+      notify(HookPoint::boot_complete, snapshot_value);
+      return true;
+    }
+
     void Controller::mark_boot_ready()
     {
       Snapshot snapshot_value;
@@ -83,7 +107,7 @@ namespace Vajra
           return;
         }
 
-        const bool listener_bound = listener_owned_ && listener_fd_ >= 0;
+        const bool listener_bound = listener_owned_ && platform::socket_valid(listener_fd_);
         if (state_ == State::draining && listener_bound)
         {
           boot_readiness_ = BootReadiness::ready;
@@ -186,7 +210,7 @@ namespace Vajra
         {
           listener_owned_ = false;
           pending_stop_before_start_ = false;
-          listener_fd_ = -1;
+          listener_fd_ = platform::kInvalidSocket;
           snapshot_value = snapshot_unlocked();
         }
         else
@@ -200,7 +224,7 @@ namespace Vajra
           boot_readiness_ = BootReadiness::pending;
           listener_owned_ = false;
           pending_stop_before_start_ = false;
-          listener_fd_ = -1;
+          listener_fd_ = platform::kInvalidSocket;
           snapshot_value = snapshot_unlocked();
           notify_observer = true;
         }
@@ -227,7 +251,7 @@ namespace Vajra
         last_stop_reason_ = reason;
         listener_owned_ = false;
         pending_stop_before_start_ = false;
-        listener_fd_ = -1;
+        listener_fd_ = platform::kInvalidSocket;
         snapshot_value = snapshot_unlocked();
       }
 

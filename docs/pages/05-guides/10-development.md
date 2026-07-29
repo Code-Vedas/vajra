@@ -1,6 +1,7 @@
 ---
 title: Development
-nav_order: 17
+parent: Guides
+nav_order: 10
 permalink: /development/
 ---
 
@@ -10,13 +11,15 @@ Vajra development uses one canonical package, package-local checks, central docs
 
 ## Prerequisites
 
-- Linux or macOS
+- Linux, macOS, or 64-bit Windows
 - Ruby 3.2 or newer
 - Bundler
 - a C++ compiler and Ruby development headers for native extension work
 - Go with `h2spec` on `PATH` for external HTTP/2 conformance checks
 - `k6` for performance profiles outside the Linux test image
 - Docker for running repository checks inside the Linux test image
+
+Windows native development requires a 64-bit RubyInstaller UCRT Ruby with its matching MSYS2 UCRT toolchain. MSVC-built Ruby is not supported.
 
 Install h2spec with Go:
 
@@ -34,8 +37,7 @@ scripts/ci-install-bundles
 scripts/run-all
 ```
 
-Those scripts run the gem and docs checks from one shared entrypoint.
-`scripts/run-all` includes external HTTP/2 conformance checks through h2spec.
+Those scripts run the gem and docs checks from one shared entrypoint. `scripts/run-all` includes external HTTP/2 conformance checks through h2spec.
 
 For Linux validation from another host platform, set `DOCKER=1` on any root script:
 
@@ -108,10 +110,7 @@ scripts/run-h2spec-all
 
 `scripts/run-h2spec-all` starts a temporary h2c-enabled Vajra server and runs the full h2spec suite against it.
 
-`scripts/run-performance-protocol` runs the protocol benchmark lanes. It uses k6
-for ordinary HTTP/1 and TLS HTTP/2 lanes, and a custom protocol driver for h2c,
-h2c upgrade, upload, Rack hijack, tunnels, and same-connection HTTP/2 concurrent
-stream coverage.
+`scripts/run-performance-protocol` runs the protocol benchmark lanes. It uses k6 for ordinary HTTP/1 and TLS HTTP/2 lanes, and a custom protocol driver for h2c, h2c upgrade, upload, Rack hijack, tunnels, and same-connection HTTP/2 concurrent stream coverage.
 
 Docs are part of the product surface:
 

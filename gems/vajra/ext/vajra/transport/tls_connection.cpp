@@ -9,12 +9,118 @@
 #include <cerrno>
 #include <cstring>
 #include <openssl/err.h>
-#include <poll.h>
 #include <sstream>
 #include <stdexcept>
 
 namespace
 {
+#ifdef _WIN32
+  struct SocketBioState
+  {
+    Vajra::platform::SocketHandle socket;
+  };
+
+  int socket_bio_create(BIO *bio)
+  {
+    BIO_set_init(bio, 0);
+    BIO_set_data(bio, nullptr);
+    BIO_set_shutdown(bio, 0);
+    return 1;
+  }
+
+  int socket_bio_destroy(BIO *bio)
+  {
+    if (bio == nullptr)
+    {
+      return 0;
+    }
+    delete static_cast<SocketBioState *>(BIO_get_data(bio));
+    BIO_set_data(bio, nullptr);
+    BIO_set_init(bio, 0);
+    return 1;
+  }
+
+  int socket_bio_read(BIO *bio, char *buffer, int length)
+  {
+    BIO_clear_retry_flags(bio);
+    if (buffer == nullptr || length <= 0)
+    {
+      return 0;
+    }
+    const auto *state = static_cast<const SocketBioState *>(BIO_get_data(bio));
+    const auto result = Vajra::platform::receive_socket(state->socket, buffer, static_cast<std::size_t>(length));
+    if (result < 0)
+    {
+      const int error_number = errno;
+      if (Vajra::platform::socket_error_interrupted(error_number) ||
+          Vajra::platform::socket_error_would_block(error_number))
+      {
+        BIO_set_retry_read(bio);
+      }
+    }
+    return static_cast<int>(result);
+  }
+
+  int socket_bio_write(BIO *bio, const char *buffer, int length)
+  {
+    BIO_clear_retry_flags(bio);
+    if (buffer == nullptr || length <= 0)
+    {
+      return 0;
+    }
+    const auto *state = static_cast<const SocketBioState *>(BIO_get_data(bio));
+    const auto result = Vajra::platform::send_socket(state->socket, buffer, static_cast<std::size_t>(length));
+    if (result < 0)
+    {
+      const int error_number = errno;
+      if (Vajra::platform::socket_error_interrupted(error_number) ||
+          Vajra::platform::socket_error_would_block(error_number))
+      {
+        BIO_set_retry_write(bio);
+      }
+    }
+    return static_cast<int>(result);
+  }
+
+  long socket_bio_ctrl(BIO *bio, int command, long value, void *)
+  {
+    switch (command)
+    {
+    case BIO_CTRL_FLUSH:
+      return 1;
+    case BIO_CTRL_GET_CLOSE:
+      return BIO_get_shutdown(bio);
+    case BIO_CTRL_SET_CLOSE:
+      BIO_set_shutdown(bio, static_cast<int>(value));
+      return 1;
+    case BIO_CTRL_PENDING:
+    case BIO_CTRL_WPENDING:
+      return 0;
+    default:
+      return 0;
+    }
+  }
+
+  BIO_METHOD *socket_bio_method()
+  {
+    static BIO_METHOD *method = []()
+    {
+      BIO_METHOD *value = BIO_meth_new(BIO_get_new_index() | BIO_TYPE_SOURCE_SINK, "Vajra Windows socket");
+      if (value == nullptr || BIO_meth_set_create(value, socket_bio_create) != 1 ||
+          BIO_meth_set_destroy(value, socket_bio_destroy) != 1 ||
+          BIO_meth_set_read(value, socket_bio_read) != 1 ||
+          BIO_meth_set_write(value, socket_bio_write) != 1 ||
+          BIO_meth_set_ctrl(value, socket_bio_ctrl) != 1)
+      {
+        BIO_meth_free(value);
+        throw std::runtime_error("unable to create Windows socket BIO method");
+      }
+      return value;
+    }();
+    return method;
+  }
+#endif
+
   std::string openssl_error_string()
   {
     const unsigned long error = ERR_get_error();
@@ -86,6 +192,39 @@ namespace
   }
 }
 
+#ifdef _WIN32
+BIO *Vajra::transport::new_socket_bio(platform::SocketHandle socket)
+{
+  if (!platform::socket_valid(socket))
+  {
+    throw std::invalid_argument("cannot attach an invalid socket to OpenSSL");
+  }
+  BIO *bio = BIO_new(socket_bio_method());
+  if (bio == nullptr)
+  {
+    throw std::runtime_error("unable to allocate Windows socket BIO: " + openssl_error_string());
+  }
+  try
+  {
+    BIO_set_data(bio, new SocketBioState{socket});
+    BIO_set_init(bio, 1);
+    BIO_set_shutdown(bio, 0);
+    return bio;
+  }
+  catch (...)
+  {
+    BIO_free(bio);
+    throw;
+  }
+}
+
+Vajra::platform::SocketHandle Vajra::transport::socket_bio_handle(BIO *bio)
+{
+  const auto *state = bio == nullptr ? nullptr : static_cast<const SocketBioState *>(BIO_get_data(bio));
+  return state == nullptr ? platform::kInvalidSocket : state->socket;
+}
+#endif
+
 void Vajra::transport::SslContextDeleter::operator()(SSL_CTX *context) const
 {
   SSL_CTX_free(context);
@@ -156,7 +295,7 @@ int Vajra::transport::TlsContext::write_timeout_seconds() const
   return write_timeout_seconds_;
 }
 
-Vajra::transport::TlsConnection::TlsConnection(int client_fd, const TlsContext &context)
+Vajra::transport::TlsConnection::TlsConnection(platform::SocketHandle client_fd, const TlsContext &context)
     : client_fd_(client_fd),
       ssl_(SSL_new(context.get())),
       handshake_timeout_seconds_(context.handshake_timeout_seconds()),
@@ -167,10 +306,15 @@ Vajra::transport::TlsConnection::TlsConnection(int client_fd, const TlsContext &
   {
     throw std::runtime_error("unable to create TLS connection: " + openssl_error_string());
   }
-  if (SSL_set_fd(ssl_.get(), client_fd_) != 1)
+#ifdef _WIN32
+  BIO *bio = new_socket_bio(client_fd_);
+  SSL_set_bio(ssl_.get(), bio, bio);
+#else
+  if (SSL_set_fd(ssl_.get(), platform::openssl_socket_descriptor(client_fd_)) != 1)
   {
     throw std::runtime_error("unable to attach TLS connection to socket: " + openssl_error_string());
   }
+#endif
 }
 
 Vajra::transport::TlsConnection::~TlsConnection()
@@ -216,7 +360,7 @@ void Vajra::transport::TlsConnection::handshake()
   }
 }
 
-int Vajra::transport::TlsConnection::fd() const
+Vajra::platform::SocketHandle Vajra::transport::TlsConnection::fd() const
 {
   return client_fd_;
 }
@@ -227,10 +371,10 @@ bool Vajra::transport::TlsConnection::wait_readable(int timeout_seconds)
   {
     return true;
   }
-  return wait_for_events(POLLIN | POLLHUP | POLLERR, timeout_seconds);
+  return wait_for_event(platform::WaitEvent::read, timeout_seconds);
 }
 
-ssize_t Vajra::transport::TlsConnection::read(char *buffer, std::size_t length)
+Vajra::platform::SignedSize Vajra::transport::TlsConnection::read(char *buffer, std::size_t length)
 {
   if (ssl_ == nullptr)
   {
@@ -259,7 +403,7 @@ ssize_t Vajra::transport::TlsConnection::read(char *buffer, std::size_t length)
   }
 }
 
-ssize_t Vajra::transport::TlsConnection::write(const char *buffer, std::size_t length)
+Vajra::platform::SignedSize Vajra::transport::TlsConnection::write(const char *buffer, std::size_t length)
 {
   if (ssl_ == nullptr)
   {
@@ -310,31 +454,17 @@ int Vajra::transport::TlsConnection::write_timeout_seconds() const
   return write_timeout_seconds_;
 }
 
-bool Vajra::transport::TlsConnection::wait_for_events(short events, int timeout_seconds)
+bool Vajra::transport::TlsConnection::wait_for_event(platform::WaitEvent event, int timeout_seconds)
 {
   const int timeout_milliseconds = timeout_seconds <= 0 ? 0 : timeout_seconds * 1000;
-  return wait_for_events_milliseconds(events, timeout_milliseconds);
+  return wait_for_event_milliseconds(event, timeout_milliseconds);
 }
 
-bool Vajra::transport::TlsConnection::wait_for_events_milliseconds(short events, int timeout_milliseconds)
+bool Vajra::transport::TlsConnection::wait_for_event_milliseconds(
+    platform::WaitEvent event,
+    int timeout_milliseconds)
 {
-  pollfd descriptor{client_fd_, events, 0};
-  for (;;)
-  {
-    const int poll_result = poll(&descriptor, 1, timeout_milliseconds);
-    if (poll_result > 0)
-    {
-      return (descriptor.revents & events) != 0;
-    }
-    if (poll_result == 0)
-    {
-      return false;
-    }
-    if (errno != EINTR)
-    {
-      return false;
-    }
-  }
+  return platform::wait_socket(client_fd_, event, timeout_milliseconds);
 }
 
 bool Vajra::transport::TlsConnection::wait_for_ssl_error(int ssl_error, int timeout_seconds)
@@ -347,11 +477,11 @@ bool Vajra::transport::TlsConnection::wait_for_ssl_error_milliseconds(int ssl_er
 {
   if (ssl_error == SSL_ERROR_WANT_READ)
   {
-    return wait_for_events_milliseconds(POLLIN | POLLHUP | POLLERR, timeout_milliseconds);
+    return platform::wait_socket(client_fd_, platform::WaitEvent::read, timeout_milliseconds);
   }
   if (ssl_error == SSL_ERROR_WANT_WRITE)
   {
-    return wait_for_events_milliseconds(POLLOUT | POLLHUP | POLLERR, timeout_milliseconds);
+    return platform::wait_socket(client_fd_, platform::WaitEvent::write, timeout_milliseconds);
   }
   return false;
 }

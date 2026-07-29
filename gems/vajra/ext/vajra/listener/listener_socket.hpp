@@ -6,6 +6,8 @@
 #ifndef VAJRA_LISTENER_SOCKET_HPP
 #define VAJRA_LISTENER_SOCKET_HPP
 
+#include "platform/socket.hpp"
+
 #include <string>
 
 namespace Vajra
@@ -14,7 +16,7 @@ namespace Vajra
   {
     struct SocketBinding
     {
-      int fd;
+      platform::SocketHandle fd;
       int port;
     };
 

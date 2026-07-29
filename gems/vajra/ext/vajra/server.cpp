@@ -6,23 +6,25 @@
 #include "server.hpp"
 #include "vajra.hpp"
 #include "response/response_writer.hpp"
+#include "request/http2_session.hpp"
 #include "runtime/time_utils.hpp"
 #include "runtime/runtime_state.hpp"
 
 #include <algorithm>
-#include <arpa/inet.h>
 #include <cerrno>
 #include <cstring>
 #include <cstdint>
-#include <fcntl.h>
 #include <iostream>
 #include <limits>
-#include <poll.h>
 #include <sstream>
 #include <stdexcept>
+#ifndef _WIN32
+#include <arpa/inet.h>
+#include <fcntl.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 #include <utility>
 
 namespace
@@ -32,8 +34,6 @@ namespace
   constexpr std::size_t kRuntimeFdReserve = 32;
   constexpr std::size_t kListenerFdCost = 1;
   constexpr std::size_t kAcceptedClientSocketFdCost = 1;
-
-  void log_client_socket_interrupt_failed(int client_fd, const char *error_message);
 
   std::size_t checked_add(std::size_t left, std::size_t right, const char *error_message)
   {
@@ -55,6 +55,9 @@ namespace
 
   std::size_t safe_tracked_client_descriptor_limit()
   {
+#ifdef _WIN32
+    return std::numeric_limits<std::size_t>::max();
+#else
     rlimit fd_limit{};
     if (getrlimit(RLIMIT_NOFILE, &fd_limit) != 0 || fd_limit.rlim_cur == RLIM_INFINITY)
     {
@@ -72,65 +75,48 @@ namespace
     }
 
     return available_fds - fixed_fd_cost;
-  }
-
-#if !defined(__linux__) || !defined(SOCK_CLOEXEC)
-  int set_fd_cloexec(int fd)
-  {
-    const int existing_flags = fcntl(fd, F_GETFD);
-    if (existing_flags < 0)
-    {
-      return -1;
-    }
-
-    return fcntl(fd, F_SETFD, existing_flags | FD_CLOEXEC);
-  }
 #endif
+  }
 
-  int accept_client_cloexec(int listener_fd, sockaddr *client_addr, socklen_t *client_len)
+  Vajra::platform::SocketHandle accept_client_cloexec(
+      Vajra::platform::SocketHandle listener_fd,
+      sockaddr *client_addr,
+      socklen_t *client_len)
   {
 #if defined(__linux__) && defined(SOCK_CLOEXEC)
     return accept4(listener_fd, client_addr, client_len, SOCK_CLOEXEC);
 #else
-    const int client_fd = accept(listener_fd, client_addr, client_len);
-    if (client_fd < 0)
+    const Vajra::platform::SocketHandle client_fd =
+        Vajra::platform::accept_socket(listener_fd, client_addr, client_len);
+    if (!Vajra::platform::socket_valid(client_fd))
     {
       return client_fd;
     }
 
-    if (set_fd_cloexec(client_fd) != 0)
+    if (!Vajra::platform::set_socket_inheritable(client_fd, false))
     {
-      const int error_number = errno;
-      close(client_fd);
-      errno = error_number;
-      return -1;
+      Vajra::platform::close_socket(client_fd);
+      return Vajra::platform::kInvalidSocket;
     }
+#ifdef _WIN32
+    if (!Vajra::platform::set_socket_nonblocking(client_fd, false))
+    {
+      Vajra::platform::close_socket(client_fd);
+      return Vajra::platform::kInvalidSocket;
+    }
+#endif
 
     return client_fd;
 #endif
   }
 
-  bool shutdown_interrupt_succeeded_or_expected(int fd, int original_fd)
+  bool shutdown_interrupt_succeeded_or_expected(
+      Vajra::platform::SocketHandle fd,
+      Vajra::platform::SocketHandle original_fd)
   {
-    for (;;)
-    {
-      if (shutdown(fd, SHUT_RDWR) == 0)
-      {
-        return true;
-      }
-
-      if (errno == EINTR)
-      {
-        continue;
-      }
-      if (errno == ENOTCONN || errno == EINVAL || errno == ENOTSOCK)
-      {
-        return true;
-      }
-
-      log_client_socket_interrupt_failed(original_fd, std::strerror(errno));
-      return false;
-    }
+    Vajra::platform::shutdown_socket(fd);
+    (void)original_fd;
+    return true;
   }
 
   std::string socket_address(sockaddr_in address)
@@ -144,11 +130,14 @@ namespace
     return buffer;
   }
 
-  Vajra::request::SocketContext socket_context_for(int client_fd, const sockaddr_in &client_addr, int fallback_port)
+  Vajra::request::SocketContext socket_context_for(
+      Vajra::platform::SocketHandle client_fd,
+      const sockaddr_in &client_addr,
+      int fallback_port)
   {
     sockaddr_in local_addr{};
     socklen_t local_addr_length = sizeof(local_addr);
-    if (getsockname(client_fd, reinterpret_cast<sockaddr *>(&local_addr), &local_addr_length) != 0)
+    if (!Vajra::platform::socket_name(client_fd, reinterpret_cast<sockaddr *>(&local_addr), &local_addr_length))
     {
       local_addr.sin_family = AF_INET;
       local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -236,7 +225,7 @@ namespace
             << " stop_reason=" << stop_reason_name(snapshot.last_stop_reason)
             << " port=" << snapshot.port
             << " listener_owned=" << (snapshot.listener_owned ? "true" : "false")
-            << " listener_fd=" << snapshot.listener_fd
+            << " listener_fd=" << Vajra::platform::socket_handle_value(snapshot.listener_fd)
             << " mode=" << runtime_mode
             << " process_role=" << process_role
             << " request_execution_role=" << request_execution_role
@@ -277,15 +266,16 @@ namespace
         Vajra::lifecycle::StopReason::none,
         false,
         -1,
-        -1,
+        Vajra::platform::kInvalidSocket,
     };
     log_runtime_event("booting", snapshot, process_role, runtime_mode, worker_processes, request_execution_role, std::cout);
   }
 
   void log_listening_banner(const std::string &host, int port)
   {
-    std::cout << "[" << getpid() << "] * Listening on http://" << host << ":" << port << std::endl;
-    std::cout << "[" << getpid() << "] Use Ctrl-C to stop" << std::endl;
+    const Vajra::platform::ProcessId process_id = Vajra::platform::current_process_id();
+    std::cout << "[" << process_id << "] * Listening on http://" << host << ":" << port << std::endl;
+    std::cout << "[" << process_id << "] Use Ctrl-C to stop" << std::endl;
     std::ostringstream message;
     message << "listening on port " << port;
     log_message("lifecycle", message.str(), std::cout);
@@ -305,20 +295,6 @@ namespace
     log_message("error", message.str(), std::cerr);
   }
 
-  void log_poll_failed(const char *error_message)
-  {
-    std::ostringstream message;
-    message << "poll failed: " << error_message;
-    log_message("error", message.str(), std::cerr);
-  }
-
-  void log_poll_listener_event(short revents)
-  {
-    std::ostringstream message;
-    message << "poll reported listener error: revents=" << revents;
-    log_message("error", message.str(), std::cerr);
-  }
-
   void log_connection_rejected(std::size_t max_connections)
   {
     std::ostringstream message;
@@ -326,21 +302,17 @@ namespace
     log_message("error", message.str(), std::cerr);
   }
 
-  void log_handler_thread_failure(const Vajra::request::SocketContext &socket_context, int client_fd, const std::string &message)
+  void log_handler_thread_failure(
+      const Vajra::request::SocketContext &socket_context,
+      Vajra::platform::SocketHandle client_fd,
+      const std::string &message)
   {
     std::ostringstream error_message;
     error_message << "handler thread failed for client="
                   << socket_context.remote_address << ':' << socket_context.remote_port
-                  << " client_fd=" << client_fd
+                  << " client_fd=" << Vajra::platform::socket_handle_value(client_fd)
                   << " error=" << message;
     log_message("error", error_message.str(), std::cerr);
-  }
-
-  void log_client_socket_interrupt_failed(int client_fd, const char *error_message)
-  {
-    std::ostringstream message;
-    message << "client socket interrupt failed: client_fd=" << client_fd << " error=" << error_message;
-    log_message("error", message.str(), std::cerr);
   }
 
   void log_client_socket_interrupt_aborted(const char *error_message)
@@ -378,14 +350,20 @@ Vajra::Server::Server(
     int worker_processes,
     std::string request_execution_role,
     bool debug_logging,
-    int inherited_listener_fd,
+    platform::SocketHandle inherited_listener_fd,
     int request_head_timeout_seconds,
     int first_data_timeout_seconds,
     int request_body_timeout_seconds,
     int persistent_timeout_seconds,
     std::size_t max_connections,
     std::function<void()> shutdown_begin_callback,
-    std::size_t max_request_body_bytes)
+    std::size_t max_request_body_bytes,
+    std::size_t max_keepalive_requests,
+    std::size_t http2_execution_threads,
+    bool http2_enabled,
+    request::Http2Config http2_config,
+    std::shared_ptr<transport::TlsContext> tls_context,
+    std::function<void(int)> boot_ready_callback)
     : host_(std::move(host)),
       port_(port),
       server_fd_(inherited_listener_fd),
@@ -397,8 +375,14 @@ Vajra::Server::Server(
           first_data_timeout_seconds,
           request_body_timeout_seconds,
           persistent_timeout_seconds,
-          0,
-          std::move(request_executor)),
+          max_keepalive_requests,
+          request_executor,
+          http2_execution_threads,
+          http2_enabled,
+          http2_config),
+      request_executor_(std::move(request_executor)),
+      http2_config_(std::move(http2_config)),
+      tls_context_(std::move(tls_context)),
       lifecycle_(),
       process_role_(std::move(process_role)),
       runtime_mode_(std::move(runtime_mode)),
@@ -407,7 +391,8 @@ Vajra::Server::Server(
       debug_logging_(debug_logging),
       max_connections_(max_connections),
       max_tracked_client_descriptors_(safe_tracked_client_descriptor_limit()),
-      shutdown_begin_callback_(std::move(shutdown_begin_callback))
+      shutdown_begin_callback_(std::move(shutdown_begin_callback)),
+      boot_ready_callback_(std::move(boot_ready_callback))
 {
   if (max_tracked_client_descriptors_ < active_client_descriptor_reservation())
   {
@@ -461,25 +446,25 @@ Vajra::Server::~Server()
   const lifecycle::Snapshot snapshot = lifecycle_.snapshot();
   if (snapshot.state == lifecycle::State::draining || snapshot.state == lifecycle::State::failed)
   {
-    interrupt_active_client_sockets();
+    interrupt_active_client_sockets(true);
   }
   join_handler_threads();
 }
 
 void Vajra::Server::close_listener_fd(bool interrupt_accept)
 {
-  const int listener_fd = server_fd_.exchange(-1);
-  if (listener_fd < 0)
+  const platform::SocketHandle listener_fd = server_fd_.exchange(platform::kInvalidSocket);
+  if (!platform::socket_valid(listener_fd))
   {
     return;
   }
 
   if (interrupt_accept)
   {
-    shutdown(listener_fd, SHUT_RDWR);
+    platform::shutdown_socket(listener_fd);
   }
 
-  close(listener_fd);
+  platform::close_socket(listener_fd);
 }
 
 void Vajra::Server::join_handler_threads()
@@ -545,7 +530,7 @@ void Vajra::Server::start_handler_threads()
   }
 }
 
-std::uint64_t Vajra::Server::register_active_client_fd(int client_fd)
+std::uint64_t Vajra::Server::register_active_client_fd(platform::SocketHandle client_fd)
 {
   const std::size_t descriptor_count = active_client_descriptor_reservation();
   const std::uint64_t client_token = next_active_client_token_.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -558,25 +543,27 @@ std::uint64_t Vajra::Server::register_active_client_fd(int client_fd)
       throw std::runtime_error("active client descriptor budget exhausted");
     }
 
-    active_client_fds_.emplace(client_token, ActiveClientRegistration{client_fd, true, descriptor_count});
+    active_client_fds_.emplace(client_token, ActiveClientRegistration{client_fd, true, false, descriptor_count});
     active_tracked_client_descriptors_ += descriptor_count;
   }
 
   return client_token;
 }
 
-void Vajra::Server::unregister_active_client_fd(int client_fd, std::uint64_t client_token)
+bool Vajra::Server::unregister_active_client_fd(platform::SocketHandle client_fd, std::uint64_t client_token)
 {
   std::size_t descriptor_count = 0;
+  bool should_close = false;
   {
     std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
     const auto active_client_fd = active_client_fds_.find(client_token);
     if (active_client_fd == active_client_fds_.end() || active_client_fd->second.original_fd != client_fd)
     {
-      return;
+      return false;
     }
 
     descriptor_count = active_client_fd->second.descriptor_count;
+    should_close = active_client_fd->second.open;
     active_client_fd->second.open = false;
     active_client_fds_.erase(active_client_fd);
     if (active_tracked_client_descriptors_ >= descriptor_count)
@@ -588,9 +575,29 @@ void Vajra::Server::unregister_active_client_fd(int client_fd, std::uint64_t cli
       active_tracked_client_descriptors_ = 0;
     }
   }
+  return should_close;
 }
 
-void Vajra::Server::interrupt_active_client_sockets() noexcept
+void Vajra::Server::set_active_client_request_state(std::uint64_t client_token, bool request_active)
+{
+  const lifecycle::State lifecycle_state = lifecycle_.snapshot().state;
+  std::lock_guard<std::mutex> lock(active_client_fds_mutex_);
+  const auto registration = active_client_fds_.find(client_token);
+  if (registration != active_client_fds_.end())
+  {
+    registration->second.request_active = request_active;
+    if (!request_active && lifecycle_state == lifecycle::State::draining && registration->second.open)
+    {
+      shutdown_interrupt_succeeded_or_expected(
+          registration->second.original_fd,
+          registration->second.original_fd);
+      platform::close_socket(registration->second.original_fd);
+      registration->second.open = false;
+    }
+  }
+}
+
+void Vajra::Server::interrupt_active_client_sockets(bool include_active_requests) noexcept
 {
   try
   {
@@ -598,12 +605,13 @@ void Vajra::Server::interrupt_active_client_sockets() noexcept
     for (auto &[client_token, registration] : active_client_fds_)
     {
       (void)client_token;
-      if (!registration.open)
+      if (!registration.open || (!include_active_requests && registration.request_active))
       {
         continue;
       }
 
       shutdown_interrupt_succeeded_or_expected(registration.original_fd, registration.original_fd);
+      platform::close_socket(registration.original_fd);
       registration.open = false;
     }
   }
@@ -637,6 +645,21 @@ void Vajra::Server::enqueue_pending_client(PendingClient client)
 
 void Vajra::Server::run_handler_thread()
 {
+#ifdef _WIN32
+  struct WorkerRuntimeAttachment final
+  {
+    WorkerRuntimeAttachment()
+    {
+      Vajra::runtime::attach_current_thread_to_worker_runtime_state(0);
+    }
+
+    ~WorkerRuntimeAttachment()
+    {
+      Vajra::runtime::detach_worker_runtime_state();
+    }
+  } worker_runtime_attachment;
+#endif
+
   for (;;)
   {
     PendingClient client{};
@@ -668,9 +691,41 @@ void Vajra::Server::handle_pending_client(PendingClient client)
   bool hijacked = false;
   try
   {
-    Vajra::transport::PlainConnection connection(client.fd);
-    const Vajra::request::RequestProcessingOutcome outcome = request_processor_.handle(connection, client.socket_context);
-    hijacked = outcome == Vajra::request::RequestProcessingOutcome::hijacked;
+    if (tls_context_)
+    {
+      Vajra::transport::TlsConnection connection(client.fd, *tls_context_);
+      connection.handshake();
+      client.socket_context.scheme = "https";
+      if (connection.protocol() == "h2")
+      {
+        Vajra::request::Http2Session session(
+            connection,
+            client.socket_context,
+            http2_config_,
+            request_executor_,
+            request_processor_.http2_execution_pool());
+        session.run();
+      }
+      else
+      {
+        const Vajra::request::RequestProcessingOutcome outcome = request_processor_.handle(
+            connection,
+            client.socket_context,
+            [this, token = client.token](bool active)
+            { set_active_client_request_state(token, active); });
+        hijacked = outcome == Vajra::request::RequestProcessingOutcome::hijacked;
+      }
+    }
+    else
+    {
+      Vajra::transport::PlainConnection connection(client.fd);
+      const Vajra::request::RequestProcessingOutcome outcome = request_processor_.handle(
+          connection,
+          client.socket_context,
+          [this, token = client.token](bool active)
+          { set_active_client_request_state(token, active); });
+      hijacked = outcome == Vajra::request::RequestProcessingOutcome::hijacked;
+    }
   }
   catch (const std::exception &error)
   {
@@ -680,10 +735,10 @@ void Vajra::Server::handle_pending_client(PendingClient client)
   {
     log_handler_thread_failure(client.socket_context, client.fd, "unknown exception");
   }
-  unregister_active_client_fd(client.fd, client.token);
-  if (!hijacked && client.fd >= 0)
+  const bool should_close = unregister_active_client_fd(client.fd, client.token);
+  if (should_close && !hijacked && platform::socket_valid(client.fd))
   {
-    close(client.fd);
+    platform::close_socket(client.fd);
   }
   Vajra::runtime::note_worker_connection_closed();
 }
@@ -699,7 +754,7 @@ void Vajra::Server::start()
   log_booting_event(process_role_, runtime_mode_, worker_processes_, request_execution_role_, debug_logging_);
 
   listener::SocketBinding binding{server_fd_.load(), port_};
-  if (binding.fd < 0)
+  if (!platform::socket_valid(binding.fd))
   {
     try
     {
@@ -714,13 +769,17 @@ void Vajra::Server::start()
 
   port_ = binding.port;
   server_fd_.store(binding.fd);
-  if (!lifecycle_.mark_listening(binding.fd, binding.port) || server_fd_.load() < 0)
+  if (!lifecycle_.mark_listening(binding.fd, binding.port) || !platform::socket_valid(server_fd_.load()))
   {
     close_listener_fd(false);
     lifecycle_.finish_stop();
     return;
   }
   lifecycle_.mark_boot_ready();
+  if (boot_ready_callback_)
+  {
+    boot_ready_callback_(port_);
+  }
   log_listening_banner(host_, port_);
 
   try
@@ -746,45 +805,13 @@ void Vajra::Server::start()
         break;
       }
 
-      const int listener_fd = server_fd_.load();
-      if (listener_fd < 0)
+      const platform::SocketHandle listener_fd = server_fd_.load();
+      if (!platform::socket_valid(listener_fd))
       {
         break;
       }
 
-      pollfd listener_descriptor{listener_fd, POLLIN, 0};
-      const int poll_result = poll(&listener_descriptor, 1, kHandlerReapPollTimeoutMilliseconds);
-      if (poll_result == 0)
-      {
-        reap_completed_handler_threads();
-        continue;
-      }
-      if (poll_result < 0)
-      {
-        if (errno == EINTR)
-        {
-          continue;
-        }
-
-        log_poll_failed(std::strerror(errno));
-        continue;
-      }
-      if ((listener_descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
-      {
-        const lifecycle::Snapshot error_snapshot = lifecycle_.snapshot();
-        if (error_snapshot.state == lifecycle::State::draining ||
-            error_snapshot.state == lifecycle::State::failed ||
-            server_fd_.load() < 0 ||
-            VajraNative::shutdown_requested())
-        {
-          break;
-        }
-
-        log_poll_listener_event(listener_descriptor.revents);
-        lifecycle_.mark_failed(lifecycle::StopReason::listener_failure);
-        break;
-      }
-      if ((listener_descriptor.revents & POLLIN) == 0)
+      if (!platform::wait_socket(listener_fd, platform::WaitEvent::read, kHandlerReapPollTimeoutMilliseconds))
       {
         reap_completed_handler_threads();
         continue;
@@ -793,8 +820,11 @@ void Vajra::Server::start()
       sockaddr_in client_addr{};
       socklen_t client_len = sizeof(client_addr);
 
-      const int client_fd = accept_client_cloexec(listener_fd, reinterpret_cast<sockaddr *>(&client_addr), &client_len);
-      if (client_fd < 0)
+      const platform::SocketHandle client_fd = accept_client_cloexec(
+          listener_fd,
+          reinterpret_cast<sockaddr *>(&client_addr),
+          &client_len);
+      if (!platform::socket_valid(client_fd))
       {
         if (lifecycle_.snapshot().state == lifecycle::State::draining || VajraNative::shutdown_requested())
         {
@@ -810,12 +840,17 @@ void Vajra::Server::start()
           break;
         }
 
-        if (errno == EINTR)
+        const int error_number = platform::socket_last_error();
+        if (listener_fd != server_fd_.load())
+        {
+          break;
+        }
+        if (platform::socket_error_interrupted(error_number) || platform::socket_error_would_block(error_number))
         {
           continue;
         }
 
-        log_accept_failed(std::strerror(errno));
+        log_accept_failed(platform::socket_error_message(error_number).c_str());
         continue;
       }
 
@@ -831,7 +866,7 @@ void Vajra::Server::start()
       {
         active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
         log_connection_rejected(max_connections_);
-        close(client_fd);
+        platform::close_socket(client_fd);
         continue;
       }
       Vajra::response::ResponseWriter::prepare_client_socket(client_fd);
@@ -845,7 +880,7 @@ void Vajra::Server::start()
       {
         active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
         log_active_client_tracking_failed(error.what());
-        close(client_fd);
+        platform::close_socket(client_fd);
         continue;
       }
 
@@ -859,8 +894,11 @@ void Vajra::Server::start()
       catch (...)
       {
         active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
-        unregister_active_client_fd(client_fd, client_token);
-        close(client_fd);
+        const bool should_close = unregister_active_client_fd(client_fd, client_token);
+        if (should_close)
+        {
+          platform::close_socket(client_fd);
+        }
         throw;
       }
     }
@@ -871,7 +909,7 @@ void Vajra::Server::start()
     const lifecycle::Snapshot snapshot = lifecycle_.snapshot();
     if (snapshot.state == lifecycle::State::draining || snapshot.state == lifecycle::State::failed)
     {
-      interrupt_active_client_sockets();
+      interrupt_active_client_sockets(true);
     }
     join_handler_threads();
     lifecycle_.finish_stop();
@@ -895,8 +933,93 @@ void Vajra::Server::stop()
     shutdown_begin_callback_();
   }
   lifecycle_.request_stop(lifecycle::StopReason::programmatic_stop);
+#ifndef _WIN32
   close_listener_fd(true);
+#endif
   interrupt_active_client_sockets();
+}
+
+void Vajra::Server::start_dispatch_worker()
+{
+  if (!lifecycle_.begin_startup())
+  {
+    return;
+  }
+  log_booting_event(process_role_, runtime_mode_, worker_processes_, request_execution_role_, debug_logging_);
+  if (!lifecycle_.mark_dispatch_ready(port_))
+  {
+    lifecycle_.finish_stop();
+    return;
+  }
+  start_handler_threads();
+}
+
+bool Vajra::Server::dispatch_client(platform::SocketHandle client_fd)
+{
+  if (!platform::socket_valid(client_fd))
+  {
+    return false;
+  }
+  const lifecycle::Snapshot snapshot = lifecycle_.snapshot();
+  if (snapshot.state == lifecycle::State::draining || snapshot.state == lifecycle::State::failed ||
+      snapshot.state == lifecycle::State::stopped)
+  {
+    platform::close_socket(client_fd);
+    return false;
+  }
+  if (snapshot.state == lifecycle::State::listening)
+  {
+    lifecycle_.mark_serving();
+  }
+
+  sockaddr_in peer_address{};
+  socklen_t peer_address_length = sizeof(peer_address);
+  if (!platform::peer_name(client_fd, reinterpret_cast<sockaddr *>(&peer_address), &peer_address_length))
+  {
+    peer_address.sin_family = AF_INET;
+    peer_address.sin_addr.s_addr = htonl(INADDR_ANY);
+    peer_address.sin_port = 0;
+  }
+
+  const std::size_t previous_active_connections = active_connection_count_.fetch_add(1, std::memory_order_acq_rel);
+  if (previous_active_connections >= max_connections_)
+  {
+    active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
+    log_connection_rejected(max_connections_);
+    platform::close_socket(client_fd);
+    return false;
+  }
+  Vajra::response::ResponseWriter::prepare_client_socket(client_fd);
+
+  std::uint64_t client_token = 0;
+  try
+  {
+    client_token = register_active_client_fd(client_fd);
+    enqueue_pending_client(PendingClient{
+        client_fd,
+        socket_context_for(client_fd, peer_address, port_),
+        client_token});
+    Vajra::runtime::note_worker_dispatch_received();
+    return true;
+  }
+  catch (const std::exception &error)
+  {
+    active_connection_count_.fetch_sub(1, std::memory_order_acq_rel);
+    if (client_token != 0)
+    {
+      (void)unregister_active_client_fd(client_fd, client_token);
+    }
+    log_active_client_tracking_failed(error.what());
+    platform::close_socket(client_fd);
+    return false;
+  }
+}
+
+void Vajra::Server::finish_dispatch_worker()
+{
+  stop();
+  join_handler_threads();
+  lifecycle_.finish_stop();
 }
 
 Vajra::lifecycle::Snapshot Vajra::Server::lifecycle_snapshot() const

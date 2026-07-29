@@ -9,15 +9,7 @@ module Vajra
     end
 
     interface _RailsApplication
-      def call: (
-        Hash[String, String | bool | IO | StringIO | Array[Integer]]
-      ) -> [
-        Integer | String,
-        Hash[String | Symbol, Vajra::Internal::RackExecution::_RackHeaderValue] |
-          Array[[String | Symbol, Vajra::Internal::RackExecution::_RackHeaderValue]] |
-          Vajra::Internal::RackExecution::_RackHeaders,
-        Array[String] | Vajra::Internal::RackExecution::_RackBody
-      ]
+      def call: (Vajra::Internal::RackExecution::rack_env) -> Vajra::Internal::RackExecution::rack_response
       def initialized?: () -> bool
       def initialize!: () -> _RailsApplication
     end

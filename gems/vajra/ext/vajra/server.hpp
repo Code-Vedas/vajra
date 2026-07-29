@@ -23,6 +23,7 @@
 #include "listener/listener_socket.hpp"
 #include "request/request_head_error.hpp"
 #include "request/request_processor.hpp"
+#include "transport/tls_connection.hpp"
 
 namespace Vajra
 {
@@ -39,26 +40,36 @@ namespace Vajra
         int worker_processes = 0,
         std::string request_execution_role = "single_process_bootstrap",
         bool debug_logging = false,
-        int inherited_listener_fd = -1,
+        platform::SocketHandle inherited_listener_fd = platform::kInvalidSocket,
         int request_head_timeout_seconds = 5,
         int first_data_timeout_seconds = 30,
         int request_body_timeout_seconds = request::kDefaultRequestBodyTimeoutSeconds,
         int persistent_timeout_seconds = 30,
         std::size_t max_connections = 256,
         std::function<void()> shutdown_begin_callback = {},
-        std::size_t max_request_body_bytes = request::kDefaultMaxRequestBodyBytes);
+        std::size_t max_request_body_bytes = request::kDefaultMaxRequestBodyBytes,
+        std::size_t max_keepalive_requests = 0,
+        std::size_t http2_execution_threads = 4,
+        bool http2_enabled = false,
+        request::Http2Config http2_config = {},
+        std::shared_ptr<transport::TlsContext> tls_context = nullptr,
+        std::function<void(int)> boot_ready_callback = {});
     ~Server();
 
     void start();
     void stop();
+    void start_dispatch_worker();
+    bool dispatch_client(platform::SocketHandle client_fd);
+    void finish_dispatch_worker();
     lifecycle::Snapshot lifecycle_snapshot() const;
     void set_lifecycle_observer(lifecycle::Controller::Observer observer);
 
   private:
     struct ActiveClientRegistration
     {
-      int original_fd;
+      platform::SocketHandle original_fd;
       bool open;
+      bool request_active;
       std::size_t descriptor_count;
     };
 
@@ -69,16 +80,19 @@ namespace Vajra
 
     struct PendingClient
     {
-      int fd;
+      platform::SocketHandle fd;
       request::SocketContext socket_context;
       std::uint64_t token;
     };
 
     std::string host_;
     int port_;
-    std::atomic<int> server_fd_;
+    std::atomic<platform::SocketHandle> server_fd_;
     listener::Socket listener_socket_;
     request::RequestProcessor request_processor_;
+    std::shared_ptr<const request::RequestExecutor> request_executor_;
+    request::Http2Config http2_config_;
+    std::shared_ptr<transport::TlsContext> tls_context_;
     lifecycle::Controller lifecycle_;
     std::string process_role_;
     std::string runtime_mode_;
@@ -90,6 +104,7 @@ namespace Vajra
     std::atomic<std::size_t> active_connection_count_{0};
     std::size_t active_tracked_client_descriptors_ = 0;
     std::function<void()> shutdown_begin_callback_;
+    std::function<void(int)> boot_ready_callback_;
     std::mutex handler_threads_mutex_;
     std::vector<HandlerThread> handler_threads_;
     std::mutex connection_queue_mutex_;
@@ -107,9 +122,10 @@ namespace Vajra
     void enqueue_pending_client(PendingClient client);
     void run_handler_thread();
     void handle_pending_client(PendingClient client);
-    std::uint64_t register_active_client_fd(int client_fd);
-    void unregister_active_client_fd(int client_fd, std::uint64_t client_token);
-    void interrupt_active_client_sockets() noexcept;
+    std::uint64_t register_active_client_fd(platform::SocketHandle client_fd);
+    bool unregister_active_client_fd(platform::SocketHandle client_fd, std::uint64_t client_token);
+    void set_active_client_request_state(std::uint64_t client_token, bool request_active);
+    void interrupt_active_client_sockets(bool include_active_requests = false) noexcept;
   };
 }
 

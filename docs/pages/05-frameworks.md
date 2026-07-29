@@ -6,9 +6,7 @@ permalink: /frameworks/
 
 # Frameworks
 
-Vajra serves Rack applications. Frameworks keep their normal boot and routing
-behavior; Vajra owns the server runtime, listener, request parsing, request body
-transport, response writing, and worker lifecycle.
+Vajra serves Rack applications. Frameworks keep their normal boot and routing behavior; Vajra owns the server runtime, listener, request parsing, request body transport, response writing, and worker lifecycle.
 
 ## Rails
 
@@ -40,11 +38,9 @@ Vajra.configure do |config|
 end
 ```
 
-Keep the database pool at least as large as the per-worker maximum thread count.
-For the example above, each worker can run five Rack requests concurrently.
+Keep the database pool at least as large as the per-worker maximum thread count. For the example above, each worker can run five Rack requests concurrently.
 
-Rails owns application health routes such as `/up`. Vajra's stats and metrics
-endpoints expose runtime internals and should stay private.
+Rails owns application health routes such as `/up`. Vajra's stats and metrics endpoints expose runtime internals and should stay private.
 
 ## Rack
 
@@ -94,9 +90,7 @@ require_relative "app"
 run MySinatraApp
 ```
 
-Vajra does not change Sinatra routing, middleware, params, or response behavior.
-Use the same middleware ordering that the application uses with other Rack
-servers.
+Vajra does not change Sinatra routing, middleware, params, or response behavior. Use the same middleware ordering that the application uses with other Rack servers.
 
 ## Roda
 
@@ -118,8 +112,7 @@ Use `config/vajra.rb` only for server settings.
 
 ## Hanami
 
-Hanami applications run through their Rack entrypoint. Keep the framework's
-normal boot file and let Vajra load it through `config.ru` or `config.rackup`.
+Hanami applications run through their Rack entrypoint. Keep the framework's normal boot file and let Vajra load it through `config.ru` or `config.rackup`.
 
 ```ruby
 # config.ru
@@ -127,8 +120,7 @@ require_relative "config/app"
 run Hanami.app
 ```
 
-If the app has framework-specific boot requirements, keep them in Hanami's boot
-files rather than in Vajra server config.
+If the app has framework-specific boot requirements, keep them in Hanami's boot files rather than in Vajra server config.
 
 ## Response Bodies
 
@@ -138,19 +130,13 @@ Rack responses must return the standard three-element response shape:
 [status, headers, body]
 ```
 
-The body must respond to `each`. If it responds to `close`, Vajra calls it after
-response conversion. For `HEAD`, `1xx`, `204`, `205`, and `304` responses, Vajra
-preserves headers but does not send a response body.
+The body must respond to `each`. If it responds to `close`, Vajra calls it after response conversion. For `HEAD`, `1xx`, `204`, `205`, and `304` responses, Vajra preserves headers but does not send a response body.
 
 ## Request Bodies
 
-Applications read request bodies through `env["rack.input"]`, a
-`Vajra::NativeInput`. It implements `read`, `gets`, `each`, `rewind`, `close`,
-and `external_encoding`.
+Applications read request bodies through `env["rack.input"]`, a `Vajra::NativeInput`. It implements `read`, `gets`, `each`, `rewind`, `close`, and `external_encoding`.
 
-Large request bodies use native buffering and spill storage. Tune
-`max_request_body_bytes`, `request_body_timeout`, and `first_data_timeout` for
-public endpoints that accept uploads.
+Large request bodies use native buffering and spill storage. Tune `max_request_body_bytes`, `request_body_timeout`, and `first_data_timeout` for public endpoints that accept uploads.
 
 ## Troubleshooting
 

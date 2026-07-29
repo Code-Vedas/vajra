@@ -1,14 +1,13 @@
 ---
 title: Upgrading
-nav_order: 14
+parent: Guides
+nav_order: 7
 permalink: /upgrading/
 ---
 
 # Upgrading
 
-Use the changelog and the application test suite together. Vajra is a native
-server runtime, so upgrades should validate Ruby behavior, native extension
-loading, protocol behavior, and deployment shutdown.
+Use the changelog and the application test suite together. Vajra is a native server runtime, so upgrades should validate Ruby behavior, native extension loading, protocol behavior, and deployment shutdown.
 
 ## Before Upgrading
 
@@ -42,15 +41,13 @@ bin/rails server
 Review these areas on every upgrade:
 
 - listener settings: `host`, `port`
-- concurrency: `workers`, `threads`, `max_connections`,
-  `socket_queue_capacity`
+- concurrency: `workers`, `threads`, `max_connections`, `socket_queue_capacity`
 - request limits and timeouts
 - TLS and HTTP/2 settings
 - access/error log settings
 - stats, metrics, and tracing settings
 
-`VAJRA_*` environment variables override Ruby config. Check deployment
-environment before assuming a value in `config/vajra.rb` is active.
+`VAJRA_*` environment variables override Ruby config. Check deployment environment before assuming a value in `config/vajra.rb` is active.
 
 ## Validation
 
@@ -60,8 +57,7 @@ Run the app's normal test suite, then add server-focused checks:
 curl -f http://127.0.0.1:3000/
 ```
 
-When the optional control-plane endpoints are enabled, validate their configured
-paths as separate checks:
+When the optional control-plane endpoints are enabled, validate their configured paths as separate checks:
 
 ```bash
 stats_path=/__vajra/stats
@@ -86,17 +82,12 @@ Deploy one environment at a time. Watch:
 - unexpected exits
 - application errors
 
-Stop rollout and rollback if worker replacement failures, unexpected exits, or
-request errors increase beyond the application's normal baseline.
+Stop rollout and rollback if worker replacement failures, unexpected exits, or request errors increase beyond the application's normal baseline.
 
 ## Rollback
 
-Rollback by restoring the previous bundle and runtime config, then restarting
-the process through the platform supervisor. Do not reuse a native extension
-built for a different gem version or target platform.
+Rollback by restoring the previous bundle and runtime config, then restarting the process through the platform supervisor. Do not reuse a native extension built for a different gem version or target platform.
 
 ## Compatibility Policy
 
-The docs describe current supported behavior. If a release changes public
-configuration, Rack environment objects, native APIs, or protocol behavior, the
-change should be reflected in the changelog and the relevant docs page.
+The docs describe current supported behavior. If a release changes public configuration, Rack environment objects, native APIs, or protocol behavior, the change should be reflected in the changelog and the relevant docs page.

@@ -652,28 +652,13 @@ namespace
     return self;
   }
 
-  VALUE native_input_read(int argc, VALUE *argv, VALUE self)
+  VALUE native_input_read_impl(
+      VALUE length_value,
+      VALUE outbuf,
+      NativeInputWrapper *wrapper)
   {
     try
     {
-      VALUE length_value = Qnil;
-      VALUE outbuf = Qnil;
-      rb_scan_args(argc, argv, "02", &length_value, &outbuf);
-
-      if (!NIL_P(length_value))
-      {
-        const long requested_length = NUM2LONG(length_value);
-        if (requested_length < 0)
-        {
-          rb_raise(rb_eArgError, "negative length");
-        }
-        if (requested_length == 0)
-        {
-          return replace_outbuf(outbuf, binary_string_from(std::string()));
-        }
-      }
-
-      auto wrapper = native_input_wrapper_from(self);
       if (!wrapper->state)
       {
         return read_preloaded_native_input(*wrapper, length_value, outbuf);
@@ -784,6 +769,31 @@ namespace
       raise_io_error(error.what());
     }
     return Qnil;
+  }
+
+  VALUE native_input_read(int argc, VALUE *argv, VALUE self)
+  {
+    VALUE length_value = Qnil;
+    VALUE outbuf = Qnil;
+    rb_scan_args(argc, argv, "02", &length_value, &outbuf);
+
+    if (!NIL_P(length_value))
+    {
+      const long requested_length = NUM2LONG(length_value);
+      if (requested_length < 0)
+      {
+        rb_raise(rb_eArgError, "negative length");
+      }
+      if (requested_length == 0)
+      {
+        return replace_outbuf(outbuf, rb_str_new("", 0));
+      }
+    }
+
+    // Keep all explicit Ruby non-local jumps in this POD-only entry frame.
+    // Ruby longjmp must not cross live C++ strings/shared_ptrs.
+    NativeInputWrapper *wrapper = native_input_wrapper_from(self);
+    return native_input_read_impl(length_value, outbuf, wrapper);
   }
 
   VALUE native_input_gets(int argc, VALUE *argv, VALUE self)

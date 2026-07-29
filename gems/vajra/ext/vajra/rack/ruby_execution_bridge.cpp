@@ -23,8 +23,9 @@
 #include <shared_mutex>
 #include <unordered_map>
 #include <openssl/err.h>
-#include <poll.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 namespace Vajra
 {
@@ -33,7 +34,7 @@ namespace Vajra
     struct NativeHijackState
     {
       mutable std::mutex mutex;
-      int client_fd = -1;
+      Vajra::platform::SocketHandle client_fd = Vajra::platform::kInvalidSocket;
       VALUE rack_input = Qnil;
       std::shared_ptr<NativeInputState> input_state;
       std::shared_ptr<NativeHijackTransport> transport;
@@ -106,7 +107,7 @@ namespace
   struct NativeTlsHijackIOState
   {
     std::unique_ptr<SSL, Vajra::transport::SslConnectionDeleter> ssl;
-    int fd = -1;
+    Vajra::platform::SocketHandle fd = Vajra::platform::kInvalidSocket;
     int read_timeout_milliseconds = 0;
     int write_timeout_milliseconds = 0;
     bool closed = false;
@@ -169,7 +170,7 @@ namespace
 
   VALUE ruby_string_from_header_value(VALUE value)
   {
-    return rb_funcall(value, id_to_s, 0);
+    return rb_funcallv(value, id_to_s, 0, nullptr);
   }
 
   VALUE frozen_ruby_key(const char *name)
@@ -225,10 +226,10 @@ namespace
         SSL_shutdown(wrapper->state->ssl.get());
         wrapper->state->ssl.reset();
       }
-      if (wrapper->state->fd >= 0)
+      if (Vajra::platform::socket_valid(wrapper->state->fd))
       {
-        close(wrapper->state->fd);
-        wrapper->state->fd = -1;
+        Vajra::platform::close_socket(wrapper->state->fd);
+        wrapper->state->fd = Vajra::platform::kInvalidSocket;
       }
       wrapper->state->closed = true;
     }
@@ -252,7 +253,8 @@ namespace
   {
     NativeTlsHijackIOWrapper *wrapper = nullptr;
     TypedData_Get_Struct(self, NativeTlsHijackIOWrapper, &native_tls_hijack_io_type, wrapper);
-    if (wrapper == nullptr || !wrapper->state || wrapper->state->closed || wrapper->state->ssl == nullptr)
+    if (wrapper == nullptr || !wrapper->state || wrapper->state->closed ||
+        !Vajra::platform::socket_valid(wrapper->state->fd))
     {
       rb_raise(rb_eIOError, "rack.hijack IO is closed");
     }
@@ -281,62 +283,54 @@ namespace
 
   struct PollWaitContext
   {
-    int fd = -1;
-    short events = 0;
+    Vajra::platform::SocketHandle fd = Vajra::platform::kInvalidSocket;
+    Vajra::platform::WaitEvent event = Vajra::platform::WaitEvent::read;
     int timeout_milliseconds = 0;
-    int result = 0;
-    int error_number = 0;
+    bool ready = false;
   };
 
   void *poll_without_gvl(void *data)
   {
     auto *context = static_cast<PollWaitContext *>(data);
-    pollfd descriptor{context->fd, context->events, 0};
-    for (;;)
-    {
-      const int result = poll(&descriptor, 1, context->timeout_milliseconds);
-      if (result > 0)
-      {
-        context->result = (descriptor.revents & context->events) != 0 ? 1 : 0;
-        return nullptr;
-      }
-      if (result == 0)
-      {
-        context->result = 0;
-        return nullptr;
-      }
-      if (errno != EINTR)
-      {
-        context->result = -1;
-        context->error_number = errno;
-        return nullptr;
-      }
-    }
+    context->ready = Vajra::platform::wait_socket(
+        context->fd,
+        context->event,
+        context->timeout_milliseconds);
+    return nullptr;
   }
 
-  bool wait_for_tls_hijack_events(int fd, short events, int timeout_milliseconds)
+  bool wait_for_tls_hijack_events(
+      Vajra::platform::SocketHandle fd,
+      Vajra::platform::WaitEvent event,
+      int timeout_milliseconds)
   {
-    PollWaitContext context{fd, events, timeout_milliseconds, 0, 0};
+    PollWaitContext context{fd, event, timeout_milliseconds, false};
     rb_thread_call_without_gvl(poll_without_gvl, &context, RUBY_UBF_IO, nullptr);
-    return context.result > 0;
+    return context.ready;
   }
 
   bool wait_for_tls_hijack_ssl_error(const NativeTlsHijackIOState &state, int ssl_error)
   {
     if (ssl_error == SSL_ERROR_WANT_READ)
     {
-      return wait_for_tls_hijack_events(state.fd, POLLIN | POLLHUP | POLLERR, state.read_timeout_milliseconds);
+      return wait_for_tls_hijack_events(
+          state.fd,
+          Vajra::platform::WaitEvent::read,
+          state.read_timeout_milliseconds);
     }
     if (ssl_error == SSL_ERROR_WANT_WRITE)
     {
-      return wait_for_tls_hijack_events(state.fd, POLLOUT | POLLHUP | POLLERR, state.write_timeout_milliseconds);
+      return wait_for_tls_hijack_events(
+          state.fd,
+          Vajra::platform::WaitEvent::write,
+          state.write_timeout_milliseconds);
     }
     return false;
   }
 
   VALUE native_tls_hijack_io_new(
       std::unique_ptr<SSL, Vajra::transport::SslConnectionDeleter> ssl,
-      int fd,
+      Vajra::platform::SocketHandle fd,
       int read_timeout_seconds,
       int write_timeout_seconds)
   {
@@ -360,22 +354,42 @@ namespace
 
     while (written < length)
     {
-      const int result = SSL_write(
-          wrapper->state->ssl.get(),
-          data + written,
-          static_cast<int>(length - written));
+      const int result = wrapper->state->ssl != nullptr
+                             ? SSL_write(
+                                   wrapper->state->ssl.get(),
+                                   data + written,
+                                   static_cast<int>(length - written))
+                             : static_cast<int>(Vajra::platform::send_socket(
+                                   wrapper->state->fd,
+                                   data + written,
+                                   static_cast<std::size_t>(length - written)));
       if (result > 0)
       {
         written += result;
         continue;
       }
 
-      const int ssl_error = SSL_get_error(wrapper->state->ssl.get(), result);
-      if (wait_for_tls_hijack_ssl_error(*wrapper->state, ssl_error))
+      if (wrapper->state->ssl != nullptr)
+      {
+        const int ssl_error = SSL_get_error(wrapper->state->ssl.get(), result);
+        if (wait_for_tls_hijack_ssl_error(*wrapper->state, ssl_error))
+        {
+          continue;
+        }
+        error_message = "TLS rack.hijack write failed: " + openssl_error_string();
+        break;
+      }
+      const int socket_error = Vajra::platform::socket_last_error();
+      if ((Vajra::platform::socket_error_interrupted(socket_error) ||
+           Vajra::platform::socket_error_would_block(socket_error)) &&
+          wait_for_tls_hijack_events(
+              wrapper->state->fd,
+              Vajra::platform::WaitEvent::write,
+              wrapper->state->write_timeout_milliseconds))
       {
         continue;
       }
-      error_message = "TLS rack.hijack write failed: " + openssl_error_string();
+      error_message = "rack.hijack write failed: " + Vajra::platform::socket_error_message(socket_error);
       break;
     }
 
@@ -416,7 +430,12 @@ namespace
     for (;;)
     {
       const long target = read_all ? static_cast<long>(buffer.size()) : requested_length - RSTRING_LEN(output);
-      const int result = SSL_read(wrapper->state->ssl.get(), buffer.data(), static_cast<int>(target));
+      const int result = wrapper->state->ssl != nullptr
+                             ? SSL_read(wrapper->state->ssl.get(), buffer.data(), static_cast<int>(target))
+                             : static_cast<int>(Vajra::platform::receive_socket(
+                                   wrapper->state->fd,
+                                   buffer.data(),
+                                   static_cast<std::size_t>(target)));
       if (result > 0)
       {
         rb_str_cat(output, buffer.data(), result);
@@ -427,17 +446,37 @@ namespace
         continue;
       }
 
-      const int ssl_error = SSL_get_error(wrapper->state->ssl.get(), result);
-      if (ssl_error == SSL_ERROR_ZERO_RETURN)
+      if (wrapper->state->ssl == nullptr && result == 0)
       {
         eof = true;
         break;
       }
-      if (wait_for_tls_hijack_ssl_error(*wrapper->state, ssl_error))
+      if (wrapper->state->ssl != nullptr)
+      {
+        const int ssl_error = SSL_get_error(wrapper->state->ssl.get(), result);
+        if (ssl_error == SSL_ERROR_ZERO_RETURN)
+        {
+          eof = true;
+          break;
+        }
+        if (wait_for_tls_hijack_ssl_error(*wrapper->state, ssl_error))
+        {
+          continue;
+        }
+        error_message = "TLS rack.hijack read failed: " + openssl_error_string();
+        break;
+      }
+      const int socket_error = Vajra::platform::socket_last_error();
+      if ((Vajra::platform::socket_error_interrupted(socket_error) ||
+           Vajra::platform::socket_error_would_block(socket_error)) &&
+          wait_for_tls_hijack_events(
+              wrapper->state->fd,
+              Vajra::platform::WaitEvent::read,
+              wrapper->state->read_timeout_milliseconds))
       {
         continue;
       }
-      error_message = "TLS rack.hijack read failed: " + openssl_error_string();
+      error_message = "rack.hijack read failed: " + Vajra::platform::socket_error_message(socket_error);
       break;
     }
 
@@ -467,23 +506,47 @@ namespace
 
     for (;;)
     {
-      const int result = SSL_read(wrapper->state->ssl.get(), buffer.data(), static_cast<int>(buffer.size()));
+      const int result = wrapper->state->ssl != nullptr
+                             ? SSL_read(wrapper->state->ssl.get(), buffer.data(), static_cast<int>(buffer.size()))
+                             : static_cast<int>(Vajra::platform::receive_socket(
+                                   wrapper->state->fd,
+                                   buffer.data(),
+                                   buffer.size()));
       if (result > 0)
       {
         rb_str_cat(output, buffer.data(), result);
         return output;
       }
 
-      const int ssl_error = SSL_get_error(wrapper->state->ssl.get(), result);
-      if (ssl_error == SSL_ERROR_ZERO_RETURN)
+      if (wrapper->state->ssl == nullptr && result == 0)
       {
         rb_raise(rb_eEOFError, "end of file reached");
       }
-      if (wait_for_tls_hijack_ssl_error(*wrapper->state, ssl_error))
+      if (wrapper->state->ssl != nullptr)
+      {
+        const int ssl_error = SSL_get_error(wrapper->state->ssl.get(), result);
+        if (ssl_error == SSL_ERROR_ZERO_RETURN)
+        {
+          rb_raise(rb_eEOFError, "end of file reached");
+        }
+        if (wait_for_tls_hijack_ssl_error(*wrapper->state, ssl_error))
+        {
+          continue;
+        }
+        error_message = "TLS rack.hijack read failed: " + openssl_error_string();
+        break;
+      }
+      const int socket_error = Vajra::platform::socket_last_error();
+      if ((Vajra::platform::socket_error_interrupted(socket_error) ||
+           Vajra::platform::socket_error_would_block(socket_error)) &&
+          wait_for_tls_hijack_events(
+              wrapper->state->fd,
+              Vajra::platform::WaitEvent::read,
+              wrapper->state->read_timeout_milliseconds))
       {
         continue;
       }
-      error_message = "TLS rack.hijack read failed: " + openssl_error_string();
+      error_message = "rack.hijack read failed: " + Vajra::platform::socket_error_message(socket_error);
       break;
     }
 
@@ -509,10 +572,10 @@ namespace
       SSL_shutdown(wrapper->state->ssl.get());
       wrapper->state->ssl.reset();
     }
-    if (wrapper->state->fd >= 0)
+    if (Vajra::platform::socket_valid(wrapper->state->fd))
     {
-      close(wrapper->state->fd);
-      wrapper->state->fd = -1;
+      Vajra::platform::close_socket(wrapper->state->fd);
+      wrapper->state->fd = Vajra::platform::kInvalidSocket;
     }
     wrapper->state->closed = true;
     return Qnil;
@@ -539,11 +602,11 @@ namespace
   {
     NativeHijackWrapper *wrapper = native_hijack_wrapper_from(self);
     std::string error_message;
-    int client_fd = -1;
+    Vajra::platform::SocketHandle client_fd = Vajra::platform::kInvalidSocket;
     std::shared_ptr<Vajra::rack::NativeHijackTransport> transport;
     {
       std::lock_guard<std::mutex> lock(wrapper->state->mutex);
-      if (wrapper->state->client_fd < 0)
+      if (!Vajra::platform::socket_valid(wrapper->state->client_fd))
       {
         error_message = "rack.hijack is not available";
       }
@@ -593,10 +656,22 @@ namespace
       return transport->call();
     }
 
+#ifdef _WIN32
+    if (!Vajra::platform::set_socket_nonblocking(client_fd, true))
+    {
+      rb_raise(rb_eIOError, "rack.hijack could not configure the native socket");
+    }
+    return native_tls_hijack_io_new(nullptr, client_fd, 30, 30);
+#else
+
     VALUE keywords = rb_hash_new();
     rb_hash_aset(keywords, ID2SYM(rb_intern("autoclose")), Qtrue);
-    VALUE arguments[] = {INT2NUM(client_fd), keywords};
-    return rb_funcallv_kw(rb_cIO, id_for_fd, 2, arguments, RB_PASS_KEYWORDS);
+    VALUE arguments[] = {
+        ULL2NUM(static_cast<unsigned long long>(client_fd)),
+        rb_str_new_cstr("r+"),
+        keywords};
+    return rb_funcallv_kw(rb_cIO, id_for_fd, 3, arguments, RB_PASS_KEYWORDS);
+#endif
   }
 
   VALUE native_hijack_new(std::shared_ptr<Vajra::rack::NativeHijackState> state)
@@ -638,10 +713,10 @@ namespace
 
   bool rack_env_supports_full_hijack(
       const std::vector<Vajra::request::RackEnvEntry> &env_entries,
-      int client_fd,
+      Vajra::platform::SocketHandle client_fd,
       const std::shared_ptr<Vajra::rack::NativeHijackTransport> &transport)
   {
-    if (client_fd < 0)
+    if (!Vajra::platform::socket_valid(client_fd))
     {
       return false;
     }
@@ -665,7 +740,7 @@ namespace
   std::shared_ptr<Vajra::rack::NativeHijackState> install_hijack_if_supported(
       VALUE env,
       const std::vector<Vajra::request::RackEnvEntry> &env_entries,
-      int client_fd,
+      Vajra::platform::SocketHandle client_fd,
       VALUE rack_input,
       std::shared_ptr<Vajra::rack::NativeInputState> input_state,
       std::shared_ptr<Vajra::rack::NativeHijackTransport> transport)
@@ -779,7 +854,7 @@ namespace
   VALUE protected_exception_message(VALUE data)
   {
     auto *exception = reinterpret_cast<VALUE *>(data);
-    return rb_funcall(*exception, id_exception_message, 0);
+    return rb_funcallv(*exception, id_exception_message, 0, nullptr);
   }
 
   VALUE rack_header_each_callback(VALUE yielded, VALUE data, int argc, const VALUE *argv, VALUE blockarg);
@@ -818,7 +893,7 @@ namespace
       return Qnil;
     }
 
-    return rb_funcall(body, id_close, 0);
+    return rb_funcallv(body, id_close, 0, nullptr);
   }
 
   VALUE rack_header_each_callback(VALUE yielded, VALUE data, int argc, const VALUE *argv, VALUE)
@@ -1265,7 +1340,7 @@ VALUE Vajra::rack::RubyExecutionBridge::env_entries_array_from(
 VALUE Vajra::rack::RubyExecutionBridge::rack_env_from(
     const std::vector<Vajra::request::RackEnvEntry> &env_entries,
     std::string request_body,
-    int client_fd,
+    Vajra::platform::SocketHandle client_fd,
     std::shared_ptr<NativeHijackState> *hijack_state,
     std::shared_ptr<Http2StreamState> http2_stream,
     std::shared_ptr<NativeHijackTransport> native_hijack_transport)
@@ -1302,7 +1377,7 @@ VALUE Vajra::rack::RubyExecutionBridge::rack_env_from(
 VALUE Vajra::rack::RubyExecutionBridge::rack_env_from(
     const std::vector<Vajra::request::RackEnvEntry> &env_entries,
     VALUE rack_input,
-    int client_fd,
+    Vajra::platform::SocketHandle client_fd,
     std::shared_ptr<NativeInputState> input_state,
     std::shared_ptr<NativeHijackState> *hijack_state,
     std::shared_ptr<Http2StreamState> http2_stream,

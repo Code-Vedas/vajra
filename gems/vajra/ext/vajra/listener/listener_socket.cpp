@@ -5,15 +5,16 @@
 
 #include "listener_socket.hpp"
 
-#include <arpa/inet.h>
 #include <cerrno>
 #include <cstring>
 #include <memory>
-#include <netdb.h>
 #include <stdexcept>
 #include <string>
-#include <sys/socket.h>
-#include <unistd.h>
+
+#ifndef _WIN32
+#include <arpa/inet.h>
+#include <netdb.h>
+#endif
 
 namespace
 {
@@ -27,7 +28,7 @@ namespace
   {
     return std::runtime_error(
         std::string("listener ") + stage + " failed for " + host + ":" + std::to_string(port) + ": " +
-        std::strerror(error_number));
+        Vajra::platform::socket_error_message(error_number));
   }
 
   std::runtime_error host_resolution_error(const std::string &host, int port, int status)
@@ -40,6 +41,7 @@ namespace
 
 Vajra::listener::SocketBinding Vajra::listener::Socket::open(const std::string &host, int port, bool reuse_port) const
 {
+  platform::ensure_socket_runtime();
   addrinfo hints{};
   hints.ai_family = AF_INET;
   hints.ai_socktype = SOCK_STREAM;
@@ -58,75 +60,86 @@ Vajra::listener::SocketBinding Vajra::listener::Socket::open(const std::string &
   }
   const std::unique_ptr<addrinfo, decltype(&freeaddrinfo)> addresses(result, freeaddrinfo);
 
-  int socket_fd = -1;
+  platform::SocketHandle socket_fd = platform::kInvalidSocket;
   int last_error = 0;
   SocketFailureStage last_failure_stage = SocketFailureStage::bind;
   for (addrinfo *candidate = addresses.get(); candidate != nullptr; candidate = candidate->ai_next)
   {
-    socket_fd = socket(candidate->ai_family, candidate->ai_socktype, candidate->ai_protocol);
-    if (socket_fd < 0)
+    socket_fd = platform::create_tcp_socket(candidate->ai_family, candidate->ai_socktype, candidate->ai_protocol);
+    if (!platform::socket_valid(socket_fd))
     {
-      last_error = errno;
+      last_error = platform::socket_last_error();
       last_failure_stage = SocketFailureStage::socket_create;
       continue;
     }
 
     int opt = 1;
-    if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+    if (!platform::set_socket_option(socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)))
     {
-      const int error_number = errno;
-      close(socket_fd);
-      throw startup_error("socket option setup", host, port, error_number);
+      const int error_number = platform::socket_last_error();
+      platform::close_socket(socket_fd);
+      throw std::runtime_error(
+          startup_error("socket option setup", host, port, error_number).what() +
+          std::string(" (native_handle=") + std::to_string(platform::socket_handle_value(socket_fd)) + ")");
     }
 
 #ifdef SO_REUSEPORT
-    if (reuse_port && setsockopt(socket_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
+    if (reuse_port && !platform::set_socket_option(socket_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)))
     {
-      const int error_number = errno;
-      close(socket_fd);
+      const int error_number = platform::socket_last_error();
+      platform::close_socket(socket_fd);
       throw startup_error("reuseport setup", host, port, error_number);
     }
 #else
     if (reuse_port)
     {
-      close(socket_fd);
+      platform::close_socket(socket_fd);
       throw std::runtime_error("listener reuse_port requested but SO_REUSEPORT is not available");
     }
 #endif
 
-    if (bind(socket_fd, candidate->ai_addr, candidate->ai_addrlen) == 0)
+    if (platform::bind_socket(socket_fd, candidate->ai_addr, static_cast<socklen_t>(candidate->ai_addrlen)))
     {
       break;
     }
 
-    last_error = errno;
+    last_error = platform::socket_last_error();
     last_failure_stage = SocketFailureStage::bind;
-    close(socket_fd);
-    socket_fd = -1;
+    platform::close_socket(socket_fd);
+    socket_fd = platform::kInvalidSocket;
   }
 
-  if (socket_fd < 0)
+  if (!platform::socket_valid(socket_fd))
   {
     throw startup_error(last_failure_stage == SocketFailureStage::socket_create ? "socket create" : "bind", host, port, last_error);
   }
 
   sockaddr_in bound_addr{};
   socklen_t bound_addr_len = sizeof(bound_addr);
-  if (getsockname(socket_fd, reinterpret_cast<sockaddr *>(&bound_addr), &bound_addr_len) < 0)
+  if (!platform::socket_name(socket_fd, reinterpret_cast<sockaddr *>(&bound_addr), &bound_addr_len))
   {
-    const int error_number = errno;
-    close(socket_fd);
+    const int error_number = platform::socket_last_error();
+    platform::close_socket(socket_fd);
     throw startup_error("bound port discovery", host, port, error_number);
   }
 
   const int bound_port = ntohs(bound_addr.sin_port);
 
-  if (listen(socket_fd, 128) < 0)
+  if (!platform::listen_socket(socket_fd, 128))
   {
-    const int error_number = errno;
-    close(socket_fd);
+    const int error_number = platform::socket_last_error();
+    platform::close_socket(socket_fd);
     throw startup_error("listen", host, bound_port, error_number);
   }
+
+#ifdef _WIN32
+  if (!platform::set_socket_nonblocking(socket_fd, true))
+  {
+    const int error_number = platform::socket_last_error();
+    platform::close_socket(socket_fd);
+    throw startup_error("nonblocking setup", host, bound_port, error_number);
+  }
+#endif
 
   return SocketBinding{socket_fd, bound_port};
 }

@@ -6,6 +6,7 @@
 #ifndef VAJRA_RACK_RUBY_EXECUTION_BRIDGE_HPP
 #define VAJRA_RACK_RUBY_EXECUTION_BRIDGE_HPP
 
+#include "platform/socket.hpp"
 #include "request/rack_env.hpp"
 #include "response/response.hpp"
 #include "ruby.h"
@@ -58,14 +59,14 @@ namespace Vajra
       static VALUE rack_env_from(
           const std::vector<Vajra::request::RackEnvEntry> &env_entries,
           std::string request_body,
-          int client_fd = -1,
+          platform::SocketHandle client_fd = platform::kInvalidSocket,
           std::shared_ptr<NativeHijackState> *hijack_state = nullptr,
           std::shared_ptr<Http2StreamState> http2_stream = nullptr,
           std::shared_ptr<NativeHijackTransport> native_hijack_transport = nullptr);
       static VALUE rack_env_from(
           const std::vector<Vajra::request::RackEnvEntry> &env_entries,
           VALUE rack_input,
-          int client_fd,
+          platform::SocketHandle client_fd,
           std::shared_ptr<NativeInputState> input_state,
           std::shared_ptr<NativeHijackState> *hijack_state,
           std::shared_ptr<Http2StreamState> http2_stream = nullptr,

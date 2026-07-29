@@ -14,9 +14,15 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#ifdef _WIN32
+#include <process.h>
+#include <windows.h>
+#include <psapi.h>
+#else
 #include <sys/mman.h>
-#include <unordered_map>
 #include <unistd.h>
+#endif
+#include <unordered_map>
 
 namespace
 {
@@ -31,6 +37,15 @@ namespace
   Vajra::runtime::RuntimeState *installed_runtime_state = nullptr;
   thread_local Vajra::runtime::WorkerRuntimeState *installed_worker_state = nullptr;
   thread_local std::size_t installed_worker_index = 0;
+#ifdef _WIN32
+  std::mutex runtime_mapping_mutex;
+  struct RuntimeMapping
+  {
+    HANDLE handle = nullptr;
+    bool owns_state = false;
+  };
+  std::unordered_map<Vajra::runtime::RuntimeState *, RuntimeMapping> runtime_mapping_handles;
+#endif
 
   std::int64_t steady_clock_nanoseconds()
   {
@@ -76,7 +91,7 @@ namespace
   }
 
 #if defined(__linux__)
-  std::int64_t rss_bytes_for_pid_from_proc(pid_t pid)
+  std::int64_t rss_bytes_for_pid_from_proc(Vajra::platform::ProcessId pid)
   {
     std::ifstream statm("/proc/" + std::to_string(pid) + "/statm");
     long long total_pages = 0;
@@ -97,7 +112,29 @@ namespace
   }
 #endif
 
-  std::int64_t rss_bytes_for_pid_from_ps(pid_t pid)
+#ifdef _WIN32
+  std::int64_t rss_bytes_for_pid_from_windows(Vajra::platform::ProcessId pid)
+  {
+    if (pid <= 0)
+    {
+      return -1;
+    }
+    const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, static_cast<DWORD>(pid));
+    if (process == nullptr)
+    {
+      return -1;
+    }
+    PROCESS_MEMORY_COUNTERS_EX counters{};
+    counters.cb = sizeof(counters);
+    const BOOL sampled = GetProcessMemoryInfo(
+        process,
+        reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&counters),
+        sizeof(counters));
+    CloseHandle(process);
+    return sampled == 0 ? -1 : static_cast<std::int64_t>(counters.WorkingSetSize);
+  }
+#else
+  std::int64_t rss_bytes_for_pid_from_ps(Vajra::platform::ProcessId pid)
   {
     if (pid <= 0)
     {
@@ -129,11 +166,12 @@ namespace
 
     return static_cast<std::int64_t>(rss_kilobytes) * 1024;
   }
+#endif
 
-  std::int64_t cached_rss_bytes_for_pid_from_ps(pid_t pid)
+  std::int64_t cached_rss_bytes_for_pid_from_ps(Vajra::platform::ProcessId pid)
   {
     static std::mutex cache_mutex;
-    static std::unordered_map<pid_t, RssSample> cache;
+    static std::unordered_map<Vajra::platform::ProcessId, RssSample> cache;
 
     const auto now = std::chrono::steady_clock::now();
     {
@@ -145,7 +183,11 @@ namespace
       }
     }
 
+#ifdef _WIN32
+    const std::int64_t bytes = rss_bytes_for_pid_from_windows(pid);
+#else
     const std::int64_t bytes = rss_bytes_for_pid_from_ps(pid);
+#endif
     {
       std::lock_guard<std::mutex> lock(cache_mutex);
       cache[pid] = RssSample{bytes, now};
@@ -154,7 +196,7 @@ namespace
     return bytes;
   }
 
-  std::int64_t rss_bytes_for_pid(pid_t pid)
+  std::int64_t rss_bytes_for_pid(Vajra::platform::ProcessId pid)
   {
     if (pid <= 0)
     {
@@ -296,6 +338,9 @@ namespace
 
 Vajra::runtime::RuntimeState *Vajra::runtime::allocate_runtime_state()
 {
+#ifdef _WIN32
+  return allocate_named_runtime_state(L"");
+#else
   void *region = mmap(nullptr, sizeof(RuntimeState), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
   if (region == MAP_FAILED)
   {
@@ -303,7 +348,66 @@ Vajra::runtime::RuntimeState *Vajra::runtime::allocate_runtime_state()
   }
 
   return new (region) RuntimeState();
+#endif
 }
+
+#ifdef _WIN32
+Vajra::runtime::RuntimeState *Vajra::runtime::allocate_named_runtime_state(const std::wstring &mapping_name)
+{
+  SECURITY_ATTRIBUTES attributes{};
+  attributes.nLength = sizeof(attributes);
+  attributes.bInheritHandle = TRUE;
+  const HANDLE mapping = CreateFileMappingW(
+      INVALID_HANDLE_VALUE,
+      &attributes,
+      PAGE_READWRITE,
+      0,
+      static_cast<DWORD>(sizeof(RuntimeState)),
+      mapping_name.empty() ? nullptr : mapping_name.c_str());
+  if (mapping == nullptr)
+  {
+    throw std::runtime_error("failed to create shared Windows runtime state mapping");
+  }
+  void *region = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(RuntimeState));
+  if (region == nullptr)
+  {
+    CloseHandle(mapping);
+    throw std::runtime_error("failed to map shared Windows runtime state");
+  }
+  auto *state = new (region) RuntimeState();
+  {
+    const std::lock_guard<std::mutex> lock(runtime_mapping_mutex);
+    runtime_mapping_handles.emplace(state, RuntimeMapping{mapping, true});
+  }
+  return state;
+}
+
+Vajra::runtime::RuntimeState *Vajra::runtime::attach_runtime_state(HANDLE mapping_handle)
+{
+  if (mapping_handle == nullptr || mapping_handle == INVALID_HANDLE_VALUE)
+  {
+    throw std::runtime_error("invalid inherited Windows runtime state mapping handle");
+  }
+  void *region = MapViewOfFile(mapping_handle, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(RuntimeState));
+  if (region == nullptr)
+  {
+    throw std::runtime_error("failed to attach inherited Windows runtime state mapping");
+  }
+  auto *state = static_cast<RuntimeState *>(region);
+  {
+    const std::lock_guard<std::mutex> lock(runtime_mapping_mutex);
+    runtime_mapping_handles.emplace(state, RuntimeMapping{mapping_handle, false});
+  }
+  return state;
+}
+
+HANDLE Vajra::runtime::runtime_state_mapping_handle(RuntimeState *state)
+{
+  const std::lock_guard<std::mutex> lock(runtime_mapping_mutex);
+  const auto entry = runtime_mapping_handles.find(state);
+  return entry == runtime_mapping_handles.end() ? nullptr : entry->second.handle;
+}
+#endif
 
 void Vajra::runtime::release_runtime_state(RuntimeState *state)
 {
@@ -315,8 +419,32 @@ void Vajra::runtime::release_runtime_state(RuntimeState *state)
       installed_worker_state = nullptr;
       installed_worker_index = 0;
     }
+#ifdef _WIN32
+    HANDLE mapping = nullptr;
+    bool owns_state = false;
+    {
+      const std::lock_guard<std::mutex> lock(runtime_mapping_mutex);
+      const auto entry = runtime_mapping_handles.find(state);
+      if (entry != runtime_mapping_handles.end())
+      {
+        mapping = entry->second.handle;
+        owns_state = entry->second.owns_state;
+        runtime_mapping_handles.erase(entry);
+      }
+    }
+    if (owns_state)
+    {
+      state->~RuntimeState();
+    }
+    UnmapViewOfFile(state);
+    if (mapping != nullptr)
+    {
+      CloseHandle(mapping);
+    }
+#else
     state->~RuntimeState();
     munmap(state, sizeof(RuntimeState));
+#endif
   }
 }
 
@@ -334,14 +462,14 @@ void Vajra::runtime::install_master_runtime_state(
     return;
   }
 
-  state->master_pid.store(getpid(), std::memory_order_release);
+  state->master_pid.store(platform::current_process_id(), std::memory_order_release);
   state->worker_count.store(static_cast<std::uint32_t>(worker_count), std::memory_order_release);
   state->threads_per_worker.store(static_cast<std::uint32_t>(threads_per_worker), std::memory_order_release);
   state->socket_queue_capacity.store(static_cast<std::uint32_t>(socket_queue_capacity), std::memory_order_release);
   state->shutdown_requested.store(false, std::memory_order_release);
 }
 
-void Vajra::runtime::install_worker_runtime_state(RuntimeState *state, std::size_t worker_index, pid_t pid)
+void Vajra::runtime::install_worker_runtime_state(RuntimeState *state, std::size_t worker_index, platform::ProcessId pid)
 {
   installed_runtime_state = state;
   attach_current_thread_to_worker_runtime_state(worker_index);
@@ -412,6 +540,12 @@ void Vajra::runtime::mark_runtime_shutdown_requested()
   {
     installed_runtime_state->shutdown_requested.store(true, std::memory_order_release);
   }
+}
+
+bool Vajra::runtime::runtime_shutdown_requested()
+{
+  return installed_runtime_state != nullptr &&
+         installed_runtime_state->shutdown_requested.load(std::memory_order_acquire);
 }
 
 void Vajra::runtime::mark_worker_lifecycle(std::size_t worker_index, WorkerLifecycleState lifecycle_state)

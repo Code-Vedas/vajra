@@ -1,11 +1,18 @@
 cmake_minimum_required(VERSION 3.20)
 project(vajra_cpp_tests LANGUAGES C CXX)
 
+if(MSVC)
+  message(FATAL_ERROR "Vajra supports Windows only with the UCRT/MinGW toolchain")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Threads REQUIRED)
+if(WIN32 AND MINGW AND NOT OPENSSL_ROOT_DIR AND DEFINED ENV{MINGW_PREFIX})
+  file(TO_CMAKE_PATH "$ENV{MINGW_PREFIX}" OPENSSL_ROOT_DIR)
+endif()
 find_package(OpenSSL REQUIRED)
 
 file(GLOB VAJRA_VENDOR_NGHTTP2_SOURCES CONFIGURE_DEPENDS
@@ -16,6 +23,7 @@ add_executable(vajra_server_test
   test_support.cpp
   lifecycle_controller_test.cpp
   rack_env_test.cpp
+  platform_socket_test.cpp
   server_lifecycle_test.cpp
   request_head_test.cpp
   response_test.cpp
@@ -24,6 +32,8 @@ add_executable(vajra_server_test
   server_test.cpp
   ../../ext/vajra/lifecycle/lifecycle_controller.cpp
   ../../ext/vajra/listener/listener_socket.cpp
+  ../../ext/vajra/platform/socket.cpp
+  ../../ext/vajra/platform/process.cpp
   ../../ext/vajra/rack/http2_stream.cpp
   ../../ext/vajra/rack/rack_execution_profiler.cpp
   ruby_execution_bridge_stub.cpp
@@ -51,13 +61,17 @@ target_include_directories(vajra_server_test PRIVATE
   ../../ext/vajra/vendor/nghttp2/lib
 )
 target_link_libraries(vajra_server_test PRIVATE Threads::Threads OpenSSL::SSL OpenSSL::Crypto)
+if(WIN32)
+  target_link_libraries(vajra_server_test PRIVATE ws2_32 psapi)
+endif()
 target_compile_definitions(vajra_server_test PRIVATE
   VAJRA_RUNTIME_TESTING
   NGHTTP2_STATICLIB
   BUILDING_NGHTTP2
-  HAVE_ARPA_INET_H
-  HAVE_NETINET_IN_H
 )
+if(NOT WIN32)
+  target_compile_definitions(vajra_server_test PRIVATE HAVE_ARPA_INET_H HAVE_NETINET_IN_H)
+endif()
 target_compile_options(vajra_server_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 enable_testing()

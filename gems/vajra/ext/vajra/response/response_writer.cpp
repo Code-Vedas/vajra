@@ -12,27 +12,25 @@
 #include <cerrno>
 #include <cstring>
 #include <iostream>
+#ifndef _WIN32
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#endif
 
-namespace
-{
-}
-
-void Vajra::response::ResponseWriter::prepare_client_socket(int client_fd)
+void Vajra::response::ResponseWriter::prepare_client_socket(platform::SocketHandle client_fd)
 {
   int opt = 1;
 #ifdef TCP_NODELAY
-  (void)setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+  (void)platform::set_socket_option(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
 #endif
 #ifdef SO_NOSIGPIPE
-  (void)setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
+  (void)platform::set_socket_option(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
 #endif
   (void)client_fd;
 }
 
-bool Vajra::response::ResponseWriter::send(int client_fd, const Response &response) const
+bool Vajra::response::ResponseWriter::send(platform::SocketHandle client_fd, const Response &response) const
 {
   prepare_client_socket(client_fd);
   Vajra::transport::PlainConnection connection(client_fd);
@@ -180,7 +178,9 @@ void Vajra::response::ResponseWriter::log_serialization_error(const Serializatio
   std::cerr << "response serialization failed: " << error.what() << std::endl;
 }
 
-bool Vajra::response::ResponseWriter::send_response_message(int client_fd, const std::string &response_message) const
+bool Vajra::response::ResponseWriter::send_response_message(
+    platform::SocketHandle client_fd,
+    const std::string &response_message) const
 {
   prepare_client_socket(client_fd);
   Vajra::transport::PlainConnection connection(client_fd);

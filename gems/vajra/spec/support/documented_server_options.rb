@@ -36,7 +36,7 @@ module DocumentedServerOptions
         config.stats_path "/__vajra/stats"
         config.metrics_endpoint "/metrics"
         config.trace_enabled
-        config.trace_endpoint "http://127.0.0.1:4318/v1/traces"
+        config.trace_endpoint "https://collector.example.test/v1/traces"
         config.trace_service_name "vajra-test"
         config.trace_otel_owner
         config.max_request_head_bytes 2048
@@ -73,7 +73,7 @@ module DocumentedServerOptions
       stats_path: '/__vajra/stats',
       metrics_endpoint: '/metrics',
       trace_enabled: true,
-      trace_endpoint: 'http://127.0.0.1:4318/v1/traces',
+      trace_endpoint: 'https://collector.example.test/v1/traces',
       trace_otel_owner: true,
       trace_service_name: 'vajra-test',
       max_request_head_bytes: 2048,

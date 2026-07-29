@@ -163,6 +163,12 @@ module Vajra
         start_request_observability_drain_thread if enabled && output_available
       end
 
+      def before_worker_exit!
+        loop do
+          break if drain_request_observability_batch.zero?
+        end
+      end
+
       def with_request_span(env, &)
         return yield unless request_span_observability_active?
 
@@ -363,9 +369,17 @@ module Vajra
         return false if sampler_always_off?(config)
         return false unless traces_exporter_enabled?(config.traces_exporter, 'otlp')
 
-        config.endpoint.start_with?('http://')
+        native_https_endpoint?(config.endpoint)
       end
       private_class_method :native_tracing_configured?
+
+      def native_https_endpoint?(endpoint)
+        uri = URI.parse(endpoint)
+        uri.is_a?(URI::HTTPS) && !uri.hostname.to_s.empty?
+      rescue URI::InvalidURIError
+        false
+      end
+      private_class_method :native_https_endpoint?
 
       def traces_exporter_enabled?(exporters, expected)
         exporters.to_s.split(',').map { |exporter| exporter.strip.downcase }.include?(expected)
@@ -922,12 +936,11 @@ module Vajra
         return unless respond_to?(:__native_drain_request_observability_events__)
 
         stop_request_observability_drain_thread
-        # rubocop:disable ThreadSafety/NewThread
-        thread = Thread.new { request_observability_drain_loop }
-        # rubocop:enable ThreadSafety/NewThread
         TRACE_MUTEX.synchronize do
           TRACE_STATE.request_observability_stop = false
-          TRACE_STATE.request_observability_thread = thread
+          # rubocop:disable ThreadSafety/NewThread
+          TRACE_STATE.request_observability_thread = Thread.new { request_observability_drain_loop }
+          # rubocop:enable ThreadSafety/NewThread
         end
       end
       private_class_method :start_request_observability_drain_thread

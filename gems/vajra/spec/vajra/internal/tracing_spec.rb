@@ -178,7 +178,7 @@ RSpec.describe Vajra::Internal::Tracing do
   end
 
   it 'warns and stays boot-safe when OpenTelemetry gems are unavailable' do
-    allow(Kernel).to receive(:require).with('opentelemetry/sdk').and_raise(LoadError)
+    allow(described_class).to receive(:require).with('opentelemetry/sdk').and_raise(LoadError)
 
     expect(
       described_class.install_from_start_options!(
@@ -217,14 +217,14 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(
       described_class.install_from_start_options!(
         trace_enabled: true,
-        trace_endpoint: 'http://127.0.0.1:4318/v1/traces',
+        trace_endpoint: 'https://collector.example.test/v1/traces',
         trace_service_name: 'vajra-test',
         trace_otel_owner: true
       )
     ).to be(true)
 
     expect(described_class).to have_received(:__native_set_tracing_status__)
-      .with(true, true, 'http://127.0.0.1:4318/v1/traces', 'vajra-test', false, 1.0, '', 'tracecontext,baggage')
+      .with(true, true, 'https://collector.example.test/v1/traces', 'vajra-test', false, 1.0, '', 'tracecontext,baggage')
   end
 
   it 'installs native callbacks for metrics-only telemetry without reporting tracing as available' do
@@ -248,14 +248,14 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(
       described_class.install_from_start_options!(
         trace_enabled: true,
-        trace_endpoint: 'http://127.0.0.1:4318/v1/traces',
+        trace_endpoint: 'https://collector.example.test/v1/traces',
         trace_service_name: 'vajra-test',
         trace_otel_owner: true
       )
     ).to be(true)
 
     expect(described_class).to have_received(:__native_set_tracing_status__)
-      .with(true, true, 'http://127.0.0.1:4318/v1/traces', 'vajra-test', false, 1.0, '', 'tracecontext,baggage')
+      .with(true, true, 'https://collector.example.test/v1/traces', 'vajra-test', false, 1.0, '', 'tracecontext,baggage')
     expect(described_class).to have_received(:__native_set_lifecycle_callback__).with(nil)
     expect(described_class).to have_received(:__native_set_request_observability_callback__).with(nil)
   end
@@ -866,7 +866,7 @@ RSpec.describe Vajra::Internal::Tracing do
     config = described_class.send(
       :resolve_config,
       trace_enabled: true,
-      trace_endpoint: 'http://127.0.0.1:4318/v1/traces',
+      trace_endpoint: 'https://collector.example.test/v1/traces',
       trace_service_name: 'vajra-test',
       trace_otel_owner: true
     )
@@ -877,10 +877,10 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(described_class).not_to have_received(:require).with('opentelemetry/sdk')
   end
 
-  it 'does not fall back to Ruby SDK export for unsupported native OTLP endpoints' do
+  it 'does not use native OTLP export for cleartext endpoints' do
     config = described_class::TraceConfig.new(
       enabled: true,
-      endpoint: 'https://collector.example.test/v1/traces',
+      endpoint: 'http://collector.example.test/v1/traces',
       service_name: 'vajra-test',
       otel_owner: true,
       traces_exporter: 'otlp',
@@ -891,9 +891,26 @@ RSpec.describe Vajra::Internal::Tracing do
     expect(described_class.send(:native_tracing_configured?, config)).to be(false)
   end
 
+  it 'requires HTTPS for native OTLP export' do
+    config = described_class::TraceConfig.new(
+      traces_exporter: 'otlp',
+      sampler: ''
+    )
+
+    ['https://collector.example.test:4318', 'https://127.0.0.1:4318'].each do |endpoint|
+      config.endpoint = endpoint
+      expect(described_class.send(:native_tracing_configured?, config)).to be(true)
+    end
+
+    ['http://collector.example.test:4318', 'https:/missing-host', 'not a URL'].each do |endpoint|
+      config.endpoint = endpoint
+      expect(described_class.send(:native_tracing_configured?, config)).to be(false)
+    end
+  end
+
   it 'uses native tracing only when OTEL traces exporters include OTLP' do
     otlp_exporter = described_class::TraceConfig.new(
-      endpoint: 'http://127.0.0.1:4318/v1/traces',
+      endpoint: 'https://collector.example.test/v1/traces',
       traces_exporter: ' console, OTLP ',
       sampler: ''
     )
@@ -1964,6 +1981,14 @@ RSpec.describe Vajra::Internal::Tracing do
     described_class.after_fork!
 
     expect(described_class).to have_received(:start_request_observability_drain_thread)
+  end
+
+  it 'drains queued request observability before a native worker exits' do
+    allow(described_class).to receive(:drain_request_observability_batch).and_return(1, 0)
+
+    described_class.before_worker_exit!
+
+    expect(described_class).to have_received(:drain_request_observability_batch).twice
   end
 
   it 'shuts down cleanly when a provider has no lifecycle APIs' do

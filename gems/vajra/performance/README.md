@@ -2,9 +2,7 @@
 
 Small local benchmark project for comparing Vajra against peer Rack servers.
 
-It generates Rack, Rails, Roda, Sinatra, and Hanami fixtures under `tmp/<timestamp>/`,
-starts each fixture through each selected server, runs k6 against the already-running
-server, and reports the standard performance profile:
+It generates Rack, Rails, Roda, Sinatra, and Hanami fixtures under `tmp/<timestamp>/`, starts each fixture through each selected server, runs k6 against the already-running server, and reports the standard performance profile:
 
 - requests per second
 - requests per CPU core
@@ -20,9 +18,7 @@ cd gems/vajra/performance
 bundle exec rake performance:run
 ```
 
-`performance:run` runs all profiles: the full framework/server comparison,
-the Vajra-only observability comparison, and the Vajra-only protocol comparison.
-To run one profile directly:
+`performance:run` runs all profiles: the full framework/server comparison, the Vajra-only observability comparison, and the Vajra-only protocol comparison. To run one profile directly:
 
 ```bash
 bundle exec rake performance:main
@@ -44,13 +40,9 @@ Local knobs are ENV variables:
 SERVERS=vajra,puma WORKER_COUNT=1 THREAD_COUNT=4 bundle exec rake performance:run
 ```
 
-Access logging is off by default. Set `ACCESS_LOG=1` to enable fair access
-logging for every selected server.
+Access logging is off by default. Set `ACCESS_LOG=1` to enable fair access logging for every selected server.
 
-Vajra observability comparisons run after the standard profile and only benchmark
-Vajra on the Rack fixture. The observability section uses a shorter fixed run so
-it reports every mode without multiplying the full framework/server matrix.
-The observability modes are:
+Vajra observability comparisons run after the standard profile and only benchmark Vajra on the Rack fixture. The observability section uses a shorter fixed run so it reports every mode without multiplying the full framework/server matrix. The observability modes are:
 
 - `off`
 - `access_text`
@@ -62,9 +54,7 @@ The observability modes are:
 - `otel_otlp`: Vajra-owned native OTLP span export to the local drain
 - `otel_all_otlp`: `otel_otlp` plus structured JSON access logging
 
-The protocol profile also runs after the standard profile and only benchmarks
-Vajra on the Rack fixture. It uses the standard run duration, including
-`SOAK_SECONDS` when set. The default protocol modes are:
+The protocol profile also runs after the standard profile and only benchmarks Vajra on the Rack fixture. It uses the standard run duration, including `SOAK_SECONDS` when set. The default protocol modes are:
 
 - `vajra_http1`: plaintext HTTP/1.1
 - `vajra_tls_http1`: HTTP/1.1 over TLS
@@ -88,8 +78,7 @@ Vajra on the Rack fixture. It uses the standard run duration, including
 - `vajra_h2c_tunnel_backpressure`: cleartext HTTP/2 tunnel backpressure
 - `vajra_tls_http2_tunnel_backpressure`: TLS HTTP/2 tunnel backpressure
 
-Set `SOAK_SECONDS=300` to run the same matrix as a practical local soak. The
-default run duration is 20 seconds per server/fixture pair.
+Set `SOAK_SECONDS=300` to run the same matrix as a practical local soak. The default run duration is 20 seconds per server/fixture pair.
 
 Each generated fixture uses the same request mix:
 
@@ -107,10 +96,4 @@ Each generated fixture uses the same request mix:
 - `POST /stream-read`
 - `POST /line-read`
 
-Generated apps, k6 scripts, summaries, and logs are written under
-`tmp/<timestamp>/<fixture>/`. Each server/fixture pair writes
-`<server>.run-summary.json`, and the whole run writes `summary.json` at the
-timestamp root. Observability mode artifacts are written under
-`tmp/<timestamp>/<fixture>/observability/<mode>/`. Protocol mode artifacts are
-written under `tmp/<timestamp>/<fixture>/protocol/<mode>/`. The comparison
-tables print to stdout.
+Generated apps, k6 scripts, summaries, and logs are written under `tmp/<timestamp>/<fixture>/`. Each server/fixture pair writes `<server>.run-summary.json`, and the whole run writes `summary.json` at the timestamp root. Observability mode artifacts are written under `tmp/<timestamp>/<fixture>/observability/<mode>/`. Protocol mode artifacts are written under `tmp/<timestamp>/<fixture>/protocol/<mode>/`. The comparison tables print to stdout.

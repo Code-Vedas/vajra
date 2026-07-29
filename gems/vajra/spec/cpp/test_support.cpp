@@ -9,26 +9,22 @@
 #include "request/request_head_reader.hpp"
 #include "response/response_writer.hpp"
 
-#include <arpa/inet.h>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
-#include <netinet/in.h>
-#include <poll.h>
 #include <stdexcept>
-#include <sys/socket.h>
 #include <thread>
+#ifndef _WIN32
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 namespace
 {
   using namespace std::chrono_literals;
 
-#ifdef MSG_NOSIGNAL
-  constexpr int kSendFlags = MSG_NOSIGNAL;
-#else
-  constexpr int kSendFlags = 0;
-#endif
 }
 
 [[noreturn]] void VajraSpecCpp::fail(const std::string &message)
@@ -36,24 +32,31 @@ namespace
   throw std::runtime_error(message);
 }
 
-VajraSpecCpp::FileDescriptorGuard::FileDescriptorGuard(int fd) : fd_(fd) {}
+VajraSpecCpp::SocketGuard::SocketGuard(Vajra::platform::SocketHandle fd) : fd_(fd) {}
 
-VajraSpecCpp::FileDescriptorGuard::~FileDescriptorGuard()
+VajraSpecCpp::SocketGuard::~SocketGuard()
 {
   close_if_open();
 }
 
-int VajraSpecCpp::FileDescriptorGuard::get() const
+Vajra::platform::SocketHandle VajraSpecCpp::SocketGuard::get() const
 {
   return fd_;
 }
 
-void VajraSpecCpp::FileDescriptorGuard::close_if_open()
+Vajra::platform::SocketHandle VajraSpecCpp::SocketGuard::release()
 {
-  if (fd_ >= 0)
+  const auto fd = fd_;
+  fd_ = Vajra::platform::kInvalidSocket;
+  return fd;
+}
+
+void VajraSpecCpp::SocketGuard::close_if_open()
+{
+  if (Vajra::platform::socket_valid(fd_))
   {
-    close(fd_);
-    fd_ = -1;
+    Vajra::platform::close_socket(fd_);
+    fd_ = Vajra::platform::kInvalidSocket;
   }
 }
 
@@ -80,8 +83,9 @@ bool VajraSpecCpp::bind_conflict(const std::exception_ptr &error)
 
 int VajraSpecCpp::available_port()
 {
-  const int fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0)
+  Vajra::platform::ensure_socket_runtime();
+  const auto fd = Vajra::platform::create_tcp_socket(AF_INET, SOCK_STREAM, 0);
+  if (!Vajra::platform::socket_valid(fd))
   {
     fail("socket failed while allocating test port");
   }
@@ -91,47 +95,97 @@ int VajraSpecCpp::available_port()
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   addr.sin_port = htons(0);
 
-  if (bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0)
+  if (!Vajra::platform::bind_socket(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)))
   {
-    close(fd);
-    fail("bind failed while allocating test port");
+    Vajra::platform::close_socket(fd);
+    fail("bind failed while allocating test port: " + Vajra::platform::socket_error_message(Vajra::platform::socket_last_error()));
   }
 
   socklen_t len = sizeof(addr);
-  if (getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len) < 0)
+  if (!Vajra::platform::socket_name(fd, reinterpret_cast<sockaddr *>(&addr), &len))
   {
-    close(fd);
+    Vajra::platform::close_socket(fd);
     fail("getsockname failed while allocating test port");
   }
 
   const int port = ntohs(addr.sin_port);
-  close(fd);
+  Vajra::platform::close_socket(fd);
   return port;
 }
 
-int VajraSpecCpp::connect_to_listener(int port)
+Vajra::platform::SocketHandle VajraSpecCpp::connect_to_listener(int port)
 {
-  const int fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0)
+  const auto fd = Vajra::platform::create_tcp_socket(AF_INET, SOCK_STREAM, 0);
+  if (!Vajra::platform::socket_valid(fd))
   {
     fail("socket failed while connecting to test listener");
   }
 
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
-  addr.sin_port = htons(port);
+  addr.sin_port = htons(static_cast<std::uint16_t>(port));
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
-  if (connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0)
+  if (!Vajra::platform::connect_socket(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)))
   {
-    close(fd);
-    return -1;
+    Vajra::platform::close_socket(fd);
+    return Vajra::platform::kInvalidSocket;
   }
 
   return fd;
 }
 
-void VajraSpecCpp::suppress_sigpipe(int fd)
+std::array<Vajra::platform::SocketHandle, 2> VajraSpecCpp::connected_socket_pair()
+{
+  Vajra::platform::ensure_socket_runtime();
+#ifndef _WIN32
+  std::array<Vajra::platform::SocketHandle, 2> sockets{
+      Vajra::platform::kInvalidSocket,
+      Vajra::platform::kInvalidSocket};
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets.data()) != 0)
+  {
+    fail("socketpair failed while creating test socket pair");
+  }
+  return sockets;
+#else
+  SocketGuard listener(Vajra::platform::create_tcp_socket(AF_INET, SOCK_STREAM, 0));
+  if (!Vajra::platform::socket_valid(listener.get()))
+  {
+    fail("socket failed while creating loopback socket pair");
+  }
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = htons(0);
+  if (!Vajra::platform::bind_socket(
+          listener.get(), reinterpret_cast<sockaddr *>(&address), sizeof(address)) ||
+      !Vajra::platform::listen_socket(listener.get(), 1))
+  {
+    fail("listener setup failed while creating loopback socket pair");
+  }
+  socklen_t address_length = sizeof(address);
+  if (!Vajra::platform::socket_name(
+          listener.get(), reinterpret_cast<sockaddr *>(&address), &address_length))
+  {
+    fail("getsockname failed while creating loopback socket pair");
+  }
+  SocketGuard client(Vajra::platform::create_tcp_socket(AF_INET, SOCK_STREAM, 0));
+  if (!Vajra::platform::socket_valid(client.get()) ||
+      !Vajra::platform::connect_socket(
+          client.get(), reinterpret_cast<sockaddr *>(&address), address_length))
+  {
+    fail("connect failed while creating loopback socket pair");
+  }
+  const auto server = Vajra::platform::accept_socket(listener.get(), nullptr, nullptr);
+  if (!Vajra::platform::socket_valid(server))
+  {
+    fail("accept failed while creating loopback socket pair");
+  }
+  return {client.release(), server};
+#endif
+}
+
+void VajraSpecCpp::suppress_sigpipe(Vajra::platform::SocketHandle fd)
 {
 #ifdef SO_NOSIGPIPE
   int opt = 1;
@@ -144,12 +198,12 @@ void VajraSpecCpp::suppress_sigpipe(int fd)
 #endif
 }
 
-bool VajraSpecCpp::send_all(int fd, const std::string &payload)
+bool VajraSpecCpp::send_all(Vajra::platform::SocketHandle fd, const std::string &payload)
 {
   std::size_t total_sent = 0;
   while (total_sent < payload.size())
   {
-    const ssize_t bytes_sent = send(fd, payload.data() + total_sent, payload.size() - total_sent, kSendFlags);
+    const auto bytes_sent = Vajra::platform::send_socket(fd, payload.data() + total_sent, payload.size() - total_sent);
     if (bytes_sent < 0)
     {
       if (errno == EINTR)
@@ -176,7 +230,7 @@ bool VajraSpecCpp::send_all(int fd, const std::string &payload)
   return true;
 }
 
-bool VajraSpecCpp::complete_probe_request(int fd)
+bool VajraSpecCpp::complete_probe_request(Vajra::platform::SocketHandle fd)
 {
   const std::string request =
       "GET / HTTP/1.1\r\n"
@@ -190,18 +244,18 @@ bool VajraSpecCpp::complete_probe_request(int fd)
   }
 
   char buffer[4096];
-  const ssize_t bytes_read = recv(fd, buffer, sizeof(buffer), 0);
+  const auto bytes_read = Vajra::platform::receive_socket(fd, buffer, sizeof(buffer));
   return bytes_read > 0;
 }
 
-std::string VajraSpecCpp::read_all(int fd)
+std::string VajraSpecCpp::read_all(Vajra::platform::SocketHandle fd)
 {
   std::string response;
   char buffer[256];
 
   for (;;)
   {
-    const ssize_t bytes_read = recv(fd, buffer, sizeof(buffer), 0);
+    const auto bytes_read = Vajra::platform::receive_socket(fd, buffer, sizeof(buffer));
     if (bytes_read < 0)
     {
       if (errno == EINTR)
@@ -259,14 +313,14 @@ std::size_t VajraSpecCpp::parse_content_length(const std::string &response)
   return content_length;
 }
 
-std::string VajraSpecCpp::read_http_response(int fd)
+std::string VajraSpecCpp::read_http_response(Vajra::platform::SocketHandle fd)
 {
   std::string response;
   char buffer[256];
 
   while (response.find("\r\n\r\n") == std::string::npos)
   {
-    const ssize_t bytes_read = recv(fd, buffer, sizeof(buffer), 0);
+    const auto bytes_read = Vajra::platform::receive_socket(fd, buffer, sizeof(buffer));
     if (bytes_read < 0)
     {
       if (errno == EINTR)
@@ -290,7 +344,7 @@ std::string VajraSpecCpp::read_http_response(int fd)
 
   while (response.size() < total_size)
   {
-    const ssize_t bytes_read = recv(fd, buffer, sizeof(buffer), 0);
+    const auto bytes_read = Vajra::platform::receive_socket(fd, buffer, sizeof(buffer));
     if (bytes_read < 0)
     {
       if (errno == EINTR)
@@ -312,35 +366,17 @@ std::string VajraSpecCpp::read_http_response(int fd)
   return response.substr(0, total_size);
 }
 
-bool VajraSpecCpp::peer_closed_within(int fd, int timeout_ms)
+bool VajraSpecCpp::peer_closed_within(Vajra::platform::SocketHandle fd, int timeout_ms)
 {
-  pollfd descriptor{fd, POLLIN | POLLHUP | POLLERR, 0};
-
   while (true)
   {
-    const int poll_result = poll(&descriptor, 1, timeout_ms);
-    if (poll_result < 0)
-    {
-      if (errno == EINTR)
-      {
-        continue;
-      }
-
-      fail("poll failed while checking socket closure");
-    }
-
-    if (poll_result == 0)
+    if (!Vajra::platform::wait_socket(fd, Vajra::platform::WaitEvent::read, timeout_ms))
     {
       return false;
     }
 
-    if ((descriptor.revents & (POLLHUP | POLLERR)) != 0)
-    {
-      return true;
-    }
-
     char byte = '\0';
-    const ssize_t bytes_read = recv(fd, &byte, sizeof(byte), MSG_PEEK);
+    const auto bytes_read = Vajra::platform::peek_socket(fd, &byte, sizeof(byte));
     if (bytes_read < 0)
     {
       if (errno == EINTR)
@@ -351,6 +387,11 @@ bool VajraSpecCpp::peer_closed_within(int fd, int timeout_ms)
       if (errno == EAGAIN || errno == EWOULDBLOCK)
       {
         return false;
+      }
+
+      if (Vajra::platform::socket_error_disconnected(errno))
+      {
+        return true;
       }
 
       fail("recv(MSG_PEEK) failed while checking socket closure");
@@ -364,11 +405,11 @@ void VajraSpecCpp::wait_until_listening(int port)
 {
   for (int attempt = 0; attempt < 200; ++attempt)
   {
-    const int fd = connect_to_listener(port);
-    if (fd >= 0)
+    const auto fd = connect_to_listener(port);
+    if (Vajra::platform::socket_valid(fd))
     {
       const bool completed_request = complete_probe_request(fd);
-      close(fd);
+      Vajra::platform::close_socket(fd);
       if (completed_request)
       {
         return;
@@ -383,45 +424,41 @@ void VajraSpecCpp::wait_until_listening(int port)
 
 void VajraSpecCpp::assert_can_rebind(int port)
 {
-  const int fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0)
+  const auto fd = Vajra::platform::create_tcp_socket(AF_INET, SOCK_STREAM, 0);
+  if (!Vajra::platform::socket_valid(fd))
   {
     fail("socket failed while checking port rebind");
   }
 
   int opt = 1;
-  if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+  if (!Vajra::platform::set_socket_option(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)))
   {
-    close(fd);
+    Vajra::platform::close_socket(fd);
     fail("setsockopt failed while checking port rebind");
   }
 
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_addr.s_addr = htonl(INADDR_ANY);
-  addr.sin_port = htons(port);
+  addr.sin_port = htons(static_cast<std::uint16_t>(port));
 
-  if (bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0)
+  if (!Vajra::platform::bind_socket(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)))
   {
-    close(fd);
+    Vajra::platform::close_socket(fd);
     fail("listener port was not released after stop");
   }
 
-  close(fd);
+  Vajra::platform::close_socket(fd);
 }
 
 VajraSpecCpp::ReaderOutcome VajraSpecCpp::read_request_head_from_chunks(
     const std::vector<std::string> &chunks,
     std::size_t max_request_head_bytes)
 {
-  int sockets[2];
-  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-  {
-    fail("socketpair failed while setting up reader test");
-  }
+  const auto sockets = connected_socket_pair();
 
-  FileDescriptorGuard reader_socket(sockets[0]);
-  FileDescriptorGuard writer_socket(sockets[1]);
+  SocketGuard reader_socket(sockets[0]);
+  SocketGuard writer_socket(sockets[1]);
   suppress_sigpipe(writer_socket.get());
   Vajra::request::HeadReader reader(max_request_head_bytes);
   ReaderOutcome outcome{{false, false, "", ""}, nullptr};
@@ -558,19 +595,14 @@ void VajraSpecCpp::expect_reader_error(
     return;
   }
 
-  fail("reader raised the wrong exception type");
 }
 
 std::string VajraSpecCpp::send_response_through_socket(const Vajra::response::Response &response)
 {
-  int sockets[2];
-  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) < 0)
-  {
-    fail("socketpair failed while setting up response writer test");
-  }
+  const auto sockets = connected_socket_pair();
 
-  FileDescriptorGuard reader_socket(sockets[0]);
-  FileDescriptorGuard writer_socket(sockets[1]);
+  SocketGuard reader_socket(sockets[0]);
+  SocketGuard writer_socket(sockets[1]);
 
   {
     Vajra::response::ResponseWriter writer;

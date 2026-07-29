@@ -12,7 +12,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
-#include <sys/types.h>
+#ifdef _WIN32
+#include <string_view>
+#endif
 
 namespace Vajra
 {
@@ -22,7 +24,7 @@ namespace Vajra
 
     struct WorkerRuntimeState
     {
-      std::atomic<pid_t> pid{0};
+      std::atomic<platform::ProcessId> pid{platform::kInvalidProcessId};
       std::atomic<std::uint8_t> lifecycle_state{static_cast<std::uint8_t>(WorkerLifecycleState::booting)};
       std::atomic<std::uint8_t> health_state{static_cast<std::uint8_t>(WorkerHealthState::healthy)};
       std::atomic<std::uint8_t> recovery_state{static_cast<std::uint8_t>(WorkerRecoveryState::none)};
@@ -66,7 +68,7 @@ namespace Vajra
 
     struct RuntimeState
     {
-      std::atomic<pid_t> master_pid{0};
+      std::atomic<platform::ProcessId> master_pid{platform::kInvalidProcessId};
       std::atomic<int> listener_fd{-1};
       std::atomic<std::uint32_t> worker_count{0};
       std::atomic<std::uint32_t> threads_per_worker{0};
@@ -76,6 +78,11 @@ namespace Vajra
     };
 
     RuntimeState *allocate_runtime_state();
+#ifdef _WIN32
+    RuntimeState *allocate_named_runtime_state(const std::wstring &mapping_name);
+    RuntimeState *attach_runtime_state(HANDLE mapping_handle);
+    HANDLE runtime_state_mapping_handle(RuntimeState *state);
+#endif
     void release_runtime_state(RuntimeState *state);
 
     void install_master_runtime_state(
@@ -83,7 +90,7 @@ namespace Vajra
         std::size_t worker_count,
         std::size_t threads_per_worker,
         std::size_t socket_queue_capacity);
-    void install_worker_runtime_state(RuntimeState *state, std::size_t worker_index, pid_t pid);
+    void install_worker_runtime_state(RuntimeState *state, std::size_t worker_index, platform::ProcessId pid);
     void attach_current_thread_to_worker_runtime_state(std::size_t worker_index);
     void detach_worker_runtime_state();
 
@@ -94,6 +101,7 @@ namespace Vajra
     void set_runtime_listener_fd(int listener_fd);
     int runtime_listener_fd();
     void mark_runtime_shutdown_requested();
+    bool runtime_shutdown_requested();
 
     void mark_worker_lifecycle(std::size_t worker_index, WorkerLifecycleState lifecycle_state);
     void mark_worker_recovery(std::size_t worker_index, WorkerRecoveryState recovery_state);

@@ -40,9 +40,22 @@ module Vajra
           APP_STATE.app = nil
           APP_STATE.max_threads = 1
         end
+        # This file is loaded before the native extension so ABI/load failures
+        # can still produce a useful diagnostic. Its at-exit cleanup must also
+        # be safe in that partially initialized state.
+        return unless native_extension_loaded?
+
         __native_set_app__(nil)
         __native_set_callback__(nil)
       end
+
+      def native_extension_loaded?
+        method(:__native_set_app__)
+        true
+      rescue NameError
+        false
+      end
+      private_class_method :native_extension_loaded?
 
       def configure_threads!(max_threads)
         APP_MUTEX.synchronize { APP_STATE.max_threads = max_threads }

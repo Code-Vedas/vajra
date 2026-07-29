@@ -7,23 +7,17 @@ description: Vajra product overview and documentation entrypoint.
 
 # Vajra
 
-Vajra is a native Ruby application server for Rack and Rails applications. It is
-distributed as a Ruby gem with a C++ runtime that owns the listener, request
-parsing, response writing, worker lifecycle, and shutdown behavior.
+Vajra is a native Ruby application server for Rack and Rails applications. It is distributed as a Ruby gem with a C++ runtime that owns the listener, request parsing, response writing, worker lifecycle, and shutdown behavior.
 
-Use Vajra when an application needs Rack compatibility with native listener,
-protocol, and worker lifecycle management.
+Use Vajra when an application needs Rack compatibility with native listener, protocol, and worker lifecycle management.
 
 ## Protocol Support
 
-Vajra supports HTTP/1.0, HTTP/1.1, TLS HTTP/1.1, TLS HTTP/2, and cleartext h2c.
-HTTP/2 includes prior-knowledge h2c, HTTP/1.1 `Upgrade: h2c`, Extended CONNECT
-stream tunnels, and WebSocket-over-HTTP/2 as raw WebSocket frame transport.
+Vajra supports HTTP/1.0, HTTP/1.1, TLS HTTP/1.1, TLS HTTP/2, and cleartext h2c. HTTP/2 includes prior-knowledge h2c, HTTP/1.1 `Upgrade: h2c`, Extended CONNECT stream tunnels, and WebSocket-over-HTTP/2 as raw WebSocket frame transport.
 
 ## Framework Support
 
-Vajra uses the standard Rack contract, so the same runtime can serve common Ruby
-web frameworks.
+Vajra uses the standard Rack contract, so the same runtime can serve common Ruby web frameworks.
 
 | Framework | How Vajra Fits                                                                                                 |
 | --------- | -------------------------------------------------------------------------------------------------------------- |
@@ -40,18 +34,9 @@ web frameworks.
 3. [Command Reference](/command-reference/)
 4. [Frameworks](/frameworks/)
 5. [Architecture](/architecture/)
-6. [Observability](/observability/)
-7. [Rack Compatibility](/rack-compatibility/)
-8. [API Reference](/api-reference/)
-9. [Production Deployment](/production/)
-10. [Security](/security/)
-11. [Performance](/performance/)
-12. [Migration](/migration/)
-13. [Upgrading](/upgrading/)
-14. [Compatibility](/compatibility/)
-15. [Troubleshooting](/troubleshooting/)
-16. [Development](/development/)
-17. [Glossary](/glossary/)
+6. [Guides](/guides/)
+7. [API Reference](/api-reference/)
+8. [Professional Support](/support/)
 
 ## Quick Start
 
@@ -73,5 +58,4 @@ For Rails apps, keep the normal Rails command:
 bin/rails server
 ```
 
-Add `config/vajra.rb` when the app needs server-specific settings such as host,
-port, worker count, thread count, access logs, or request limits.
+Add `config/vajra.rb` when the app needs server-specific settings such as host, port, worker count, thread count, access logs, or request limits.

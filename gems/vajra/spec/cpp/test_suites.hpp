@@ -10,6 +10,7 @@ namespace VajraSpecCpp
 {
   void run_lifecycle_controller_tests();
   void run_rack_env_tests();
+  void run_platform_socket_tests();
   void run_server_lifecycle_tests();
   void run_request_head_tests();
   void run_response_tests();

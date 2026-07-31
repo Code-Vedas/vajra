@@ -45,7 +45,7 @@ jobs:
           bundler-cache: true
           working-directory: gems/vajra
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
+        uses: github/codeql-action/init@v4.37.3
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
@@ -56,6 +56,6 @@ jobs:
           bundle exec rake compile
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4
+        uses: github/codeql-action/analyze@v4.37.3
         with:
           category: "/language:${{matrix.language}}"

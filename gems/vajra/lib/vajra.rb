@@ -176,6 +176,8 @@ module Vajra
       http2_initial_window_size
       http2_max_frame_size
       http2_header_table_size
+      http2_max_pending_executions
+      http2_max_connection_buffer_bytes
       log_level
       access_log
       error_log
@@ -217,6 +219,8 @@ module Vajra
       http2_initial_window_size
       http2_max_frame_size
       http2_header_table_size
+      http2_max_pending_executions
+      http2_max_connection_buffer_bytes
       log_level
       access_log
       error_log
@@ -391,7 +395,9 @@ module Vajra
         http2_max_concurrent_streams: [1, 1_000_000],
         http2_initial_window_size: [0, 2_147_483_647],
         http2_max_frame_size: [16_384, 16_777_215],
-        http2_header_table_size: [0, native_int_max]
+        http2_header_table_size: [0, native_int_max],
+        http2_max_pending_executions: [1, native_int_max],
+        http2_max_connection_buffer_bytes: [1, native_int_max]
       }.each do |key, (minimum, maximum)|
         next unless options.key?(key)
 
@@ -426,9 +432,22 @@ module Vajra
 
       validate_tls_credentials!(options) if tls_enabled
       validate_tls_peer_ca!(options)
+      validate_http2_connection_buffer!(options) if http2_enabled
       return unless alpn_protocols.include?('h2') && !http2_enabled
 
       raise_start_validation_error('alpn_protocols cannot include h2 unless http2 is enabled')
+    end
+
+    def validate_http2_connection_buffer!(options)
+      return unless options.key?(:http2_max_connection_buffer_bytes)
+
+      frame_size = options.fetch(:http2_max_frame_size, 1_048_576)
+      minimum = frame_size + 33
+      return if options[:http2_max_connection_buffer_bytes] >= minimum
+
+      raise_start_validation_error(
+        'http2_max_connection_buffer_bytes must hold one HTTP/2 frame plus preface/header overhead'
+      )
     end
 
     def validate_tls_credentials!(options)

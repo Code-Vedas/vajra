@@ -49,6 +49,21 @@ RSpec.describe 'Vajra e2e HTTP helpers', :e2e, :integration do
     expect(trailing_bytes).to eq('')
   end
 
+  it 'decodes a complete raw chunked response when parsing retained wire bytes' do
+    raw_response =
+      "HTTP/1.1 200 OK\r\n" \
+      "Transfer-Encoding: chunked\r\n" \
+      "\r\n" \
+      "3\r\none\r\n" \
+      "3\r\ntwo\r\n" \
+      "0\r\n\r\n"
+
+    response = helper_host.parse_http_response(raw_response)
+
+    expect(response[:headers]).to include('transfer-encoding' => 'chunked')
+    expect(response[:body]).to eq('onetwo')
+  end
+
   it 'preserves binary response bytes and trailing bytes' do
     socket = instance_double(TCPSocket)
     binary_body = "\x80\xFF".b

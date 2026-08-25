@@ -11,6 +11,7 @@
 #include "response/response.hpp"
 #include "ruby.h"
 
+#include <functional>
 #include <string>
 #include <memory>
 #include <vector>
@@ -82,6 +83,15 @@ namespace Vajra
     public:
       static Vajra::response::Response response_from_normalized_result(VALUE value);
       static Vajra::response::Response response_from_rack_result(VALUE value);
+      static Vajra::response::Response response_from_rack_result_head(
+          VALUE value,
+          VALUE *body,
+          std::shared_ptr<Vajra::response::ConnectionBufferBudget> connection_buffer_budget = nullptr);
+      static void stream_rack_body(
+          VALUE body,
+          const std::shared_ptr<Vajra::response::ResponseBodyStream> &body_stream,
+          std::function<void()> response_ready_callback = nullptr,
+          bool publish_response_before_each = true);
     };
   }
 }

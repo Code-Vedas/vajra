@@ -22,6 +22,11 @@ constexpr VALUE Qnil = 0;
 
 namespace Vajra
 {
+  namespace response
+  {
+    class ConnectionBufferBudget;
+  }
+
   namespace rack
   {
     struct NativeInputState;
@@ -43,6 +48,12 @@ namespace Vajra
     void native_input_append(NativeInputState *state, const char *data, std::size_t length);
     void native_input_append(NativeInputState *state, const std::string &chunk);
     bool native_input_try_append(NativeInputState *state, const char *data, std::size_t length);
+    // Transfers a lease already reserved by the HTTP/2 session (for example a
+    // paused DATA chunk) into this input's resident-memory ownership.
+    bool native_input_try_append_reserved(NativeInputState *state, const char *data, std::size_t length);
+    bool native_input_set_connection_buffer_budget(
+        NativeInputState *state,
+        std::shared_ptr<Vajra::response::ConnectionBufferBudget> connection_buffer_budget);
     void native_input_finish(NativeInputState *state);
     void native_input_fail(NativeInputState *state, const std::string &message);
     void native_input_close(NativeInputState *state);

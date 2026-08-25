@@ -19,6 +19,15 @@ RSpec.describe 'Vajra framework compatibility', :e2e, :integration do
       'payload'
   end
 
+  def expect_chunked_framework_json_response(response)
+    expect(response[:headers]).to include(
+      'content-type' => a_string_including('application/json'),
+      'transfer-encoding' => 'chunked',
+      'connection' => 'close'
+    )
+    expect(response[:headers]).not_to have_key('content-length')
+  end
+
   def rails_server_files
     {
       'bin/rails' => <<~RUBY,
@@ -189,11 +198,7 @@ RSpec.describe 'Vajra framework compatibility', :e2e, :integration do
 
     expect(result[:exitstatus]).to eq(0), result[:output]
     expect(response[:status_line]).to eq('HTTP/1.1 200 OK')
-    expect(response[:headers]).to include(
-      'content-type' => a_string_including('application/json'),
-      'content-length' => response[:body].bytesize.to_s,
-      'connection' => 'close'
-    )
+    expect_chunked_framework_json_response(response)
     expect(payload).to include(
       'framework' => 'rails',
       'request_method' => 'POST',
@@ -304,7 +309,6 @@ RSpec.describe 'Vajra framework compatibility', :e2e, :integration do
       Vajra::Rails.install!(FrameworkCompatibilityRailsApp)
       Vajra.start
     RUBY
-
     result = rack_app_request_result(
       script:,
       request:
@@ -322,11 +326,7 @@ RSpec.describe 'Vajra framework compatibility', :e2e, :integration do
 
     expect(result[:exitstatus]).to eq(0), result[:output]
     expect(response[:status_line]).to eq('HTTP/1.1 200 OK')
-    expect(response[:headers]).to include(
-      'content-type' => a_string_including('application/json'),
-      'content-length' => response[:body].bytesize.to_s,
-      'connection' => 'close'
-    )
+    expect_chunked_framework_json_response(response)
     expect(payload).to include(
       'framework' => 'rails',
       'request_method' => 'POST',

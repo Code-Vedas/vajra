@@ -7,9 +7,19 @@
 #include "http_header_utils.hpp"
 
 #include <array>
+#include <cstdio>
 
 std::string Vajra::response::ResponseSerializer::serialize(const Response &response) const
 {
+  // A live Rack source deliberately has no completion point here.  Reading it
+  // into this convenience return value would either rematerialize the body or
+  // block before the caller can write the response head.  HTTP/1 callers must
+  // use ResponseWriter, and HTTP/2 uses its DATA provider directly.
+  if (response_has_body_stream(response))
+  {
+    throw SerializationError("live response body streams must be sent through ResponseWriter");
+  }
+
   std::string serialized = serialize_head(response);
   if (status_forbids_message_body(response.status.code))
   {
@@ -89,7 +99,11 @@ std::string Vajra::response::ResponseSerializer::serialize_head(const Response &
     serialized.append("\r\n");
   }
 
-  if (!no_message_body)
+  if (!no_message_body && response_has_body_stream(response) && !response_body_stream_has_known_length(response))
+  {
+    serialized += "Transfer-Encoding: chunked\r\n";
+  }
+  else if (!no_message_body)
   {
     serialized.append("Content-Length: ");
     serialized.append(std::to_string(response_body_size(response)));

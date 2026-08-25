@@ -7,6 +7,7 @@
 source "https://rubygems.org"
 
 gem "minima", "~> 2.5"
+gem "json", ">= 2.21.2"
 group :jekyll_plugins do
   gem "just-the-docs", git: "https://github.com/niteshpurohit/just-the-docs.git", ref: "933dc227584741c30a343cec25a1f315a3153988"
   gem "github-pages", "~> 232"

@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <fstream>
@@ -500,6 +501,72 @@ namespace VajraSpecCpp
       std::mutex &mutex_;
       std::condition_variable &condition_;
       bool &release_;
+    };
+
+    class CompletedLiveBodyAsyncExecutor final : public Vajra::request::RequestExecutor
+    {
+    public:
+      bool async_execution_supported() const override
+      {
+        return true;
+      }
+
+      bool async_completion_supported() const override
+      {
+        return true;
+      }
+
+      bool execute_async(
+          Vajra::request::RequestContext &&,
+          CompletionCallback callback) const override
+      {
+        auto body_stream = std::make_shared<Vajra::response::ResponseBodyStream>();
+        const char payload[] = "x";
+        if (!body_stream->push(payload, 1))
+        {
+          return false;
+        }
+        body_stream->finish();
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          body_streams_.push_back(body_stream);
+        }
+        condition_.notify_all();
+
+        Vajra::response::Response response{
+            Vajra::response::Status{200, "OK"},
+            {Vajra::response::Header{"Content-Type", "text/plain"}},
+            "",
+            Vajra::response::ConnectionBehavior::close};
+        response.body_stream = std::move(body_stream);
+        callback(std::move(response), "", 0);
+        return true;
+      }
+
+      bool wait_for_streams(std::size_t expected, std::chrono::milliseconds timeout) const
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return condition_.wait_for(lock, timeout, [this, expected]()
+                                   { return body_streams_.size() == expected; });
+      }
+
+      void mark_producers_finished() const
+      {
+        std::vector<std::shared_ptr<Vajra::response::ResponseBodyStream>> streams;
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          streams = body_streams_;
+        }
+        for (const auto &body_stream : streams)
+        {
+          body_stream->mark_producer_finished();
+        }
+      }
+
+    private:
+      mutable std::mutex mutex_;
+      mutable std::condition_variable condition_;
+      mutable std::vector<std::shared_ptr<Vajra::response::ResponseBodyStream>> body_streams_;
     };
 
     class BufferedConnection final : public Vajra::transport::Connection
@@ -1016,6 +1083,240 @@ namespace VajraSpecCpp
       {
         fail("file-backed response writer did not stream exact response bytes");
       }
+    }
+
+    void test_response_body_stream_bounds_a_slow_producer_and_cancellation_wakes_it()
+    {
+      constexpr std::size_t capacity = 64;
+      auto body_stream = std::make_shared<Vajra::response::ResponseBodyStream>(capacity);
+      std::atomic<bool> producer_finished{false};
+      std::atomic<bool> producer_accepted{true};
+      std::mutex producer_mutex;
+      std::condition_variable producer_condition;
+
+      std::thread producer([&]()
+                           {
+        const std::string payload(capacity * 8, 'x');
+        producer_accepted.store(
+            body_stream->push(payload.data(), payload.size()),
+            std::memory_order_release);
+        producer_finished.store(true, std::memory_order_release);
+        producer_condition.notify_all();
+      });
+
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+      while (body_stream->buffered_bytes() < capacity && std::chrono::steady_clock::now() < deadline)
+      {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      if (body_stream->buffered_bytes() != capacity)
+      {
+        body_stream->cancel();
+        producer.join();
+        fail("response body stream did not stop at its configured bounded capacity");
+      }
+      if (producer_finished.load(std::memory_order_acquire))
+      {
+        producer.join();
+        fail("response body producer completed despite an undrained bounded queue");
+      }
+
+      std::array<char, 16> buffer{};
+      const Vajra::response::ResponseBodyStream::ReadResult first_read =
+          body_stream->read(buffer.data(), buffer.size(), false);
+      if (first_read.status != Vajra::response::ResponseBodyStream::ReadStatus::data ||
+          first_read.size != buffer.size() ||
+          body_stream->buffered_bytes() > capacity)
+      {
+        body_stream->cancel();
+        producer.join();
+        fail("response body stream did not safely resume a bounded producer after consumer progress");
+      }
+
+      body_stream->cancel();
+      {
+        std::unique_lock<std::mutex> lock(producer_mutex);
+        if (!producer_condition.wait_for(lock, std::chrono::seconds(1), [&producer_finished]()
+                                         { return producer_finished.load(std::memory_order_acquire); }))
+        {
+          body_stream->cancel();
+          producer.join();
+          fail("response body stream cancellation did not wake its blocked producer");
+        }
+      }
+      producer.join();
+      if (producer_accepted.load(std::memory_order_acquire) || !body_stream->cancelled())
+      {
+        fail("response body stream did not report cancellation to its producer");
+      }
+    }
+
+    void test_response_body_stream_connection_budget_bounds_and_releases()
+    {
+      auto budget = std::make_shared<Vajra::response::ConnectionBufferBudget>(4);
+      auto first = std::make_shared<Vajra::response::ResponseBodyStream>(64, std::nullopt, budget);
+      auto second = std::make_shared<Vajra::response::ResponseBodyStream>(64, std::nullopt, budget);
+
+      if (!first->push("abcd", 4) || budget->used_bytes() != 4)
+      {
+        fail("response body stream did not acquire its exact shared connection lease");
+      }
+
+      const auto pending = second->push_for("e", 1, std::chrono::milliseconds(1));
+      if (pending.status != Vajra::response::ResponseBodyStream::PushStatus::pending ||
+          pending.size != 0 || budget->used_bytes() != 4)
+      {
+        fail("a full shared response budget admitted or leaked a second producer chunk");
+      }
+
+      std::array<char, 4> buffer{};
+      const auto read = first->read(buffer.data(), buffer.size(), false);
+      if (read.status != Vajra::response::ResponseBodyStream::ReadStatus::data ||
+          read.size != buffer.size() || std::string(buffer.data(), buffer.size()) != "abcd" ||
+          budget->used_bytes() != 0)
+      {
+        fail("response body consumption did not release the shared connection lease");
+      }
+
+      const auto accepted = second->push_for("e", 1, std::chrono::milliseconds(1));
+      if (accepted.status != Vajra::response::ResponseBodyStream::PushStatus::accepted ||
+          accepted.size != 1 || budget->used_bytes() != 1)
+      {
+        fail("response body producer did not resume after shared connection capacity returned");
+      }
+
+      second->cancel();
+      first.reset();
+      second.reset();
+      const auto snapshot = budget->snapshot();
+      if (snapshot.used_bytes != 0 || snapshot.release_underflows != 0)
+      {
+        fail("response body cancellation/destruction did not release exactly its shared lease");
+      }
+    }
+
+    void test_response_body_stream_enforces_a_trusted_known_length()
+    {
+      auto matching_stream = std::make_shared<Vajra::response::ResponseBodyStream>(64, 3);
+      if (!matching_stream->push("abc", 3))
+      {
+        fail("known-length response body stream rejected matching bytes");
+      }
+      matching_stream->finish();
+      if (matching_stream->failed() || !matching_stream->terminal() ||
+          matching_stream->known_length() != std::optional<std::size_t>{3})
+      {
+        fail("known-length response body stream did not finish after matching bytes");
+      }
+
+      auto overflow_stream = std::make_shared<Vajra::response::ResponseBodyStream>(64, 3);
+      if (!overflow_stream->push("abc", 3) || overflow_stream->push("d", 1) ||
+          !overflow_stream->failed() ||
+          overflow_stream->error_message().find("exceeded") == std::string::npos)
+      {
+        fail("known-length response body stream did not reject an overflow");
+      }
+
+      auto underflow_stream = std::make_shared<Vajra::response::ResponseBodyStream>(64, 3);
+      if (!underflow_stream->push("ab", 2))
+      {
+        fail("known-length response body stream rejected an initial underflow payload");
+      }
+      underflow_stream->finish();
+      if (!underflow_stream->failed() ||
+          underflow_stream->error_message().find("did not match") == std::string::npos)
+      {
+        fail("known-length response body stream did not reject an underflow");
+      }
+    }
+
+    void test_response_serializer_rejects_live_body_stream()
+    {
+      Vajra::response::Response response{
+          Vajra::response::Status{200, "OK"},
+          {Vajra::response::Header{"Content-Type", "text/plain"}},
+          "",
+          Vajra::response::ConnectionBehavior::close};
+      response.body_stream = std::make_shared<Vajra::response::ResponseBodyStream>();
+      expect_serialization_error(
+          response,
+          "live response body streams must be sent through ResponseWriter");
+    }
+
+    void test_response_writer_cancels_stream_when_head_write_fails()
+    {
+      class HeadFailingConnection final : public Vajra::transport::Connection
+      {
+      public:
+        Vajra::platform::SocketHandle fd() const override
+        {
+          return Vajra::platform::kInvalidSocket;
+        }
+
+        bool wait_readable(int) override
+        {
+          return false;
+        }
+
+        Vajra::platform::SignedSize read(char *, std::size_t) override
+        {
+          return 0;
+        }
+
+        Vajra::platform::SignedSize write(const char *, std::size_t) override
+        {
+          return 0;
+        }
+
+        std::string protocol() const override
+        {
+          return "http";
+        }
+
+        bool tls() const override
+        {
+          return false;
+        }
+      };
+
+      auto body_stream = std::make_shared<Vajra::response::ResponseBodyStream>();
+      std::atomic<bool> producer_finished{false};
+      std::mutex producer_mutex;
+      std::condition_variable producer_condition;
+      std::thread producer([&]()
+                           {
+        const std::string payload(256 * 1024, 'x');
+        (void)body_stream->push(payload.data(), payload.size());
+        producer_finished.store(true, std::memory_order_release);
+        producer_condition.notify_all();
+      });
+
+      Vajra::response::Response response{
+          Vajra::response::Status{200, "OK"},
+          {Vajra::response::Header{"Content-Type", "text/plain"}},
+          "",
+          Vajra::response::ConnectionBehavior::close};
+      response.body_stream = body_stream;
+      HeadFailingConnection connection;
+      const Vajra::response::ResponseWriter writer;
+      if (writer.send(connection, response) || !body_stream->cancelled())
+      {
+        body_stream->cancel();
+        producer.join();
+        fail("response writer did not cancel a body stream after head write failure");
+      }
+
+      {
+        std::unique_lock<std::mutex> lock(producer_mutex);
+        if (!producer_condition.wait_for(lock, std::chrono::seconds(1), [&producer_finished]()
+                                         { return producer_finished.load(std::memory_order_acquire); }))
+        {
+          body_stream->cancel();
+          producer.join();
+          fail("head write failure left the Rack body producer blocked");
+        }
+      }
+      producer.join();
     }
 
     void test_response_serializer_allows_empty_reason_phrase()
@@ -3035,6 +3336,206 @@ namespace VajraSpecCpp
       }
     }
 
+    void test_http2_runtime_config_builder_preserves_pending_limit_after_buffer_budget()
+    {
+      const Vajra::request::Http2Config config = Vajra::request::Http2Config::from_runtime_options(
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19);
+      if (config.max_concurrent_streams != 11 ||
+          config.initial_window_size != 12 ||
+          config.max_frame_size != 13 ||
+          config.header_table_size != 14 ||
+          config.max_request_head_bytes != 15 ||
+          config.max_request_body_bytes != 16 ||
+          config.max_keepalive_requests != 17 ||
+          config.max_pending_executions != 18 ||
+          config.max_connection_buffer_bytes != 19)
+      {
+        fail("HTTP/2 runtime config builder miswired a named worker limit");
+      }
+    }
+
+    void test_http2_default_pending_limit_prunes_completed_response_producers()
+    {
+      constexpr std::size_t response_count = 16;
+      std::string request = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+      append_h2_frame(request, 4, 0, 0, "");
+      for (std::size_t index = 0; index < response_count; ++index)
+      {
+        const std::int32_t stream_id = static_cast<std::int32_t>(1 + (index * 2));
+        append_h2_frame(request, 1, 0x5, stream_id, h2_request_header_block("GET", "/", "localhost"));
+      }
+
+      BufferedConnection connection(std::move(request));
+      const auto request_executor = std::make_shared<CompletedLiveBodyAsyncExecutor>();
+      const auto execution_pool = std::make_shared<Vajra::request::Http2ExecutionPool>(1);
+      Vajra::request::Http2Config config;
+      // The default zero means unbounded admission, but it must still prune
+      // producer references as each Rack close path completes.
+      if (config.max_pending_executions != 0)
+      {
+        fail("HTTP/2 default pending-execution configuration changed unexpectedly");
+      }
+      Vajra::request::Http2Session session(
+          connection,
+          Vajra::request::SocketContext{"127.0.0.1", 12'345, "127.0.0.1", 3000, "https"},
+          config,
+          request_executor,
+          execution_pool);
+
+      std::thread session_thread([&session]()
+                                 { session.run(); });
+      if (!request_executor->wait_for_streams(response_count, std::chrono::seconds(2)))
+      {
+        request_executor->mark_producers_finished();
+        session_thread.join();
+        fail("HTTP/2 default admission test did not create every streamed response");
+      }
+      request_executor->mark_producers_finished();
+      session_thread.join();
+
+      for (std::size_t index = 0; index < response_count; ++index)
+      {
+        const std::int32_t stream_id = static_cast<std::int32_t>(1 + (index * 2));
+        if (h2_response_body_from(connection.output(), stream_id) != "x")
+        {
+          fail("HTTP/2 default admission test did not send a completed streamed response");
+        }
+      }
+      if (session.active_response_producer_count_for_testing() != 0)
+      {
+        fail("HTTP/2 default admission retained completed response producers");
+      }
+    }
+
+    void test_http2_preserves_known_empty_stream_content_length()
+    {
+      class KnownEmptyStreamExecutor final : public Vajra::request::RequestExecutor
+      {
+      public:
+        std::optional<Vajra::response::Response> execute(const Vajra::request::RequestContext &) const override
+        {
+          Vajra::response::Response response{
+              Vajra::response::Status{200, "OK"},
+              {Vajra::response::Header{"Content-Type", "text/plain"}},
+              "",
+              Vajra::response::ConnectionBehavior::close};
+          response.body_stream = std::make_shared<Vajra::response::ResponseBodyStream>(
+              Vajra::response::ResponseBodyStream::kDefaultCapacityBytes,
+              0);
+          response.body_stream->finish();
+          response.body_stream->mark_producer_finished();
+          return response;
+        }
+      };
+
+      BufferedConnection connection(h2_get_request_bytes());
+      const auto request_executor = std::make_shared<KnownEmptyStreamExecutor>();
+      const auto execution_pool = std::make_shared<Vajra::request::Http2ExecutionPool>(1);
+      Vajra::request::Http2Session session(
+          connection,
+          Vajra::request::SocketContext{"127.0.0.1", 12'345, "127.0.0.1", 3000, "https"},
+          Vajra::request::Http2Config{},
+          request_executor,
+          execution_pool);
+      session.run();
+
+      const std::vector<std::pair<std::string, std::string>> headers =
+          h2_response_headers_from(connection.output(), 1);
+      if (!h2_headers_contain(headers, "content-length", "0") ||
+          !h2_response_body_from(connection.output(), 1).empty())
+      {
+        fail("HTTP/2 known empty response stream did not preserve content-length zero");
+      }
+    }
+
+    void test_http2_streams_known_length_body_larger_than_connection_budget_in_bounded_chunks()
+    {
+      class KnownLengthLiveBodyAsyncExecutor final : public Vajra::request::RequestExecutor
+      {
+      public:
+        bool async_execution_supported() const override
+        {
+          return true;
+        }
+
+        bool async_completion_supported() const override
+        {
+          return true;
+        }
+
+        bool execute_async(
+            Vajra::request::RequestContext &&,
+            CompletionCallback callback) const override
+        {
+          constexpr std::size_t kChunkBytes = 8 * 1024;
+          // Stay below HTTP/2's peer-default 65,535 byte send window. This
+          // regression isolates local producer/budget backpressure; a
+          // separate window-update test covers deferred DATA resumption.
+          constexpr std::size_t kBodyBytes = 48 * 1024;
+          auto body_stream = std::make_shared<Vajra::response::ResponseBodyStream>(kChunkBytes, kBodyBytes);
+          Vajra::response::Response response{
+              Vajra::response::Status{200, "OK"},
+              {Vajra::response::Header{"Content-Type", "text/plain"}},
+              "",
+              Vajra::response::ConnectionBehavior::close};
+          response.body_stream = body_stream;
+          callback(std::move(response), "", 0);
+
+          // Rack owns a worker while the session loop writes the body. Keep
+          // this producer off the direct-completion caller so a full queue
+          // exercises consumer wakeups rather than blocking the H2 loop.
+          std::thread(
+              [body_stream]()
+              {
+                const std::string chunk(kChunkBytes, 'k');
+                for (std::size_t written = 0; written < kBodyBytes; written += chunk.size())
+                {
+                  if (!body_stream->push(chunk.data(), chunk.size()))
+                  {
+                    body_stream->mark_producer_finished();
+                    return;
+                  }
+                }
+                body_stream->finish();
+                body_stream->mark_producer_finished();
+              })
+              .detach();
+          return true;
+        }
+      };
+
+      BufferedConnection connection(h2_get_request_bytes());
+      const auto request_executor = std::make_shared<KnownLengthLiveBodyAsyncExecutor>();
+      const auto execution_pool = std::make_shared<Vajra::request::Http2ExecutionPool>(1);
+      Vajra::request::Http2Config config;
+      config.max_connection_buffer_bytes = 16 * 1024;
+      Vajra::request::Http2Session session(
+          connection,
+          Vajra::request::SocketContext{"127.0.0.1", 12'345, "127.0.0.1", 3000, "https"},
+          config,
+          request_executor,
+          execution_pool);
+      session.run();
+
+      const std::vector<std::pair<std::string, std::string>> headers =
+          h2_response_headers_from(connection.output(), 1);
+      const std::string body = h2_response_body_from(connection.output(), 1);
+      if (!h2_headers_contain(headers, "content-length", "49152") ||
+          body.size() != 48 * 1024 ||
+          body.find_first_not_of('k') != std::string::npos)
+      {
+        fail("HTTP/2 rejected or truncated a known-length live body larger than its bounded queue budget");
+      }
+    }
+
     void test_http2_prior_knowledge_initial_bytes_serves_request()
     {
       BufferedConnection connection("");
@@ -3069,9 +3570,7 @@ namespace VajraSpecCpp
                   {Vajra::request::ParsedHeader{"Host", "localhost"}}},
               Vajra::request::SocketContext{"127.0.0.1", 12'345, "127.0.0.1", 3000, "http"},
               Vajra::platform::kInvalidSocket,
-              "",
-              nullptr,
-              nullptr},
+              ""},
           {},
           trailing_bytes};
       Vajra::request::Http2Session session(
@@ -3282,6 +3781,86 @@ namespace VajraSpecCpp
       }
     }
 
+    void test_http2_canonicalizes_mixed_response_body_representations()
+    {
+      class MixedBodyResponseRequestExecutor final : public Vajra::request::RequestExecutor
+      {
+      public:
+        std::optional<Vajra::response::Response> execute(const Vajra::request::RequestContext &) const override
+        {
+          Vajra::response::Response response{
+              Vajra::response::Status{200, "OK"},
+              {Vajra::response::Header{"Content-Type", "text/plain"}},
+              std::vector<std::string>{"chosen"},
+              Vajra::response::ConnectionBehavior::close};
+          // A custom executor can construct this legacy shape even though it
+          // has no coherent wire meaning. HTTP/2 follows its historical
+          // chunks-before-file precedence, destroys the inactive file before
+          // queueing, and must derive framing from the selected body only.
+          response.body_file = response_body_file_from("ignored");
+          return response;
+        }
+      };
+
+      BufferedConnection connection(h2_request_bytes(
+          h2_request_header_block("GET", "/", "localhost")));
+      const auto request_executor = std::make_shared<MixedBodyResponseRequestExecutor>();
+      const auto execution_pool = std::make_shared<Vajra::request::Http2ExecutionPool>(1);
+      Vajra::request::Http2Session session(
+          connection,
+          Vajra::request::SocketContext{"127.0.0.1", 12'345, "127.0.0.1", 3000, "https"},
+          Vajra::request::Http2Config{},
+          request_executor,
+          execution_pool);
+      session.run();
+
+      const std::vector<std::pair<std::string, std::string>> headers =
+          h2_response_headers_from(connection.output(), 1);
+      if (!h2_headers_contain(headers, "content-length", "6") ||
+          h2_response_body_from(connection.output(), 1) != "chosen")
+      {
+        fail("HTTP/2 mixed response body representations were not canonicalized before framing");
+      }
+    }
+
+    void test_http2_rejects_oversized_materialized_response_against_connection_budget()
+    {
+      class OversizedLegacyResponseRequestExecutor final : public Vajra::request::RequestExecutor
+      {
+      public:
+        std::optional<Vajra::response::Response> execute(const Vajra::request::RequestContext &) const override
+        {
+          return Vajra::response::Response{
+              Vajra::response::Status{200, "OK"},
+              {Vajra::response::Header{"Content-Type", "text/plain"}},
+              std::vector<std::string>{std::string(32 * 1024, 'x')},
+              Vajra::response::ConnectionBehavior::close};
+        }
+      };
+
+      BufferedConnection connection(h2_request_bytes(
+          h2_request_header_block("GET", "/", "localhost")));
+      const auto request_executor = std::make_shared<OversizedLegacyResponseRequestExecutor>();
+      const auto execution_pool = std::make_shared<Vajra::request::Http2ExecutionPool>(1);
+      Vajra::request::Http2Config config;
+      config.max_connection_buffer_bytes = 16 * 1024;
+      Vajra::request::Http2Session session(
+          connection,
+          Vajra::request::SocketContext{"127.0.0.1", 12'345, "127.0.0.1", 3000, "https"},
+          config,
+          request_executor,
+          execution_pool);
+      session.run();
+
+      const std::vector<std::pair<std::string, std::string>> headers =
+          h2_response_headers_from(connection.output(), 1);
+      if (!h2_headers_contain(headers, ":status", "503") ||
+          !h2_response_body_from(connection.output(), 1).empty())
+      {
+        fail("HTTP/2 retained an oversized materialized response without a connection-buffer lease");
+      }
+    }
+
     void test_http2_resumes_deferred_file_backed_response_body_after_window_update()
     {
       class FileBackedResponseRequestExecutor final : public Vajra::request::RequestExecutor
@@ -3406,6 +3985,61 @@ namespace VajraSpecCpp
       if (h2_response_body_from(connection.output(), 1) != body)
       {
         fail("HTTP/2 file-backed response did not resume after WINDOW_UPDATE");
+      }
+    }
+
+    void test_http2_stream_failure_resets_only_that_stream()
+    {
+      class FailedStreamThenSurvivorExecutor final : public Vajra::request::RequestExecutor
+      {
+      public:
+        std::optional<Vajra::response::Response> execute(
+            const Vajra::request::RequestContext &request_context) const override
+        {
+          if (request_context.request.request_line.target == "/failed")
+          {
+            Vajra::response::Response response{
+                Vajra::response::Status{200, "OK"},
+                {Vajra::response::Header{"Content-Type", "text/plain"}},
+                "",
+                Vajra::response::ConnectionBehavior::close};
+            response.body_stream = std::make_shared<Vajra::response::ResponseBodyStream>();
+            response.body_stream->fail("Rack body failed after response commit");
+            response.body_stream->mark_producer_finished();
+            return response;
+          }
+
+          return Vajra::response::Response{
+              Vajra::response::Status{200, "OK"},
+              {Vajra::response::Header{"Content-Type", "text/plain"}},
+              "survivor",
+              Vajra::response::ConnectionBehavior::close};
+        }
+      };
+
+      std::string request = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+      append_h2_frame(request, 4, 0, 0, "");
+      append_h2_frame(request, 1, 0x5, 1, h2_request_header_block("GET", "/failed", "localhost"));
+      append_h2_frame(request, 1, 0x5, 3, h2_request_header_block("GET", "/survivor", "localhost"));
+
+      BufferedConnection connection(std::move(request));
+      const auto request_executor = std::make_shared<FailedStreamThenSurvivorExecutor>();
+      const auto execution_pool = std::make_shared<Vajra::request::Http2ExecutionPool>(1);
+      Vajra::request::Http2Session session(
+          connection,
+          Vajra::request::SocketContext{"127.0.0.1", 12'345, "127.0.0.1", 3000, "https"},
+          Vajra::request::Http2Config{},
+          request_executor,
+          execution_pool);
+      session.run();
+
+      if (!h2_output_contains_rst_stream_error(connection.output(), 1, NGHTTP2_INTERNAL_ERROR))
+      {
+        fail("HTTP/2 failed response body did not reset its own stream");
+      }
+      if (h2_response_body_from(connection.output(), 3) != "survivor")
+      {
+        fail("HTTP/2 response body failure terminated an unrelated multiplexed stream");
       }
     }
 
@@ -3568,6 +4202,11 @@ namespace VajraSpecCpp
     test_response_serializer_serializes_status_headers_and_body();
     test_response_serializer_serializes_chunked_response_storage();
     test_response_serializer_and_writer_stream_file_backed_body();
+    test_response_body_stream_bounds_a_slow_producer_and_cancellation_wakes_it();
+    test_response_body_stream_connection_budget_bounds_and_releases();
+    test_response_body_stream_enforces_a_trusted_known_length();
+    test_response_serializer_rejects_live_body_stream();
+    test_response_writer_cancels_stream_when_head_write_fails();
     test_response_serializer_allows_empty_reason_phrase();
     test_response_serializer_omits_content_length_for_no_body_status();
     test_response_serializer_emits_connection_close_only_when_requested();
@@ -3620,6 +4259,10 @@ namespace VajraSpecCpp
     test_http2_async_unknown_exception_completes_session_shutdown();
     test_http2_queue_capacity_error_emits_503_and_goaway();
     test_http2_pending_execution_limit_rejects_second_stream();
+    test_http2_runtime_config_builder_preserves_pending_limit_after_buffer_budget();
+    test_http2_default_pending_limit_prunes_completed_response_producers();
+    test_http2_preserves_known_empty_stream_content_length();
+    test_http2_streams_known_length_body_larger_than_connection_budget_in_bounded_chunks();
     test_http2_prior_knowledge_initial_bytes_serves_request();
     test_http2_upgrade_request_serves_stream_one();
     test_http2_rejects_short_content_length_body();
@@ -3629,7 +4272,10 @@ namespace VajraSpecCpp
     test_http2_accepts_matching_authority_and_host();
     test_http2_synthesizes_host_from_authority();
     test_http2_streams_file_backed_response_body();
+    test_http2_canonicalizes_mixed_response_body_representations();
+    test_http2_rejects_oversized_materialized_response_against_connection_budget();
     test_http2_resumes_deferred_file_backed_response_body_after_window_update();
+    test_http2_stream_failure_resets_only_that_stream();
     test_http2_rejects_invalid_response_headers();
     test_http2_suppresses_head_response_data();
     test_http2_rejects_no_body_status_response_body();

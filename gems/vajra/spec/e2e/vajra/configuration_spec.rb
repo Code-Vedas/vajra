@@ -1560,7 +1560,14 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
     expect(result[:response][:status_line]).to eq('HTTP/1.1 200 OK')
     expect(result[:response][:headers]).to include('content-type' => 'application/json')
     payload = JSON.parse(result[:response][:body])
-    expect(payload).to include('master_pid', 'master_rss_bytes', 'profiling', 'socket_queue_capacity')
+    expect(payload).to include('master_pid', 'master_rss_bytes', 'profiling', 'socket_queue_capacity', 'http2_resources')
+    expect(payload.fetch('http2_resources')).to include(
+      'tracked_buffer_bytes' => 0,
+      'tracked_buffer_peak_bytes' => 0,
+      'buffer_budget_rejections' => 0,
+      'execution_admission_depth' => 0,
+      'execution_admission_rejections' => 0
+    )
     expect(payload).to have_key('workers')
     expect(payload.fetch('workers').first).to include(
       'pid',
@@ -1618,7 +1625,12 @@ RSpec.describe 'Vajra configuration', :e2e, :integration do
       'vajra_worker_active_connections',
       'vajra_worker_active_executions',
       'vajra_worker_idle_executions',
-      'vajra_worker_accept_total'
+      'vajra_worker_accept_total',
+      'vajra_worker_http2_tracked_buffer_bytes',
+      'vajra_worker_http2_tracked_buffer_peak_bytes',
+      'vajra_worker_http2_buffer_budget_rejections_total',
+      'vajra_worker_http2_execution_admission_depth',
+      'vajra_worker_http2_execution_admission_rejections_total'
     )
   end
 

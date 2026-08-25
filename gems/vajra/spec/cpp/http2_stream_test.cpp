@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -51,6 +52,89 @@ namespace
         "consumed-byte observation should report drained inbound bytes exactly once");
     expect_true(Vajra::rack::http2_stream_take_consumed_bytes(&state) == 0,
         "consumed-byte observation should reset after being read");
+  }
+
+  void test_connection_budget_bounds_multiple_streams()
+  {
+    auto budget = std::make_shared<Vajra::rack::Http2ConnectionBufferBudget>(4);
+    Http2StreamState first;
+    Http2StreamState second;
+    first.high_watermark = 4;
+    second.high_watermark = 4;
+    first.connection_buffer_budget = budget;
+    second.connection_buffer_budget = budget;
+
+    expect_true(Vajra::rack::http2_stream_try_append_inbound(&first, "abc", 3),
+        "first stream should reserve available connection buffer capacity");
+    expect_true(!Vajra::rack::http2_stream_try_append_inbound(&second, "de", 2),
+        "second stream should be flow-controlled by the shared connection budget");
+    expect_true(budget->used_bytes() == 3,
+        "a rejected shared-budget append must not leak a reservation");
+
+    Vajra::rack::http2_stream_reset(&first, 0);
+    expect_true(Vajra::rack::http2_stream_try_append_inbound(&second, "de", 2),
+        "released connection capacity should admit another stream");
+    expect_true(budget->used_bytes() == 2,
+        "the shared budget should account only for currently buffered bytes");
+  }
+
+  void test_connection_budget_releases_queued_bytes_on_stream_destruction()
+  {
+    auto budget = std::make_shared<Vajra::rack::Http2ConnectionBufferBudget>(8);
+    {
+      Http2StreamState state;
+      state.high_watermark = 8;
+      state.connection_buffer_budget = budget;
+      expect_true(Vajra::rack::http2_stream_try_append_inbound(&state, "queued", 6),
+          "stream destruction fixture should acquire a queued inbound lease");
+      expect_true(budget->used_bytes() == 6,
+          "queued inbound bytes should remain charged until a terminal owner releases them");
+    }
+    const auto snapshot = budget->snapshot();
+    expect_true(snapshot.used_bytes == 0 && snapshot.release_underflows == 0,
+        "Http2StreamState destruction should release exactly its retained inbound/outbound budget lease");
+  }
+
+  void test_inbound_allocation_failure_releases_reserved_connection_bytes()
+  {
+    const std::size_t string_maximum = std::string().max_size();
+    const std::size_t impossible_length =
+        string_maximum < std::numeric_limits<std::size_t>::max()
+            ? string_maximum + 1
+            : std::numeric_limits<std::size_t>::max();
+
+    auto verify_no_leak = [impossible_length](bool blocking_append) {
+      auto budget = std::make_shared<Vajra::rack::Http2ConnectionBufferBudget>(0);
+      Http2StreamState state;
+      state.high_watermark = std::numeric_limits<std::size_t>::max();
+      state.connection_buffer_budget = budget;
+
+      bool raised = false;
+      try
+      {
+        if (blocking_append)
+        {
+          Vajra::rack::http2_stream_append_inbound(&state, "x", impossible_length);
+        }
+        else
+        {
+          (void)Vajra::rack::http2_stream_try_append_inbound(&state, "x", impossible_length);
+        }
+      }
+      catch (const std::exception &)
+      {
+        raised = true;
+      }
+
+      const auto snapshot = budget->snapshot();
+      expect_true(raised,
+          "an impossible inbound chunk allocation should report its allocation failure");
+      expect_true(snapshot.used_bytes == 0 && snapshot.release_underflows == 0,
+          "an inbound allocation failure must release its already-reserved connection bytes exactly once");
+    };
+
+    verify_no_leak(false);
+    verify_no_leak(true);
   }
 
   void test_finish_inbound_wakes_waiters()
@@ -137,6 +221,8 @@ namespace
       std::lock_guard<std::mutex> lock(state.mutex);
       expect_true(state.outbound_bytes == 2,
           "outbound bytes should be released only as the provider consumes DATA bytes");
+      expect_true(state.outbound_front_offset == 1,
+          "a partial provider drain should retain its chunk with a cursor instead of erasing its prefix");
     }
 
     std::uint8_t remaining[8] = {};
@@ -172,6 +258,9 @@ namespace
 void VajraSpecCpp::run_http2_stream_tests()
 {
   test_append_respects_high_watermark();
+  test_connection_budget_bounds_multiple_streams();
+  test_connection_budget_releases_queued_bytes_on_stream_destruction();
+  test_inbound_allocation_failure_releases_reserved_connection_bytes();
   test_finish_inbound_wakes_waiters();
   test_reset_closes_and_wakes_waiters();
   test_accept_is_observed_once();

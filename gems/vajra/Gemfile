@@ -9,16 +9,17 @@ source 'https://rubygems.org'
 
 gemspec
 
-gem 'bundler-audit', require: false
+gem 'bundler-audit', '0.9.3', require: false
 gem 'falcon'
 gem 'fiddle', platforms: %i[windows]
 gem 'hanami', '~> 2.3.2'
 gem 'hanami-controller', '~> 2.3.1'
 gem 'hanami-router', '~> 2.3.1'
 gem 'irb'
+gem 'json', '>= 2.21.2'
 gem 'passenger'
 gem 'puma'
-gem 'rails'
+gem 'rails', '>= 8.1.3.1', '< 8.2'
 gem 'rake', require: false
 gem 'rake-compiler'
 gem 'rbs'

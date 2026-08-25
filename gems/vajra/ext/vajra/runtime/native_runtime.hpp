@@ -72,6 +72,8 @@ namespace Vajra
       std::string stats_path;
       std::string metrics_endpoint;
       bool debug_logging = false;
+      std::size_t http2_max_pending_executions = 0;
+      std::size_t http2_max_connection_buffer_bytes = 16 * 1024 * 1024;
     };
 
     struct RecoveryPolicy
@@ -182,7 +184,9 @@ namespace Vajra
           std::size_t http2_header_table_size,
           std::string stats_path,
           std::string metrics_endpoint,
-          bool debug_logging);
+          bool debug_logging,
+          std::size_t http2_max_pending_executions,
+          std::size_t http2_max_connection_buffer_bytes);
       void run_master_dispatch_loop(
           int listener_fd,
           const RuntimeConfig &config,

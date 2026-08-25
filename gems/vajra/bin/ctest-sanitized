@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+set -euo pipefail
+IFS=$'\n\t'
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BUILD_DIR="$ROOT_DIR/tmp/cpp-sanitizer-tests"
+SANITIZERS='address,undefined'
+
+rm -rf "$BUILD_DIR"
+cmake \
+  -S "$ROOT_DIR/spec/cpp" \
+  -B "$BUILD_DIR" \
+  -DCMAKE_C_FLAGS="-fsanitize=$SANITIZERS -fno-omit-frame-pointer" \
+  -DCMAKE_CXX_FLAGS="-fsanitize=$SANITIZERS -fno-omit-frame-pointer" \
+  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=$SANITIZERS"
+cmake --build "$BUILD_DIR"
+asan_options=detect_leaks=1
+if [ "$(uname -s)" = "Darwin" ]; then
+  asan_options=
+fi
+ASAN_OPTIONS="$asan_options" UBSAN_OPTIONS=print_stacktrace=1 \
+  ctest --test-dir "$BUILD_DIR" --output-on-failure

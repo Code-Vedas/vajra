@@ -59,6 +59,10 @@ namespace Vajra
       bool trace_otel_owner;
       std::string trace_resource_attributes;
       std::string trace_propagators;
+      // Kept at the end so older aggregate construction sites retain their
+      // meaning while worker-spawn/config tests exercise the explicit fields.
+      std::size_t http2_max_pending_executions = 0;
+      std::size_t http2_max_connection_buffer_bytes = 16 * 1024 * 1024;
     };
 
     class RuntimeConfigLoader final

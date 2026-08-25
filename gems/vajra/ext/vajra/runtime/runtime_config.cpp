@@ -48,6 +48,8 @@ namespace
   ID id_http2_initial_window_size;
   ID id_http2_max_frame_size;
   ID id_http2_header_table_size;
+  ID id_http2_max_pending_executions;
+  ID id_http2_max_connection_buffer_bytes;
   ID id_log_level;
   ID id_access_log;
   ID id_error_log;
@@ -106,6 +108,8 @@ namespace
         key_id == id_http2_initial_window_size ||
         key_id == id_http2_max_frame_size ||
         key_id == id_http2_header_table_size ||
+        key_id == id_http2_max_pending_executions ||
+        key_id == id_http2_max_connection_buffer_bytes ||
         key_id == id_log_level ||
         key_id == id_access_log ||
         key_id == id_error_log ||
@@ -652,6 +656,8 @@ void Vajra::runtime::RuntimeConfigLoader::initialize_ids()
   id_http2_initial_window_size = rb_intern("http2_initial_window_size");
   id_http2_max_frame_size = rb_intern("http2_max_frame_size");
   id_http2_header_table_size = rb_intern("http2_header_table_size");
+  id_http2_max_pending_executions = rb_intern("http2_max_pending_executions");
+  id_http2_max_connection_buffer_bytes = rb_intern("http2_max_connection_buffer_bytes");
   id_log_level = rb_intern("log_level");
   id_access_log = rb_intern("access_log");
   id_error_log = rb_intern("error_log");
@@ -810,6 +816,13 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       4'096,
       0,
       std::numeric_limits<int>::max());
+  const long ruby_http2_max_connection_buffer_bytes = configured_integer_from_ruby(
+      options,
+      id_http2_max_connection_buffer_bytes,
+      "http2_max_connection_buffer_bytes option",
+      16 * 1024 * 1024,
+      1,
+      std::numeric_limits<int>::max());
   const std::string ruby_log_level = normalized_log_level(
       configured_string_from_ruby(options, id_log_level, "log_level option", "info"),
       "log_level option");
@@ -865,6 +878,16 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       1,
       1'024));
   const std::pair<std::size_t, std::size_t> threads = configured_threads_from_env(ruby_threads);
+  // Derive the default after VAJRA_THREADS has been resolved so HTTP/2
+  // admission follows the actual Ruby execution pool, not only the Ruby
+  // keyword default.
+  const long ruby_http2_max_pending_executions = configured_integer_from_ruby(
+      options,
+      id_http2_max_pending_executions,
+      "http2_max_pending_executions option",
+      static_cast<long>(std::max<std::size_t>(1, threads.second * 2)),
+      1,
+      std::numeric_limits<int>::max());
   const std::size_t max_connections = static_cast<std::size_t>(ruby_max_connections);
   const std::size_t socket_queue_capacity = static_cast<std::size_t>(configured_integer_from_env(
       "VAJRA_SOCKET_QUEUE_CAPACITY",
@@ -957,6 +980,22 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       ruby_http2_header_table_size,
       0,
       std::numeric_limits<int>::max()));
+  const std::size_t http2_max_pending_executions = static_cast<std::size_t>(configured_integer_from_env(
+      "VAJRA_HTTP2_MAX_PENDING_EXECUTIONS",
+      ruby_http2_max_pending_executions,
+      1,
+      std::numeric_limits<int>::max()));
+  const std::size_t http2_max_connection_buffer_bytes = static_cast<std::size_t>(configured_integer_from_env(
+      "VAJRA_HTTP2_MAX_CONNECTION_BUFFER_BYTES",
+      ruby_http2_max_connection_buffer_bytes,
+      1,
+      std::numeric_limits<int>::max()));
+  constexpr std::size_t kHttp2ConnectionBudgetMinimumOverheadBytes = 33;
+  if (http2 && http2_max_connection_buffer_bytes < http2_max_frame_size + kHttp2ConnectionBudgetMinimumOverheadBytes)
+  {
+    throw std::runtime_error(
+        "invalid http2_max_connection_buffer_bytes: must hold one HTTP/2 frame plus preface/header overhead");
+  }
   validate_protocol_config(tls, tls_certificate, tls_private_key, http2, alpn_protocols);
   const std::string log_level = normalized_log_level(
       configured_string_from_env("VAJRA_LOG_LEVEL", ruby_log_level),
@@ -1016,5 +1055,7 @@ Vajra::runtime::RuntimeConfig Vajra::runtime::RuntimeConfigLoader::configured_ru
       trace_service_name,
       trace_otel_owner,
       trace_resource_attributes,
-      trace_propagators};
+      trace_propagators,
+      http2_max_pending_executions,
+      http2_max_connection_buffer_bytes};
 }

@@ -17,6 +17,27 @@
 #include <stdexcept>
 #include <utility>
 
+Vajra::rack::Http2StreamState::~Http2StreamState()
+{
+  std::shared_ptr<Vajra::rack::Http2ConnectionBufferBudget> budget;
+  std::size_t bytes_to_release = 0;
+  {
+    const std::lock_guard<std::mutex> lock(mutex);
+    budget = connection_buffer_budget;
+    bytes_to_release = inbound_bytes + outbound_bytes;
+    inbound_chunks.clear();
+    outbound_chunks.clear();
+    inbound_bytes = 0;
+    outbound_bytes = 0;
+    inbound_front_offset = 0;
+    outbound_front_offset = 0;
+  }
+  if (budget && bytes_to_release > 0)
+  {
+    budget->release(bytes_to_release);
+  }
+}
+
 #ifndef VAJRA_RUNTIME_TESTING
 namespace
 {
@@ -35,11 +56,36 @@ namespace
     } predicate;
   };
 
+  struct ConnectionBudgetWaitContext
+  {
+    Vajra::rack::Http2ConnectionBufferBudget *budget;
+  };
+
+  void *wait_for_connection_buffer_capacity_without_gvl(void *opaque)
+  {
+    auto *context = static_cast<ConnectionBudgetWaitContext *>(opaque);
+    context->budget->wait_for_capacity();
+    return nullptr;
+  }
+
   VALUE rb_mVajra = Qnil;
   VALUE rb_mHTTP2 = Qnil;
   VALUE rb_cStream = Qnil;
   ID id_to_s;
   constexpr std::uint32_t kCancelErrorCode = 0x8;
+
+  bool reserve_connection_buffer(Vajra::rack::Http2StreamState &state, std::size_t bytes)
+  {
+    return !state.connection_buffer_budget || state.connection_buffer_budget->try_reserve(bytes);
+  }
+
+  void release_connection_buffer(Vajra::rack::Http2StreamState &state, std::size_t bytes)
+  {
+    if (state.connection_buffer_budget)
+    {
+      state.connection_buffer_budget->release(bytes);
+    }
+  }
 
   long ruby_string_length_for(std::size_t length)
   {
@@ -256,17 +302,20 @@ namespace
             if (requested)
             {
               std::string &front = wrapper->state->inbound_chunks.front();
-              const std::size_t byte_count = std::min(*requested, front.size());
-              result = std::string(front.data(), byte_count);
-              if (byte_count == front.size())
+              const std::size_t available = front.size() - wrapper->state->inbound_front_offset;
+              const std::size_t byte_count = std::min(*requested, available);
+              result = std::string(front.data() + wrapper->state->inbound_front_offset, byte_count);
+              if (byte_count == available)
               {
                 wrapper->state->inbound_chunks.pop_front();
+                wrapper->state->inbound_front_offset = 0;
               }
               else
               {
-                front.erase(0, byte_count);
+                wrapper->state->inbound_front_offset += byte_count;
               }
               wrapper->state->inbound_bytes -= byte_count;
+              release_connection_buffer(*wrapper->state, byte_count);
               wrapper->state->consumed_since_last_observation += byte_count;
               if (wrapper->state->inbound_bytes <= wrapper->state->low_watermark)
               {
@@ -279,10 +328,12 @@ namespace
               while (!wrapper->state->inbound_chunks.empty())
               {
                 std::string &front = wrapper->state->inbound_chunks.front();
-                const std::size_t byte_count = front.size();
-                collected.append(front.data(), byte_count);
+                const std::size_t byte_count = front.size() - wrapper->state->inbound_front_offset;
+                collected.append(front.data() + wrapper->state->inbound_front_offset, byte_count);
                 wrapper->state->inbound_chunks.pop_front();
+                wrapper->state->inbound_front_offset = 0;
                 wrapper->state->inbound_bytes -= byte_count;
+                release_connection_buffer(*wrapper->state, byte_count);
                 wrapper->state->consumed_since_last_observation += byte_count;
               }
               if (wrapper->state->inbound_bytes <= wrapper->state->low_watermark)
@@ -333,6 +384,7 @@ namespace
     while (offset < chunk.size())
     {
       const char *error_message = nullptr;
+      bool connection_budget_full = false;
       {
         std::unique_lock<std::mutex> lock(wrapper->state->mutex);
         error_message = unusable_error_message(*wrapper->state);
@@ -344,14 +396,39 @@ namespace
         {
           const std::size_t capacity = wrapper->state->high_watermark - wrapper->state->outbound_bytes;
           const std::size_t byte_count = std::min(capacity, chunk.size() - offset);
-          wrapper->state->outbound_chunks.emplace_back(chunk.data() + offset, byte_count);
-          wrapper->state->outbound_bytes += byte_count;
-          offset += byte_count;
-          wrapper->state->event_condition.notify_all();
-          continue;
+          if (!reserve_connection_buffer(*wrapper->state, byte_count))
+          {
+            connection_budget_full = true;
+          }
+          else
+          {
+            try
+            {
+              wrapper->state->outbound_chunks.emplace_back(chunk.data() + offset, byte_count);
+            }
+            catch (...)
+            {
+              release_connection_buffer(*wrapper->state, byte_count);
+              throw;
+            }
+            wrapper->state->outbound_bytes += byte_count;
+            offset += byte_count;
+            wrapper->state->event_condition.notify_all();
+            continue;
+          }
         }
       }
       raise_unusable_if_needed(error_message);
+      if (connection_budget_full)
+      {
+        ConnectionBudgetWaitContext context{wrapper->state->connection_buffer_budget.get()};
+        rb_thread_call_without_gvl(
+            wait_for_connection_buffer_capacity_without_gvl,
+            &context,
+            RUBY_UBF_IO,
+            nullptr);
+        continue;
+      }
       WaitContext context{wrapper->state.get(), WaitContext::Predicate::capacity};
       rb_thread_call_without_gvl(wait_without_gvl, &context, RUBY_UBF_IO, nullptr);
     }
@@ -476,19 +553,46 @@ void Vajra::rack::http2_stream_append_inbound(Http2StreamState *state, const cha
   {
     return;
   }
-  std::unique_lock<std::mutex> lock(state->mutex);
-  state->capacity_condition.wait(lock, [state, length]()
-                                 { return state->reset ||
-                                          state->closed ||
-                                          state->inbound_bytes + length <= state->high_watermark; });
-  if (state->reset || state->closed)
+  for (;;)
   {
+    if (state->connection_buffer_budget)
+    {
+      while (!state->connection_buffer_budget->try_reserve(length))
+      {
+        state->connection_buffer_budget->wait_for_capacity();
+      }
+    }
+    std::unique_lock<std::mutex> lock(state->mutex);
+    state->capacity_condition.wait(lock, [state, length]()
+                                   { return state->reset ||
+                                            state->closed ||
+                                            (state->inbound_bytes <= state->high_watermark &&
+                                             length <= state->high_watermark - state->inbound_bytes); });
+    if (state->reset || state->closed)
+    {
+      if (state->connection_buffer_budget)
+      {
+        state->connection_buffer_budget->release(length);
+      }
+      return;
+    }
+    try
+    {
+      state->inbound_chunks.emplace_back(data, length);
+    }
+    catch (...)
+    {
+      if (state->connection_buffer_budget)
+      {
+        state->connection_buffer_budget->release(length);
+      }
+      throw;
+    }
+    state->inbound_bytes += length;
+    lock.unlock();
+    state->data_condition.notify_all();
     return;
   }
-  state->inbound_chunks.emplace_back(data, length);
-  state->inbound_bytes += length;
-  lock.unlock();
-  state->data_condition.notify_all();
 }
 
 bool Vajra::rack::http2_stream_try_append_inbound(Http2StreamState *state, const char *data, std::size_t length)
@@ -502,11 +606,31 @@ bool Vajra::rack::http2_stream_try_append_inbound(Http2StreamState *state, const
   {
     return true;
   }
-  if (state->inbound_bytes + length > state->high_watermark)
+  if (state->connection_buffer_budget && !state->connection_buffer_budget->try_reserve(length))
   {
     return false;
   }
-  state->inbound_chunks.emplace_back(data, length);
+  if (state->inbound_bytes > state->high_watermark ||
+      length > state->high_watermark - state->inbound_bytes)
+  {
+    if (state->connection_buffer_budget)
+    {
+      state->connection_buffer_budget->release(length);
+    }
+    return false;
+  }
+  try
+  {
+    state->inbound_chunks.emplace_back(data, length);
+  }
+  catch (...)
+  {
+    if (state->connection_buffer_budget)
+    {
+      state->connection_buffer_budget->release(length);
+    }
+    throw;
+  }
   state->inbound_bytes += length;
   state->data_condition.notify_all();
   return true;
@@ -524,11 +648,23 @@ void Vajra::rack::http2_stream_finish_inbound(Http2StreamState *state)
 
 void Vajra::rack::http2_stream_reset(Http2StreamState *state, std::uint32_t error_code)
 {
+  std::size_t released_bytes = 0;
   {
     std::lock_guard<std::mutex> lock(state->mutex);
     state->reset = true;
     state->closed = true;
     state->reset_error_code = error_code;
+    released_bytes = state->inbound_bytes + state->outbound_bytes;
+    state->inbound_chunks.clear();
+    state->outbound_chunks.clear();
+    state->inbound_bytes = 0;
+    state->outbound_bytes = 0;
+    state->inbound_front_offset = 0;
+    state->outbound_front_offset = 0;
+  }
+  if (state->connection_buffer_budget)
+  {
+    state->connection_buffer_budget->release(released_bytes);
   }
   state->data_condition.notify_all();
   state->capacity_condition.notify_all();
@@ -563,17 +699,23 @@ std::size_t Vajra::rack::http2_stream_drain_outbound(Http2StreamState *state, st
     while (copied < length && !state->outbound_chunks.empty())
     {
       std::string &front = state->outbound_chunks.front();
-      const std::size_t byte_count = std::min(length - copied, front.size());
-      std::memcpy(buffer + copied, front.data(), byte_count);
+      const std::size_t available = front.size() - state->outbound_front_offset;
+      const std::size_t byte_count = std::min(length - copied, available);
+      std::memcpy(buffer + copied, front.data() + state->outbound_front_offset, byte_count);
       copied += byte_count;
       state->outbound_bytes -= byte_count;
-      if (byte_count == front.size())
+      if (state->connection_buffer_budget)
+      {
+        state->connection_buffer_budget->release(byte_count);
+      }
+      if (byte_count == available)
       {
         state->outbound_chunks.pop_front();
+        state->outbound_front_offset = 0;
       }
       else
       {
-        front.erase(0, byte_count);
+        state->outbound_front_offset += byte_count;
       }
     }
   }

@@ -335,7 +335,7 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
                                  config.first_data_timeout_seconds,
                                  static_cast<int>(config.request_timeout_seconds)})
                            : nullptr;
-    const Vajra::request::Http2Config http2_config{
+    const Vajra::request::Http2Config http2_config = Vajra::request::Http2Config::from_runtime_options(
         config.http2_max_concurrent_streams,
         config.http2_initial_window_size,
         config.http2_max_frame_size,
@@ -343,7 +343,8 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
         config.max_request_head_bytes,
         config.max_request_body_bytes,
         config.max_keepalive_requests,
-        config.socket_queue_capacity};
+        config.http2_max_pending_executions,
+        config.http2_max_connection_buffer_bytes);
     auto server = std::make_shared<Vajra::Server>(
         config.port,
         config.host,
@@ -461,7 +462,9 @@ void VajraNative::start(
     std::string trace_service_name,
     bool trace_otel_owner,
     std::string trace_resource_attributes,
-    std::string trace_propagators)
+    std::string trace_propagators,
+    std::size_t http2_max_pending_executions,
+    std::size_t http2_max_connection_buffer_bytes)
 {
   Vajra::runtime::NativeRuntime::instance().start(Vajra::runtime::RuntimeConfig{
       std::move(host),
@@ -504,7 +507,9 @@ void VajraNative::start(
       std::move(trace_service_name),
       trace_otel_owner,
       std::move(trace_resource_attributes),
-      std::move(trace_propagators)});
+      std::move(trace_propagators),
+      http2_max_pending_executions,
+      http2_max_connection_buffer_bytes});
 }
 
 void VajraNative::stop()

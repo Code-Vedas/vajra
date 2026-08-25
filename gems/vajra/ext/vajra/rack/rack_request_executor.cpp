@@ -126,7 +126,8 @@ std::optional<Vajra::response::Response> Vajra::rack::RackRequestExecutor::execu
       request_context.request_body,
       request_context.client_fd,
       request_context.http2_stream,
-      request_context.native_hijack_transport);
+      request_context.native_hijack_transport,
+      request_context.connection_buffer_budget);
 }
 
 std::optional<Vajra::response::Response> Vajra::rack::RackRequestExecutor::execute(
@@ -139,7 +140,8 @@ std::optional<Vajra::response::Response> Vajra::rack::RackRequestExecutor::execu
       std::move(request_context.request_body),
       request_context.client_fd,
       std::move(request_context.http2_stream),
-      std::move(request_context.native_hijack_transport));
+      std::move(request_context.native_hijack_transport),
+      std::move(request_context.connection_buffer_budget));
 }
 
 bool Vajra::rack::RackRequestExecutor::execute_async(
@@ -154,5 +156,6 @@ bool Vajra::rack::RackRequestExecutor::execute_async(
       request_context.client_fd,
       std::move(request_context.http2_stream),
       std::move(request_context.native_hijack_transport),
-      std::move(callback));
+      std::move(callback),
+      std::move(request_context.connection_buffer_budget));
 }

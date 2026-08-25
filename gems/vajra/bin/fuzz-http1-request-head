@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+set -euo pipefail
+IFS=$'\n\t'
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BUILD_DIR="$ROOT_DIR/tmp/fuzz-http1-request-head"
+
+fuzzer_runtime=$(clang++ -print-file-name=libclang_rt.fuzzer_osx.a)
+if [ "$(uname -s)" = "Darwin" ] && [ ! -f "$fuzzer_runtime" ]; then
+  echo "Skipping libFuzzer: the selected Apple Clang lacks libclang_rt.fuzzer_osx.a" >&2
+  exit 0
+fi
+
+rm -rf "$BUILD_DIR"
+CC=clang CXX=clang++ cmake \
+  -S "$ROOT_DIR/spec/cpp" \
+  -B "$BUILD_DIR" \
+  -DVAJRA_BUILD_FUZZERS=ON
+cmake --build "$BUILD_DIR" --target vajra_http1_request_head_fuzz
+"$BUILD_DIR/vajra_http1_request_head_fuzz" \
+  -runs="${FUZZ_RUNS:-5000}" \
+  -max_len=65536 \
+  "$ROOT_DIR/spec/fuzz/corpus/http1_request_head"

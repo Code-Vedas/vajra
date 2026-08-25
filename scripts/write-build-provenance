@@ -1,0 +1,46 @@
+#!/bin/sh
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+set -eu
+
+if [ "$#" -ne 1 ]; then
+  echo "Usage: $0 OUTPUT.json" >&2
+  exit 64
+fi
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
+OUTPUT=$1
+
+if [ -e "$OUTPUT" ]; then
+  echo "Refusing to overwrite existing provenance record: $OUTPUT" >&2
+  exit 65
+fi
+
+mkdir -p "$(dirname -- "$OUTPUT")"
+nghttp2_version=$(sed -n 's/^#define NGHTTP2_VERSION "\([^"]*\)"$/\1/p' "$REPO_ROOT/gems/vajra/ext/vajra/vendor/nghttp2/lib/includes/nghttp2/nghttp2ver.h")
+git_revision=$(git -C "$REPO_ROOT" rev-parse HEAD)
+compiler=${CC:-cc}
+compiler_version=$($compiler --version 2>/dev/null | sed -n '1p' || true)
+
+REPO_ROOT="$REPO_ROOT" OUTPUT="$OUTPUT" NGHTTP2_VERSION="$nghttp2_version" GIT_REVISION="$git_revision" COMPILER="$compiler" COMPILER_VERSION="$compiler_version" \
+  ruby -rjson -ropenssl -rrbconfig -e '
+    openssl_spec = Gem.loaded_specs["openssl"]
+    payload = {
+      git_revision: ENV.fetch("GIT_REVISION"),
+      ruby_version: RUBY_VERSION,
+      ruby_platform: RUBY_PLATFORM,
+      ruby_api_version: RbConfig::CONFIG.fetch("ruby_version"),
+      openssl_gem_version: openssl_spec&.version&.to_s,
+      openssl_library_version: OpenSSL::OPENSSL_LIBRARY_VERSION,
+      nghttp2_version: ENV.fetch("NGHTTP2_VERSION"),
+      compiler: ENV.fetch("COMPILER"),
+      compiler_version: ENV.fetch("COMPILER_VERSION"),
+      target_os: RbConfig::CONFIG.fetch("host_os"),
+      target_cpu: RbConfig::CONFIG.fetch("host_cpu"),
+      libc: RbConfig::CONFIG["host_os"]
+    }
+    File.write(ENV.fetch("OUTPUT"), JSON.pretty_generate(payload) + "\n")
+  '

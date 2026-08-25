@@ -60,7 +60,9 @@ namespace VajraNative
       std::string trace_service_name = "",
       bool trace_otel_owner = false,
       std::string trace_resource_attributes = "",
-      std::string trace_propagators = "tracecontext,baggage");
+      std::string trace_propagators = "tracecontext,baggage",
+      std::size_t http2_max_pending_executions = 2,
+      std::size_t http2_max_connection_buffer_bytes = 16 * 1024 * 1024);
   void stop();
 }
 

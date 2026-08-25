@@ -54,6 +54,13 @@ namespace Vajra
       std::atomic<std::int64_t> http2_execution_drain_nanoseconds{0};
       std::atomic<std::int64_t> http2_response_submit_nanoseconds{0};
       std::atomic<std::int64_t> http2_session_send_nanoseconds{0};
+      // H2 tracked buffers are a bounded ledger of Vajra-owned queues.  They
+      // intentionally exclude opaque nghttp2 allocator/HPACK heap usage.
+      std::atomic<std::int64_t> http2_tracked_buffer_bytes{0};
+      std::atomic<std::uint64_t> http2_tracked_buffer_peak_bytes{0};
+      std::atomic<std::uint64_t> http2_buffer_budget_rejections{0};
+      std::atomic<std::int64_t> http2_execution_admission_depth{0};
+      std::atomic<std::uint64_t> http2_execution_admission_rejections{0};
       std::atomic<std::int64_t> last_progress_nanoseconds{0};
       std::atomic<std::uint64_t> replacement_attempt_count{0};
       std::atomic<std::uint64_t> replacement_success_count{0};
@@ -136,6 +143,14 @@ namespace Vajra
     void note_worker_http2_execution_drain_time(std::int64_t nanoseconds);
     void note_worker_http2_response_submit_time(std::int64_t nanoseconds);
     void note_worker_http2_session_send_time(std::int64_t nanoseconds);
+    void note_worker_http2_tracked_buffer_delta(
+        WorkerRuntimeState *state,
+        std::int64_t byte_delta,
+        bool reservation_rejected);
+    void note_worker_http2_execution_admission_depth_delta(
+        WorkerRuntimeState *state,
+        std::int64_t depth_delta);
+    void note_worker_http2_execution_admission_rejection(WorkerRuntimeState *state);
     void note_worker_request_completed();
     void note_worker_execution_started();
     void note_worker_execution_finished();

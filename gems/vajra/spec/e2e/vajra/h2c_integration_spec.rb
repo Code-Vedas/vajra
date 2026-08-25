@@ -211,8 +211,8 @@ RSpec.describe 'Vajra h2c integration', :e2e, :integration do
     ssl_socket
   end
 
-  def h2c_server_result(http2: true)
-    script = <<~RUBY
+  def h2c_server_result(http2: true, script: nil, env: {})
+    script ||= <<~RUBY
       require "vajra"
 
       Vajra::Internal::RackExecution.install!(
@@ -231,7 +231,7 @@ RSpec.describe 'Vajra h2c integration', :e2e, :integration do
     RUBY
 
     managed_popen2e(
-      vajra_env(port: disposable_listener_port),
+      vajra_env(port: disposable_listener_port).merge(env),
       *inline_ruby_command(script),
       chdir: VajraE2EHelpers::PACKAGE_ROOT
     ) do |_stdin, output, wait_thread|
@@ -248,6 +248,74 @@ RSpec.describe 'Vajra h2c integration', :e2e, :integration do
     ensure
       cleanup_process(wait_thread, output)
     end
+  end
+
+  def h2c_gated_response_server_script
+    <<~RUBY
+      require "vajra"
+
+      class GatedRackResponseBody
+        def initialize(mode)
+          @mode = mode
+        end
+
+        def each
+          if @mode == "before-first-yield"
+            File.binwrite(ENV.fetch("STREAM_STARTED_PATH"), @mode)
+            sleep 0.005 until File.exist?(ENV.fetch("STREAM_RELEASE_PATH"))
+            loop { yield "x".b * (16 * 1024) }
+          end
+
+          yield "first".b
+          File.binwrite(ENV.fetch("STREAM_READY_PATH"), @mode)
+          sleep 0.005 until File.exist?(ENV.fetch("STREAM_RELEASE_PATH"))
+          raise "gated Rack body failed after commit" if @mode == "failure"
+
+          yield "second".b
+        end
+
+        def close
+          File.open(ENV.fetch("STREAM_CLOSED_PATH"), "a") { |file| file.puts(@mode) }
+        end
+      end
+
+      Vajra::Internal::RackExecution.install!(
+        lambda do |rack_env|
+          case rack_env.fetch("PATH_INFO")
+          when "/gated"
+            [200, { "Content-Type" => "text/plain" }, GatedRackResponseBody.new("gated")]
+          when "/failure"
+            [200, { "Content-Type" => "text/plain" }, GatedRackResponseBody.new("failure")]
+          when "/before-first-yield"
+            [200, { "Content-Type" => "text/plain" }, GatedRackResponseBody.new("before-first-yield")]
+          when "/survivor"
+            [200, { "Content-Type" => "text/plain" }, ["survivor"]]
+          else
+            [404, { "Content-Type" => "text/plain" }, ["missing"]]
+          end
+        end
+      )
+
+      Vajra.start(
+        workers: 1,
+        threads: [1, 1],
+        http2: true,
+        http2_max_pending_executions: Integer(ENV.fetch("H2_PENDING_LIMIT", "256"))
+      )
+    RUBY
+  end
+
+  def h2c_gated_response_server_result(root, pending_limit: 256, &block)
+    h2c_server_result(
+      script: h2c_gated_response_server_script,
+      env: {
+        'STREAM_STARTED_PATH' => File.join(root, 'started'),
+        'STREAM_READY_PATH' => File.join(root, 'ready'),
+        'STREAM_RELEASE_PATH' => File.join(root, 'release'),
+        'STREAM_CLOSED_PATH' => File.join(root, 'closed'),
+        'H2_PENDING_LIMIT' => pending_limit.to_s
+      }, &block
+    )
   end
 
   def h2c_tunnel_server_script(tls:, force_active_tracing: false)
@@ -691,6 +759,136 @@ RSpec.describe 'Vajra h2c integration', :e2e, :integration do
     end
 
     expect(result[:exitstatus]).to eq(0), result[:output]
+  end
+
+  it 'streams a gated Rack enumerable over h2c before its producer finishes' do
+    Dir.mktmpdir('vajra-h2c-stream') do |root|
+      ready_path = File.join(root, 'ready')
+      release_path = File.join(root, 'release')
+      closed_path = File.join(root, 'closed')
+      result = h2c_gated_response_server_result(root) do |port|
+        socket = connected_plain_socket(port)
+        begin
+          h2_start(socket)
+          socket.write(h2_frame(1, 0x5, 1, h2_request_header_block('/gated')))
+
+          first = h2_read_until(socket, type: 0, stream_id: 1)
+          expect(first[:payload]).to eq('first')
+          expect(first[:flags] & 0x1).to eq(0)
+          Timeout.timeout(5) { sleep 0.005 until File.exist?(ready_path) }
+          expect(File.exist?(release_path)).to be(false)
+
+          File.binwrite(release_path, 'release')
+          expect(h2_read_response_body(socket, 1)).to eq('second')
+          Timeout.timeout(5) { sleep 0.005 until File.exist?(closed_path) }
+          expect(File.readlines(closed_path)).to eq(["gated\n"])
+        ensure
+          socket.close unless socket.closed?
+        end
+      end
+
+      expect(result[:exitstatus]).to eq(0), result[:output]
+    end
+  end
+
+  it 'resets only a failed streamed h2c Rack body and keeps a sibling stream usable' do
+    Dir.mktmpdir('vajra-h2c-stream-failure') do |root|
+      ready_path = File.join(root, 'ready')
+      release_path = File.join(root, 'release')
+      closed_path = File.join(root, 'closed')
+      result = h2c_gated_response_server_result(root) do |port|
+        socket = connected_plain_socket(port)
+        begin
+          h2_start(socket)
+          socket.write(h2_frame(1, 0x5, 1, h2_request_header_block('/failure')))
+          expect(h2_read_until(socket, type: 0, stream_id: 1)[:payload]).to eq('first')
+          Timeout.timeout(5) { sleep 0.005 until File.exist?(ready_path) }
+
+          File.binwrite(release_path, 'release')
+          reset = h2_read_until(socket, type: 3, stream_id: 1)
+          expect(h2_rst_stream_error_code(reset)).to eq(2)
+
+          socket.write(h2_frame(1, 0x5, 3, h2_request_header_block('/survivor')))
+          expect(h2_read_response_body(socket, 3)).to eq('survivor')
+          Timeout.timeout(5) { sleep 0.005 until File.exist?(closed_path) }
+          expect(File.readlines(closed_path)).to eq(["failure\n"])
+        ensure
+          socket.close unless socket.closed?
+        end
+      end
+
+      expect(result[:exitstatus]).to eq(0), result[:output]
+    end
+  end
+
+  it 'keeps a first-byte streamed Rack producer in the h2c admission limit' do
+    Dir.mktmpdir('vajra-h2c-stream-admission') do |root|
+      ready_path = File.join(root, 'ready')
+      release_path = File.join(root, 'release')
+      closed_path = File.join(root, 'closed')
+      result = h2c_gated_response_server_result(root, pending_limit: 1) do |port|
+        socket = connected_plain_socket(port)
+        begin
+          h2_start(socket)
+          socket.write(h2_frame(1, 0x5, 1, h2_request_header_block('/gated')))
+          expect(h2_read_until(socket, type: 0, stream_id: 1)[:payload]).to eq('first')
+          Timeout.timeout(5) { sleep 0.005 until File.exist?(ready_path) }
+
+          socket.write(h2_frame(1, 0x5, 3, h2_request_header_block('/survivor')))
+          expect(h2_read_response_body(socket, 3)).to include('Service Unavailable')
+
+          File.binwrite(release_path, 'release')
+          expect(h2_read_response_body(socket, 1)).to eq('second')
+          Timeout.timeout(5) { sleep 0.005 until File.exist?(closed_path) }
+          expect(File.readlines(closed_path)).to eq(["gated\n"])
+        ensure
+          socket.close unless socket.closed?
+        end
+      end
+
+      expect(result[:exitstatus]).to eq(0), result[:output]
+    end
+  end
+
+  it 'cancels a response source when h2c disconnects before the first Rack body yield' do
+    Dir.mktmpdir('vajra-h2c-stream-before-first-yield') do |root|
+      started_path = File.join(root, 'started')
+      release_path = File.join(root, 'release')
+      closed_path = File.join(root, 'closed')
+      result = h2c_gated_response_server_result(root) do |port|
+        socket = connected_plain_socket(port)
+        h2_start(socket)
+        socket.write(h2_frame(1, 0x5, 1, h2_request_header_block('/before-first-yield')))
+
+        # The response head proves the source is owned by the H2 session even
+        # though body.each is now waiting before it has yielded payload bytes.
+        expect(h2_read_until(socket, type: 1, stream_id: 1)[:stream_id]).to eq(1)
+        Timeout.timeout(5) { sleep 0.005 until File.exist?(started_path) }
+        socket.close
+
+        # Let the body attempt its first large yield only after the peer has
+        # gone away.  A session-owned source must already be cancelled, so the
+        # producer unwinds and invokes close instead of filling its 64 KiB
+        # queue forever.
+        sleep 0.05
+        File.binwrite(release_path, 'release')
+        Timeout.timeout(5) { sleep 0.005 until File.exist?(closed_path) }
+        expect(File.readlines(closed_path)).to eq(["before-first-yield\n"])
+
+        survivor_socket = connected_plain_socket(port)
+        begin
+          h2_start(survivor_socket)
+          survivor_socket.write(h2_frame(1, 0x5, 1, h2_request_header_block('/survivor')))
+          expect(h2_read_response_body(survivor_socket, 1)).to eq('survivor')
+        ensure
+          survivor_socket.close unless survivor_socket.closed?
+        end
+      ensure
+        socket.close unless socket.closed?
+      end
+
+      expect(result[:exitstatus]).to eq(0), result[:output]
+    end
   end
 
   it 'serves a large file-backed Rack response over h2c' do

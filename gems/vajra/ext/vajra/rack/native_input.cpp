@@ -5,11 +5,14 @@
 
 #include "rack/native_input.hpp"
 
+#include "response/response.hpp"
+
 #include "ruby/encoding.h"
 #include "ruby/thread.h"
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -34,6 +37,8 @@ namespace Vajra
       std::deque<std::string> memory_chunks;
       std::size_t memory_base_offset = 0;
       std::size_t memory_bytes = 0;
+      std::shared_ptr<Vajra::response::ConnectionBufferBudget> connection_buffer_budget;
+      std::size_t connection_budget_bytes = 0;
       FILE *spill_file = nullptr;
       std::size_t bytes_written = 0;
       std::size_t read_offset = 0;
@@ -51,6 +56,11 @@ namespace Vajra
 
       ~NativeInputState()
       {
+        if (connection_buffer_budget && connection_budget_bytes > 0)
+        {
+          connection_buffer_budget->release(connection_budget_bytes);
+          connection_budget_bytes = 0;
+        }
         if (spill_file != nullptr)
         {
           std::fclose(spill_file);
@@ -80,6 +90,17 @@ namespace
       data,
       capacity
     } predicate;
+    bool ran = false;
+  };
+
+  class RubyInterrupt final
+  {
+  public:
+    explicit RubyInterrupt(int state) : state_(state) {}
+    int state() const { return state_; }
+
+  private:
+    int state_;
   };
 
   VALUE rb_cNativeInput = Qnil;
@@ -111,6 +132,14 @@ namespace
   VALUE binary_string_from(const char *data, std::size_t length)
   {
     VALUE ruby_string = rb_str_new(length == 0 ? "" : data, ruby_string_length_for(length));
+    rb_enc_associate_index(ruby_string, rb_ascii8bit_encindex());
+    return ruby_string;
+  }
+
+  VALUE binary_string_buffer(std::size_t length)
+  {
+    VALUE ruby_string = rb_str_buf_new(ruby_string_length_for(length));
+    rb_str_set_len(ruby_string, ruby_string_length_for(length));
     rb_enc_associate_index(ruby_string, rb_ascii8bit_encindex());
     return ruby_string;
   }
@@ -262,7 +291,10 @@ namespace
     return replace_outbuf(outbuf, data);
   }
 
-  VALUE gets_preloaded_native_input(NativeInputWrapper &wrapper, const std::string &separator)
+  VALUE gets_preloaded_native_input(
+      NativeInputWrapper &wrapper,
+      const char *separator,
+      std::size_t separator_length)
   {
     const std::size_t body_length = preloaded_body_length(wrapper);
     if (wrapper.read_offset >= body_length)
@@ -273,14 +305,14 @@ namespace
     const char *data = preloaded_body_data(wrapper) + wrapper.read_offset;
     const std::size_t unread = body_length - wrapper.read_offset;
     const char *separator_position = nullptr;
-    if (separator.size() == 1)
+    if (separator_length == 1)
     {
       separator_position = static_cast<const char *>(std::memchr(data, separator[0], unread));
     }
     else
     {
       const char *end = data + unread;
-      const auto found = std::search(data, end, separator.begin(), separator.end());
+      const auto found = std::search(data, end, separator, separator + separator_length);
       if (found != end)
       {
         separator_position = found;
@@ -289,7 +321,7 @@ namespace
 
     const std::size_t length = separator_position == nullptr
                                    ? unread
-                                   : static_cast<std::size_t>(separator_position - data) + separator.size();
+                                   : static_cast<std::size_t>(separator_position - data) + separator_length;
     VALUE result = binary_string_from(data, length);
     wrapper.read_offset += length;
     return result;
@@ -342,24 +374,51 @@ namespace
   void *wait_without_gvl(void *data)
   {
     auto *context = static_cast<WaitContext *>(data);
+    context->ran = true;
     std::unique_lock<std::mutex> lock(context->state->mutex);
     if (context->predicate == WaitContext::Predicate::capacity)
     {
-      context->state->capacity_condition.wait(lock, [context]()
-                                              { return wait_predicate_locked(*context); });
+      context->state->capacity_condition.wait_for(
+          lock,
+          std::chrono::milliseconds(5),
+          [context]()
+          { return wait_predicate_locked(*context); });
     }
     else
     {
-      context->state->data_condition.wait(lock, [context]()
-                                          { return wait_predicate_locked(*context); });
+      context->state->data_condition.wait_for(
+          lock,
+          std::chrono::milliseconds(5),
+          [context]()
+          { return wait_predicate_locked(*context); });
     }
     return nullptr;
   }
 
-  void wait_for_data(Vajra::rack::NativeInputState &state)
+  struct WaitForDataContext
   {
-    WaitContext context{&state, WaitContext::Predicate::data};
-    rb_thread_call_without_gvl(wait_without_gvl, &context, nullptr, nullptr);
+    Vajra::rack::NativeInputState *state = nullptr;
+  };
+
+  VALUE protected_wait_for_data(VALUE data)
+  {
+    auto *context = reinterpret_cast<WaitForDataContext *>(data);
+    // Keep the full no-GVL boundary POD-only.  `without_gvl2` returns rather
+    // than long-jumping for a pending Ruby interrupt; rb_protect contains the
+    // explicit check below, so C++ owners in read/gets have already unwound
+    // before the Ruby jump is resumed by their entry methods.
+    WaitContext wait_context{context->state, WaitContext::Predicate::data, false};
+    rb_thread_call_without_gvl2(wait_without_gvl, &wait_context, nullptr, nullptr);
+    rb_thread_check_ints();
+    return Qnil;
+  }
+
+  int wait_for_data_interruptibly(Vajra::rack::NativeInputState *state)
+  {
+    WaitForDataContext context{state};
+    int ruby_state = 0;
+    rb_protect(protected_wait_for_data, reinterpret_cast<VALUE>(&context), &ruby_state);
+    return ruby_state;
   }
 
   void wait_for_capacity_native(Vajra::rack::NativeInputState &state)
@@ -395,6 +454,11 @@ namespace
       state.memory_chunks.shrink_to_fit();
       state.memory_base_offset = state.bytes_written;
       state.memory_bytes = 0;
+      if (state.connection_buffer_budget && state.connection_budget_bytes > 0)
+      {
+        state.connection_buffer_budget->release(state.connection_budget_bytes);
+        state.connection_budget_bytes = 0;
+      }
     }
   }
 
@@ -410,11 +474,15 @@ namespace
     }
   }
 
-  void write_locked(Vajra::rack::NativeInputState &state, const char *data, std::size_t length)
+  bool write_locked(
+      Vajra::rack::NativeInputState &state,
+      const char *data,
+      std::size_t length,
+      bool connection_budget_already_reserved = false)
   {
     if (length == 0)
     {
-      return;
+      return true;
     }
 
     if (state.spill_file != nullptr || state.memory_bytes + length > state.memory_limit)
@@ -429,12 +497,35 @@ namespace
         throw std::runtime_error("unable to write native rack.input spill file");
       }
       state.spilled_bytes += length;
+      if (connection_budget_already_reserved && state.connection_buffer_budget)
+      {
+        state.connection_buffer_budget->release(length);
+      }
     }
     else
     {
-      append_memory_locked(state, data, length);
+      if (!connection_budget_already_reserved &&
+          state.connection_buffer_budget &&
+          !state.connection_buffer_budget->try_reserve(length))
+      {
+        return false;
+      }
+      try
+      {
+        append_memory_locked(state, data, length);
+      }
+      catch (...)
+      {
+        if (!connection_budget_already_reserved && state.connection_buffer_budget)
+        {
+          state.connection_buffer_budget->release(length);
+        }
+        throw;
+      }
+      state.connection_budget_bytes += length;
     }
     state.bytes_written += length;
+    return true;
   }
 
   void preserve_and_prune_consumed_locked(Vajra::rack::NativeInputState &state)
@@ -457,7 +548,10 @@ namespace
     state.pruned_bytes += pruned;
   }
 
-  std::optional<std::string> pull_to_string_locked(Vajra::rack::NativeInputState &state, std::size_t length)
+  std::optional<std::size_t> pull_to_buffer_locked(
+      Vajra::rack::NativeInputState &state,
+      std::size_t length,
+      char *destination)
   {
     const std::size_t readable = std::min(length, available_locked(state));
     if (readable == 0)
@@ -465,25 +559,23 @@ namespace
       return std::nullopt;
     }
 
-    std::string result(readable, '\0');
-    char *dest = result.data();
-
+    std::size_t remaining = readable;
     if (state.spill_file != nullptr)
     {
       if (std::fseek(state.spill_file, static_cast<long>(state.read_offset), SEEK_SET) != 0)
       {
         throw std::runtime_error("unable to seek native rack.input spill file for read");
       }
-      const std::size_t read = std::fread(dest, 1, readable, state.spill_file);
-      if (read != readable)
-      {
-        result.resize(read);
-      }
+      const std::size_t read = std::fread(destination, 1, readable, state.spill_file);
+      state.read_offset += read;
+      state.consumed_since_last_observation += read;
+      preserve_and_prune_consumed_locked(state);
+      state.capacity_condition.notify_all();
+      return read == 0 ? std::nullopt : std::optional<std::size_t>(read);
     }
     else
     {
       std::size_t offset = state.read_offset;
-      std::size_t remaining = readable;
       std::size_t chunk_start = state.memory_base_offset;
       for (const std::string &chunk : state.memory_chunks)
       {
@@ -492,7 +584,7 @@ namespace
         {
           const std::size_t local_offset = offset - chunk_start;
           const std::size_t slice = std::min<std::size_t>(chunk.size() - local_offset, remaining);
-          std::memcpy(dest + (readable - remaining), chunk.data() + local_offset, slice);
+          std::memcpy(destination + (readable - remaining), chunk.data() + local_offset, slice);
           remaining -= slice;
           offset += slice;
           if (remaining == 0)
@@ -504,20 +596,22 @@ namespace
       }
     }
 
-    state.read_offset += result.size();
-    state.consumed_since_last_observation += result.size();
+    const std::size_t copied = readable - remaining;
+    state.read_offset += copied;
+    state.consumed_since_last_observation += copied;
     preserve_and_prune_consumed_locked(state);
     state.capacity_condition.notify_all();
-    return result;
+    return copied == 0 ? std::nullopt : std::optional<std::size_t>(copied);
   }
 
   std::optional<std::size_t> find_separator_read_length_locked(
       Vajra::rack::NativeInputState &state,
       std::size_t offset,
       std::size_t length,
-      const std::string &separator)
+      const char *separator,
+      std::size_t separator_length)
   {
-    if (length == 0 || separator.empty())
+    if (length == 0 || separator_length == 0)
     {
       return std::nullopt;
     }
@@ -540,7 +634,7 @@ namespace
         {
           return std::nullopt;
         }
-        if (separator.size() == 1)
+        if (separator_length == 1)
         {
           const void *found = std::memchr(buffer, separator[0], read);
           if (found != nullptr)
@@ -555,7 +649,7 @@ namespace
             if (buffer[index] == separator[matched])
             {
               ++matched;
-              if (matched == separator.size())
+              if (matched == separator_length)
               {
                 return scanned + index + 1;
               }
@@ -583,7 +677,7 @@ namespace
         const std::size_t local_offset = offset - chunk_start;
         const std::size_t slice = std::min<std::size_t>(chunk.size() - local_offset, remaining);
         const char *slice_data = chunk.data() + local_offset;
-        if (separator.size() == 1)
+        if (separator_length == 1)
         {
           const void *found = std::memchr(slice_data, separator[0], slice);
           if (found != nullptr)
@@ -598,7 +692,7 @@ namespace
             if (slice_data[index] == separator[matched])
             {
               ++matched;
-              if (matched == separator.size())
+              if (matched == separator_length)
               {
                 return scanned + index + 1;
               }
@@ -663,7 +757,7 @@ namespace
       {
         return read_preloaded_native_input(*wrapper, length_value, outbuf);
       }
-      auto state = wrapper->state;
+      Vajra::rack::NativeInputState *state = wrapper->state.get();
 
       if (NIL_P(length_value))
       {
@@ -671,7 +765,7 @@ namespace
         rb_enc_associate_index(result, rb_ascii8bit_encindex());
         for (;;)
         {
-          std::optional<std::string> chunk_data;
+          std::size_t requested = 0;
           bool finished = false;
           {
             std::lock_guard<std::mutex> lock(state->mutex);
@@ -680,17 +774,43 @@ namespace
             {
               throw std::runtime_error(state->error_message);
             }
-            chunk_data = pull_to_string_locked(*state, available_locked(*state));
+            requested = available_locked(*state);
             finished = state->finished;
           }
 
-          if (chunk_data)
+          bool copied = false;
+          if (requested > 0)
           {
-            VALUE chunk = binary_string_from(*chunk_data);
-            rb_str_concat(result, chunk);
+            // Allocate the Ruby destination before taking the native mutex so
+            // a GC allocation cannot block a producer holding it.  Copying
+            // then writes directly into Ruby-owned storage, avoiding the
+            // previous std::string-to-Ruby second copy.
+            VALUE chunk = binary_string_buffer(requested);
+            std::size_t copied_size = 0;
+            {
+              std::lock_guard<std::mutex> lock(state->mutex);
+              ensure_open_locked(*state);
+              if (!state->error_message.empty())
+              {
+                throw std::runtime_error(state->error_message);
+              }
+              const std::optional<std::size_t> copied_result =
+                  pull_to_buffer_locked(*state, requested, RSTRING_PTR(chunk));
+              finished = state->finished;
+              if (copied_result)
+              {
+                copied_size = *copied_result;
+                copied = true;
+              }
+            }
+            if (copied)
+            {
+              rb_str_set_len(chunk, ruby_string_length_for(copied_size));
+              rb_str_concat(result, chunk);
+            }
           }
 
-          if (finished && !chunk_data)
+          if (finished && !copied)
           {
             {
               std::lock_guard<std::mutex> lock(state->mutex);
@@ -699,9 +819,13 @@ namespace
             return replace_outbuf(outbuf, result);
           }
 
-          if (!chunk_data)
+          if (!copied)
           {
-            wait_for_data(*state);
+            const int interrupt_state = wait_for_data_interruptibly(state);
+            if (interrupt_state != 0)
+            {
+              throw RubyInterrupt(interrupt_state);
+            }
           }
         }
       }
@@ -712,7 +836,7 @@ namespace
 
       for (;;)
       {
-        std::optional<std::string> chunk_data;
+        std::size_t requested = 0;
         bool finished = false;
         {
           std::lock_guard<std::mutex> lock(state->mutex);
@@ -725,23 +849,45 @@ namespace
           const std::size_t available = available_locked(*state);
           if (available > 0)
           {
-            chunk_data = pull_to_string_locked(*state, std::min(available, total_requested - total_read));
+            requested = std::min(available, total_requested - total_read);
           }
           finished = state->finished;
         }
 
-        if (chunk_data)
+        bool copied = false;
+        if (requested > 0)
         {
-          VALUE chunk = binary_string_from(*chunk_data);
-          if (NIL_P(result))
+          VALUE chunk = binary_string_buffer(requested);
+          std::size_t copied_size = 0;
           {
-            result = chunk;
+            std::lock_guard<std::mutex> lock(state->mutex);
+            ensure_open_locked(*state);
+            if (!state->error_message.empty())
+            {
+              throw std::runtime_error(state->error_message);
+            }
+            const std::optional<std::size_t> copied_result =
+                pull_to_buffer_locked(*state, requested, RSTRING_PTR(chunk));
+            finished = state->finished;
+            if (copied_result)
+            {
+              copied_size = *copied_result;
+              copied = true;
+            }
           }
-          else
+          if (copied)
           {
-            rb_str_concat(result, chunk);
+            rb_str_set_len(chunk, ruby_string_length_for(copied_size));
+            if (NIL_P(result))
+            {
+              result = chunk;
+            }
+            else
+            {
+              rb_str_concat(result, chunk);
+            }
+            total_read += copied_size;
           }
-          total_read += chunk_data->size();
         }
 
         if (total_read == total_requested || (finished && total_read > 0))
@@ -758,9 +904,13 @@ namespace
           return replace_outbuf(outbuf, Qnil);
         }
 
-        if (!chunk_data)
+        if (!copied)
         {
-          wait_for_data(*state);
+          const int interrupt_state = wait_for_data_interruptibly(state);
+          if (interrupt_state != 0)
+          {
+            throw RubyInterrupt(interrupt_state);
+          }
         }
       }
     }
@@ -793,7 +943,15 @@ namespace
     // Keep all explicit Ruby non-local jumps in this POD-only entry frame.
     // Ruby longjmp must not cross live C++ strings/shared_ptrs.
     NativeInputWrapper *wrapper = native_input_wrapper_from(self);
-    return native_input_read_impl(length_value, outbuf, wrapper);
+    try
+    {
+      return native_input_read_impl(length_value, outbuf, wrapper);
+    }
+    catch (const RubyInterrupt &interrupt)
+    {
+      rb_jump_tag(interrupt.state());
+    }
+    return Qnil;
   }
 
   VALUE native_input_gets(int argc, VALUE *argv, VALUE self)
@@ -802,7 +960,7 @@ namespace
     {
       VALUE separator_value = Qnil;
       rb_scan_args(argc, argv, "01", &separator_value);
-      auto wrapper = native_input_wrapper_from(self);
+      NativeInputWrapper *wrapper = native_input_wrapper_from(self);
 
       if (argc == 0)
       {
@@ -815,22 +973,22 @@ namespace
       }
 
       StringValue(separator_value);
-      const std::string separator(RSTRING_PTR(separator_value), static_cast<std::size_t>(RSTRING_LEN(separator_value)));
-      if (separator.empty())
+      const std::size_t separator_length = static_cast<std::size_t>(RSTRING_LEN(separator_value));
+      if (separator_length == 0)
       {
         rb_raise(rb_eArgError, "separator cannot be empty");
       }
       if (!wrapper->state)
       {
-        return gets_preloaded_native_input(*wrapper, separator);
+        return gets_preloaded_native_input(*wrapper, RSTRING_PTR(separator_value), separator_length);
       }
 
-      auto state = wrapper->state;
+      Vajra::rack::NativeInputState *state = wrapper->state.get();
       VALUE result = Qnil;
 
       for (;;)
       {
-        std::optional<std::string> chunk_data;
+        std::size_t requested = 0;
         bool finished = false;
         bool found_separator = false;
         {
@@ -845,36 +1003,63 @@ namespace
           if (available > 0)
           {
             const std::optional<std::size_t> separator_read_length =
-                find_separator_read_length_locked(*state, state->read_offset, available, separator);
+                find_separator_read_length_locked(
+                    *state,
+                    state->read_offset,
+                    available,
+                    RSTRING_PTR(separator_value),
+                    separator_length);
             if (separator_read_length.has_value())
             {
-              chunk_data = pull_to_string_locked(*state, *separator_read_length);
+              requested = *separator_read_length;
               found_separator = true;
             }
             else
             {
-              chunk_data = pull_to_string_locked(*state, available);
+              requested = available;
             }
           }
           finished = state->finished;
         }
 
-        if (chunk_data)
+        bool copied = false;
+        if (requested > 0)
         {
-          VALUE chunk = binary_string_from(*chunk_data);
-          if (NIL_P(result))
+          VALUE chunk = binary_string_buffer(requested);
+          std::size_t copied_size = 0;
           {
-            result = chunk;
+            std::lock_guard<std::mutex> lock(state->mutex);
+            ensure_open_locked(*state);
+            if (!state->error_message.empty())
+            {
+              throw std::runtime_error(state->error_message);
+            }
+            const std::optional<std::size_t> copied_result =
+                pull_to_buffer_locked(*state, requested, RSTRING_PTR(chunk));
+            finished = state->finished;
+            if (copied_result)
+            {
+              copied_size = *copied_result;
+              copied = true;
+            }
           }
-          else
+          if (copied)
           {
-            rb_str_concat(result, chunk);
+            rb_str_set_len(chunk, ruby_string_length_for(copied_size));
+            if (NIL_P(result))
+            {
+              result = chunk;
+            }
+            else
+            {
+              rb_str_concat(result, chunk);
+            }
           }
         }
 
-        if (found_separator || (finished && !chunk_data))
+        if ((found_separator && copied) || (finished && !copied))
         {
-          if (finished && !chunk_data)
+          if (finished && !copied)
           {
             std::lock_guard<std::mutex> lock(state->mutex);
             state->eof_observed = true;
@@ -882,15 +1067,23 @@ namespace
           return result;
         }
 
-        if (!chunk_data)
+        if (!copied)
         {
-          wait_for_data(*state);
+          const int interrupt_state = wait_for_data_interruptibly(state);
+          if (interrupt_state != 0)
+          {
+            throw RubyInterrupt(interrupt_state);
+          }
         }
       }
     }
     catch (const std::runtime_error &error)
     {
       raise_io_error(error.what());
+    }
+    catch (const RubyInterrupt &interrupt)
+    {
+      rb_jump_tag(interrupt.state());
     }
     return Qnil;
   }
@@ -1038,6 +1231,7 @@ void Vajra::rack::native_input_append(NativeInputState *state, const char *data,
   std::size_t offset = 0;
   while (offset < length)
   {
+    std::shared_ptr<Vajra::response::ConnectionBufferBudget> connection_buffer_budget;
     {
       std::lock_guard<std::mutex> lock(state->mutex);
       ensure_writable_locked(*state);
@@ -1046,12 +1240,20 @@ void Vajra::rack::native_input_append(NativeInputState *state, const char *data,
       {
         const std::size_t capacity = state->high_watermark - available;
         const std::size_t slice = std::min(capacity, length - offset);
-        write_locked(*state, data + offset, slice);
-        offset += slice;
-        state->data_condition.notify_all();
-        continue;
+        if (write_locked(*state, data + offset, slice))
+        {
+          offset += slice;
+          state->data_condition.notify_all();
+          continue;
+        }
+        connection_buffer_budget = state->connection_buffer_budget;
       }
       ++state->watermark_wait_count;
+    }
+    if (connection_buffer_budget)
+    {
+      connection_buffer_budget->wait_for_capacity();
+      continue;
     }
     wait_for_capacity_native(*state);
   }
@@ -1081,8 +1283,59 @@ bool Vajra::rack::native_input_try_append(NativeInputState *state, const char *d
     return false;
   }
 
-  write_locked(*state, data, length);
+  if (!write_locked(*state, data, length))
+  {
+    return false;
+  }
   state->data_condition.notify_all();
+  return true;
+}
+
+bool Vajra::rack::native_input_try_append_reserved(NativeInputState *state, const char *data, std::size_t length)
+{
+  if (state == nullptr)
+  {
+    return false;
+  }
+
+  std::lock_guard<std::mutex> lock(state->mutex);
+  if (state->closed || state->finished || !state->error_message.empty())
+  {
+    return false;
+  }
+  const std::size_t available = available_locked(*state);
+  if (available >= state->high_watermark || length > state->high_watermark - available)
+  {
+    return false;
+  }
+  if (!write_locked(*state, data, length, state->connection_buffer_budget != nullptr))
+  {
+    return false;
+  }
+  state->data_condition.notify_all();
+  return true;
+}
+
+bool Vajra::rack::native_input_set_connection_buffer_budget(
+    NativeInputState *state,
+    std::shared_ptr<Vajra::response::ConnectionBufferBudget> connection_buffer_budget)
+{
+  if (state == nullptr || !connection_buffer_budget)
+  {
+    return state != nullptr;
+  }
+
+  const std::lock_guard<std::mutex> lock(state->mutex);
+  if (state->connection_buffer_budget)
+  {
+    return state->connection_buffer_budget == connection_buffer_budget;
+  }
+  if (!connection_buffer_budget->try_reserve(state->memory_bytes))
+  {
+    return false;
+  }
+  state->connection_buffer_budget = std::move(connection_buffer_budget);
+  state->connection_budget_bytes = state->memory_bytes;
   return true;
 }
 
@@ -1127,6 +1380,8 @@ void Vajra::rack::native_input_close(NativeInputState *state)
   {
     return;
   }
+  std::shared_ptr<Vajra::response::ConnectionBufferBudget> connection_buffer_budget;
+  std::size_t bytes_to_release = 0;
   {
     const std::lock_guard<std::mutex> lock(state->mutex);
     state->closed = true;
@@ -1135,11 +1390,18 @@ void Vajra::rack::native_input_close(NativeInputState *state)
     state->memory_chunks.shrink_to_fit();
     state->memory_base_offset = state->bytes_written;
     state->memory_bytes = 0;
+    connection_buffer_budget = state->connection_buffer_budget;
+    bytes_to_release = state->connection_budget_bytes;
+    state->connection_budget_bytes = 0;
     if (state->spill_file != nullptr)
     {
       std::fclose(state->spill_file);
       state->spill_file = nullptr;
     }
+  }
+  if (connection_buffer_budget && bytes_to_release > 0)
+  {
+    connection_buffer_budget->release(bytes_to_release);
   }
   state->data_condition.notify_all();
   state->capacity_condition.notify_all();

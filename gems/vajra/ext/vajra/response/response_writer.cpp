@@ -5,11 +5,13 @@
 
 #include "response_writer.hpp"
 
+#include "http_header_utils.hpp"
 #include "runtime/runtime_state.hpp"
 
 #include <chrono>
 #include <array>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #ifndef _WIN32
@@ -47,8 +49,33 @@ bool Vajra::response::ResponseWriter::send(Vajra::transport::Connection &connect
   const auto started_at = std::chrono::steady_clock::now();
   try
   {
+    const bool status_forbids_body = status_forbids_message_body(response.status.code);
+    if (status_forbids_body && response_has_body_stream(response) &&
+        !drain_response_body_stream(*response.body_stream, true))
+    {
+      return false;
+    }
+
     bool sent = send_response_message(connection, serializer_.serialize_head(response));
-    if (sent && !suppress_body && !response_body_empty(response))
+    if (!sent && response_has_body_stream(response))
+    {
+      // The producer may already be blocked on the bounded queue even though
+      // no body byte made it to the peer.  Head-write failure is terminal for
+      // this response and must wake it.
+      response.body_stream->cancel();
+    }
+    if (sent && response_has_body_stream(response))
+    {
+      if (suppress_body || status_forbids_body)
+      {
+        sent = drain_response_body_stream(*response.body_stream, false);
+      }
+      else
+      {
+        sent = send_response_body_stream(connection, *response.body_stream);
+      }
+    }
+    else if (sent && !suppress_body && !response_body_empty(response))
     {
       if (response_has_body_chunks(response))
       {
@@ -95,10 +122,18 @@ bool Vajra::response::ResponseWriter::send(Vajra::transport::Connection &connect
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - started_at)
             .count());
+    if (!sent && response_has_body_stream(response))
+    {
+      response.body_stream->cancel();
+    }
     return sent;
   }
   catch (const SerializationError &error)
   {
+    if (response_has_body_stream(response))
+    {
+      response.body_stream->cancel();
+    }
     log_serialization_error(error);
     return false;
   }
@@ -228,6 +263,65 @@ bool Vajra::response::ResponseWriter::send_response_bytes(
   }
 
   return true;
+}
+
+bool Vajra::response::ResponseWriter::send_response_body_stream(
+    Vajra::transport::Connection &connection,
+    ResponseBodyStream &body_stream) const
+{
+  const bool chunked = !body_stream.known_length().has_value();
+  std::array<char, ResponseBodyStream::kMaximumChunkBytes> buffer;
+  for (;;)
+  {
+    const ResponseBodyStream::ReadResult result = body_stream.read(buffer.data(), buffer.size(), true);
+    if (result.status == ResponseBodyStream::ReadStatus::data)
+    {
+      bool sent = true;
+      if (chunked)
+      {
+        char length_buffer[32];
+        const int length_size = std::snprintf(length_buffer, sizeof(length_buffer), "%zx\r\n", result.size);
+        sent = length_size > 0 && static_cast<std::size_t>(length_size) < sizeof(length_buffer) &&
+               send_response_bytes(connection, length_buffer, static_cast<std::size_t>(length_size));
+      }
+      if (!sent ||
+          !send_response_bytes(connection, buffer.data(), result.size) ||
+          (chunked && !send_response_bytes(connection, "\r\n", 2)))
+      {
+        body_stream.cancel();
+        return false;
+      }
+      continue;
+    }
+    if (result.status == ResponseBodyStream::ReadStatus::complete)
+    {
+      return !chunked || send_response_bytes(connection, "0\r\n\r\n", 5);
+    }
+
+    body_stream.cancel();
+    return false;
+  }
+}
+
+bool Vajra::response::ResponseWriter::drain_response_body_stream(
+    ResponseBodyStream &body_stream,
+    bool reject_nonempty_body) const
+{
+  std::array<char, ResponseBodyStream::kMaximumChunkBytes> buffer;
+  for (;;)
+  {
+    const ResponseBodyStream::ReadResult result = body_stream.read(buffer.data(), buffer.size(), true);
+    if (result.status == ResponseBodyStream::ReadStatus::data)
+    {
+      if (reject_nonempty_body)
+      {
+        body_stream.cancel();
+        return false;
+      }
+      continue;
+    }
+    return result.status == ResponseBodyStream::ReadStatus::complete;
+  }
 }
 
 const char *Vajra::response::ResponseWriter::request_head_failure_label(

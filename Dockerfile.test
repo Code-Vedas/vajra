@@ -3,13 +3,13 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-FROM golang:1.25-bookworm AS h2spec
+FROM golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437 AS h2spec
 
-RUN go install github.com/summerwind/h2spec/cmd/h2spec@latest
+RUN go install github.com/summerwind/h2spec/cmd/h2spec@v2.6.0
 
-FROM grafana/k6:latest AS k6
+FROM grafana/k6:latest@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec AS k6
 
-FROM ruby:3.4.3-bookworm
+FROM ruby:3.4.10-bookworm@sha256:56e0c9fdbf64d090e45072d32f0d3be7f2e392e733444f7d176a50881e6c325a
 
 ENV DEBIAN_FRONTEND=noninteractive
 

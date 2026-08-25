@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Copyright Codevedas Inc. 2025-present
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+set -euo pipefail
+IFS=$'\n\t'
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BUILD_DIR="$ROOT_DIR/tmp/fuzz-native-parsers"
+RUN_CORPUS_ROOT="$BUILD_DIR/corpus"
+FUZZ_RUNS="${FUZZ_RUNS:-1000}"
+FUZZ_CC="${VAJRA_FUZZ_CC:-clang}"
+FUZZ_CXX="${VAJRA_FUZZ_CXX:-clang++}"
+
+fuzzer_runtime=$("$FUZZ_CXX" -print-file-name=libclang_rt.fuzzer_osx.a)
+if [ "$(uname -s)" = "Darwin" ] && [ ! -f "$fuzzer_runtime" ]; then
+  echo "Skipping libFuzzer: $FUZZ_CXX lacks libclang_rt.fuzzer_osx.a" >&2
+  exit 0
+fi
+
+rm -rf "$BUILD_DIR"
+CC="$FUZZ_CC" CXX="$FUZZ_CXX" cmake \
+  -S "$ROOT_DIR/spec/cpp" \
+  -B "$BUILD_DIR" \
+  -DVAJRA_BUILD_FUZZERS=ON
+
+targets=(
+  vajra_http1_request_head_fuzz
+  vajra_http1_body_framing_fuzz
+  vajra_http1_chunked_body_fuzz
+  vajra_h2c_upgrade_fuzz
+  vajra_http2_frame_precheck_fuzz
+  vajra_response_header_fuzz
+  vajra_traceparent_fuzz
+)
+cmake --build "$BUILD_DIR" --target "${targets[@]}"
+
+for target in "${targets[@]}"; do
+  corpus="${target#vajra_}"
+  corpus="${corpus%_fuzz}"
+  source_corpus="$ROOT_DIR/spec/fuzz/corpus/$corpus"
+  run_corpus="$RUN_CORPUS_ROOT/$corpus"
+  mkdir -p "$run_corpus"
+  cp -R "$source_corpus/." "$run_corpus/"
+  "$BUILD_DIR/$target" \
+    -runs="$FUZZ_RUNS" \
+    -max_len=65536 \
+    "$run_corpus"
+done

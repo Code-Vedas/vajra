@@ -11,6 +11,7 @@
 #include "response_serializer.hpp"
 #include "transport/connection.hpp"
 
+#include <cstddef>
 #include <string>
 
 namespace Vajra
@@ -35,6 +36,8 @@ namespace Vajra
       bool send_response_message(platform::SocketHandle client_fd, const std::string &response_message) const;
       bool send_response_message(Vajra::transport::Connection &connection, const std::string &response_message) const;
       bool send_response_bytes(Vajra::transport::Connection &connection, const char *data, std::size_t length) const;
+      bool send_response_body_stream(Vajra::transport::Connection &connection, ResponseBodyStream &body_stream) const;
+      bool drain_response_body_stream(ResponseBodyStream &body_stream, bool reject_nonempty_body) const;
       const char *request_head_failure_label(Vajra::request::HeadFailureKind kind) const;
       void log_serialization_error(const SerializationError &error) const;
 

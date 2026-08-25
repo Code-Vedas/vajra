@@ -7,6 +7,7 @@
 
 #include "rack/http2_stream.hpp"
 #include "rack/native_input.hpp"
+#include "response/http_header_utils.hpp"
 #include "transport/tls_connection.hpp"
 #include "ruby/encoding.h"
 #include "ruby/thread.h"
@@ -16,11 +17,14 @@
 #include <stdexcept>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <exception>
+#include <functional>
 #include <mutex>
+#include <optional>
 #include <utility>
-#include <shared_mutex>
 #include <unordered_map>
 #include <openssl/err.h>
 #ifndef _WIN32
@@ -53,7 +57,10 @@ namespace
   ID id_close;
   ID id_each;
   ID id_for_fd;
+  ID id_equal;
+  ID id_instance_method;
   ID id_to_s;
+  ID id_unbind;
   VALUE rb_key_content_length = Qnil;
   VALUE rb_key_content_type = Qnil;
   VALUE rb_key_path_info = Qnil;
@@ -72,6 +79,7 @@ namespace
   VALUE rb_value_rack_version = Qnil;
   VALUE rb_cNativeHijack = Qnil;
   VALUE rb_cNativeTlsHijackIO = Qnil;
+  VALUE rb_array_each_method = Qnil;
   VALUE rb_key_remote_addr = Qnil;
   VALUE rb_key_remote_port = Qnil;
   VALUE rb_key_request_method = Qnil;
@@ -81,9 +89,11 @@ namespace
   VALUE rb_key_server_protocol = Qnil;
   std::atomic<bool> rack_multithread{false};
 
-  std::shared_mutex header_cache_mutex;
+  // This map contains only the fixed vocabulary installed at extension load.
+  // Request supplied header names must never be retained here: keeping Ruby
+  // keys alive for each distinct HTTP_* name turns header diversity into a
+  // process-lifetime memory allocation.
   std::unordered_map<std::string, VALUE> header_key_cache;
-  constexpr std::size_t kResponseBodyMemoryBytes = 256 * 1024;
 
   struct HeaderCollectionContext
   {
@@ -94,9 +104,16 @@ namespace
   struct BodyCollectionContext
   {
     std::vector<std::string> chunks;
-    std::shared_ptr<Vajra::response::ResponseBodyFile> body_file;
-    std::size_t body_size = 0;
     std::string error_message;
+  };
+
+  struct BodyStreamingContext
+  {
+    std::shared_ptr<Vajra::response::ResponseBodyStream> body_stream;
+    std::string error_message;
+    std::function<void()> response_ready_callback;
+    bool response_ready_published = false;
+    bool cancelled = false;
   };
 
   struct NativeHijackWrapper
@@ -128,6 +145,29 @@ namespace
   {
     VALUE body;
     BodyCollectionContext *collection;
+  };
+
+  struct StreamingBodyBlockCallContext
+  {
+    VALUE body;
+    BodyStreamingContext *streaming;
+  };
+
+  struct ResponseBodyPushContext
+  {
+    Vajra::response::ResponseBodyStream *body_stream = nullptr;
+    const char *data = nullptr;
+    std::size_t size = 0;
+    std::size_t accepted_bytes = 0;
+    bool stopped = false;
+    bool ran = false;
+    std::exception_ptr *exception = nullptr;
+  };
+
+  struct BuiltinEachCheckContext
+  {
+    VALUE body = Qnil;
+    bool trusted = false;
   };
 
   std::string ruby_string_value(VALUE value)
@@ -827,28 +867,16 @@ namespace
       return rb_key_content_length;
     }
 
+    const auto it = header_key_cache.find(key);
+    if (it != header_key_cache.end())
     {
-      std::shared_lock<std::shared_mutex> lock(header_cache_mutex);
-      auto it = header_key_cache.find(key);
-      if (it != header_key_cache.end())
-      {
-        return it->second;
-      }
+      return it->second;
     }
 
-    std::string http_key = "HTTP_" + key;
-    VALUE ruby_key = frozen_ruby_key(http_key.c_str());
-
-    {
-      std::unique_lock<std::shared_mutex> lock(header_cache_mutex);
-      auto it = header_key_cache.find(key);
-      if (it != header_key_cache.end())
-      {
-        return it->second;
-      }
-      header_key_cache.emplace(key, ruby_key);
-    }
-    return ruby_key;
+    const std::string http_key = "HTTP_" + key;
+    // Preserve the immutable Rack env key contract without registering a
+    // process-lifetime GC root; the request env owns this value.
+    return rb_obj_freeze(rb_str_new(http_key.data(), ruby_string_length_for(http_key)));
   }
 
   VALUE protected_exception_message(VALUE data)
@@ -859,6 +887,7 @@ namespace
 
   VALUE rack_header_each_callback(VALUE yielded, VALUE data, int argc, const VALUE *argv, VALUE blockarg);
   VALUE rack_body_each_callback(VALUE yielded, VALUE data, int argc, const VALUE *argv, VALUE blockarg);
+  VALUE rack_streaming_body_each_callback(VALUE yielded, VALUE data, int argc, const VALUE *argv, VALUE blockarg);
   void append_response_body_chunk(BodyCollectionContext &context, std::string chunk);
 
   VALUE protected_header_each(VALUE data)
@@ -885,6 +914,18 @@ namespace
         reinterpret_cast<VALUE>(context->collection));
   }
 
+  VALUE protected_streaming_body_each(VALUE data)
+  {
+    auto *context = reinterpret_cast<StreamingBodyBlockCallContext *>(data);
+    return rb_block_call(
+        context->body,
+        id_each,
+        0,
+        nullptr,
+        rack_streaming_body_each_callback,
+        reinterpret_cast<VALUE>(context->streaming));
+  }
+
   VALUE protected_close_rack_body(VALUE data)
   {
     const VALUE body = data;
@@ -894,6 +935,31 @@ namespace
     }
 
     return rb_funcallv(body, id_close, 0, nullptr);
+  }
+
+  VALUE protected_builtin_each_check(VALUE data)
+  {
+    auto *context = reinterpret_cast<BuiltinEachCheckContext *>(data);
+    const VALUE current_method = rb_obj_method(context->body, ID2SYM(id_each));
+    const VALUE current_unbound_method = rb_funcallv(current_method, id_unbind, 0, nullptr);
+    context->trusted = RTEST(rb_funcallv(current_unbound_method, id_equal, 1, &rb_array_each_method));
+    return Qnil;
+  }
+
+  bool array_uses_original_core_each(VALUE body)
+  {
+    BuiltinEachCheckContext context{body, false};
+    int state = 0;
+    rb_protect(protected_builtin_each_check, reinterpret_cast<VALUE>(&context), &state);
+    if (state != 0)
+    {
+      // An application may make method lookup exotic.  It is safe to fall
+      // back to transport framing, whereas guessing a fixed byte count is
+      // not.
+      rb_set_errinfo(Qnil);
+      return false;
+    }
+    return context.trusted;
   }
 
   VALUE rack_header_each_callback(VALUE yielded, VALUE data, int argc, const VALUE *argv, VALUE)
@@ -960,54 +1026,151 @@ namespace
     return Qnil;
   }
 
-  std::shared_ptr<Vajra::response::ResponseBodyFile> open_response_body_file()
+  void *push_response_body_without_gvl(void *data)
   {
-    FILE *file = std::tmpfile();
-    if (file == nullptr)
+    auto *context = static_cast<ResponseBodyPushContext *>(data);
+    context->ran = true;
+    try
     {
-      throw std::runtime_error(std::string("unable to create response body spill file: ") + std::strerror(errno));
+      const Vajra::response::ResponseBodyStream::PushResult result =
+          context->body_stream->push_for(
+              context->data,
+              context->size,
+              std::chrono::milliseconds(5));
+      context->accepted_bytes = result.size;
+      context->stopped = result.status == Vajra::response::ResponseBodyStream::PushStatus::stopped;
     }
-    return std::make_shared<Vajra::response::ResponseBodyFile>(file);
+    catch (...)
+    {
+      if (context->exception != nullptr)
+      {
+        *context->exception = std::current_exception();
+      }
+      context->stopped = true;
+    }
+    return nullptr;
   }
 
-  void write_response_body_file(
-      const std::shared_ptr<Vajra::response::ResponseBodyFile> &body_file,
-      const char *data,
-      std::size_t length)
+  VALUE rack_streaming_body_each_callback(VALUE yielded, VALUE data, int, const VALUE *, VALUE)
   {
-    if (length == 0)
+    auto *context = reinterpret_cast<BodyStreamingContext *>(data);
+    if (context->cancelled || context->body_stream->cancelled())
     {
-      return;
+      context->cancelled = true;
+      rb_iter_break();
+      return Qnil;
     }
-    if (std::fwrite(data, 1, length, body_file->file) != length)
+
+    try
     {
-      throw std::runtime_error("unable to write response body spill file");
+      // Rack body chunks are byte strings.  Header values intentionally use
+      // #to_s normalization, but doing that here would turn a malformed body
+      // (for example an Integer) into wire bytes and conceal the Rack error.
+      VALUE chunk = yielded;
+      if (RB_TYPE_P(chunk, T_STRING) == 0)
+      {
+        throw std::runtime_error("Rack execution returned a non-string response body chunk");
+      }
+
+      const std::size_t chunk_length = static_cast<std::size_t>(RSTRING_LEN(chunk));
+      // For an HTTP/1 direct execution, response-ready waits until the first
+      // non-empty body byte.  This retains Rack's pre-commit error behavior:
+      // an each/close failure before payload can still become a 500.  HTTP/2
+      // explicitly publishes before #each so a peer reset can cancel a
+      // producer that waits before its first yield.
+      if (chunk_length > 0 && !context->response_ready_published && context->response_ready_callback)
+      {
+        context->response_ready_callback();
+        context->response_ready_published = true;
+      }
+      bool stopped = false;
+      for (std::size_t offset = 0; offset < chunk_length;)
+      {
+        // Copy before releasing the GVL.  The no-GVL context is POD and owns no
+        // Ruby value: Thread#raise can therefore resume through rb_protect
+        // without leaving a registered stack root or a C++ destructor behind.
+        const std::size_t current_length = static_cast<std::size_t>(RSTRING_LEN(chunk));
+        if (current_length < offset)
+        {
+          throw std::runtime_error("Rack response body chunk was mutated while streaming");
+        }
+        const std::size_t byte_count = std::min(
+            std::min(
+                Vajra::response::ResponseBodyStream::kMaximumChunkBytes,
+                chunk_length - offset),
+            current_length - offset);
+        if (byte_count == 0)
+        {
+          throw std::runtime_error("Rack response body chunk was mutated while streaming");
+        }
+
+        char native_copy[Vajra::response::ResponseBodyStream::kMaximumChunkBytes];
+        std::memcpy(native_copy, RSTRING_PTR(chunk) + offset, byte_count);
+        bool interrupted = false;
+        {
+          std::exception_ptr push_exception;
+          ResponseBodyPushContext push_context{
+              context->body_stream.get(),
+              native_copy,
+              byte_count,
+              0,
+              false,
+              false,
+              &push_exception};
+          // A condition-variable wait is not IO.  Return after a short
+          // predicate-aware wait so Ruby interrupts are observed at a safe
+          // boundary; rb_thread_call_without_gvl2 does not long-jump through
+          // the native producer state on reacquire.
+          rb_thread_call_without_gvl2(push_response_body_without_gvl, &push_context, nullptr, nullptr);
+          if (push_exception)
+          {
+            std::rethrow_exception(push_exception);
+          }
+          interrupted = !push_context.ran;
+          if (!interrupted && push_context.stopped)
+          {
+            context->cancelled = context->body_stream->cancelled();
+            if (!context->cancelled)
+            {
+              context->error_message = "response body stream stopped before Rack body completed";
+              context->body_stream->fail(context->error_message);
+            }
+            stopped = true;
+          }
+          else if (!interrupted)
+          {
+            offset += push_context.accepted_bytes;
+          }
+        }
+        if (interrupted)
+        {
+          // `push_exception` and the no-GVL context have been destroyed
+          // before this Ruby long-jump boundary.
+          rb_thread_check_ints();
+          return Qnil;
+        }
+        if (stopped)
+        {
+          break;
+        }
+      }
+      if (stopped)
+      {
+        rb_iter_break();
+      }
     }
-    body_file->size += length;
+    catch (const std::exception &error)
+    {
+      context->error_message = error.what();
+      context->body_stream->fail(context->error_message);
+      rb_iter_break();
+    }
+    return Qnil;
   }
 
   void append_response_body_chunk(BodyCollectionContext &context, std::string chunk)
   {
-    if (!context.body_file && context.body_size + chunk.size() > kResponseBodyMemoryBytes)
-    {
-      context.body_file = open_response_body_file();
-      for (const std::string &existing : context.chunks)
-      {
-        write_response_body_file(context.body_file, existing.data(), existing.size());
-      }
-      context.chunks.clear();
-      context.chunks.shrink_to_fit();
-    }
-
-    if (context.body_file)
-    {
-      write_response_body_file(context.body_file, chunk.data(), chunk.size());
-    }
-    else
-    {
-      context.chunks.push_back(std::move(chunk));
-    }
-    context.body_size += chunk.size();
+    context.chunks.push_back(std::move(chunk));
   }
 
   void close_rack_body(VALUE body)
@@ -1056,6 +1219,115 @@ namespace
       append_response_body_chunk(context, ruby_string_value(rb_ary_entry(body, index)));
     }
     return context;
+  }
+
+  std::optional<std::size_t> known_rack_response_body_length(VALUE body)
+  {
+    // A Rack body is consumed through #each below.  A subclass, singleton
+    // method, or a redefinition/prepend of Array#each can legally yield bytes
+    // unrelated to the backing array.  Only an exact Array whose resolved
+    // #each still matches the core method captured during initialization is
+    // safe to pre-size.
+    if (TYPE(body) != T_ARRAY || rb_obj_class(body) != rb_cArray)
+    {
+      return std::nullopt;
+    }
+    if (!array_uses_original_core_each(body))
+    {
+      return std::nullopt;
+    }
+
+    std::size_t length = 0;
+    for (long index = 0; index < RARRAY_LEN(body); ++index)
+    {
+      VALUE chunk = rb_ary_entry(body, index);
+      if (RB_TYPE_P(chunk, T_STRING) == 0)
+      {
+        return std::nullopt;
+      }
+      const std::size_t chunk_length = static_cast<std::size_t>(RSTRING_LEN(chunk));
+      if (chunk_length > std::numeric_limits<std::size_t>::max() - length)
+      {
+        return std::nullopt;
+      }
+      length += chunk_length;
+    }
+    return length;
+  }
+
+  std::optional<std::size_t> parse_rack_content_length(const std::string &value)
+  {
+    std::size_t begin = 0;
+    while (begin < value.size() && (value[begin] == ' ' || value[begin] == '\t'))
+    {
+      ++begin;
+    }
+    std::size_t end = value.size();
+    while (end > begin && (value[end - 1] == ' ' || value[end - 1] == '\t'))
+    {
+      --end;
+    }
+    if (begin == end)
+    {
+      return std::nullopt;
+    }
+
+    std::size_t length = 0;
+    for (std::size_t index = begin; index < end; ++index)
+    {
+      const char character = value[index];
+      if (character < '0' || character > '9')
+      {
+        return std::nullopt;
+      }
+      const std::size_t digit = static_cast<std::size_t>(character - '0');
+      if (length > (std::numeric_limits<std::size_t>::max() - digit) / 10)
+      {
+        return std::nullopt;
+      }
+      length = length * 10 + digit;
+    }
+    return length;
+  }
+
+  std::optional<std::size_t> trusted_rack_response_body_length(
+      VALUE body,
+      const std::vector<Vajra::response::Header> &headers)
+  {
+    const std::optional<std::size_t> observed_length = known_rack_response_body_length(body);
+    if (!observed_length)
+    {
+      return std::nullopt;
+    }
+
+    bool saw_content_length = false;
+    for (const Vajra::response::Header &header : headers)
+    {
+      if (Vajra::response::header_name_equals(header.name, "transfer-encoding"))
+      {
+        // A live source must not reinterpret application transfer coding as a
+        // fixed byte count.  The HTTP writer will choose its own framing.
+        return std::nullopt;
+      }
+      if (!Vajra::response::header_name_equals(header.name, "content-length"))
+      {
+        continue;
+      }
+
+      const std::optional<std::size_t> declared_length = parse_rack_content_length(header.value);
+      if (!declared_length || *declared_length != *observed_length || saw_content_length)
+      {
+        return std::nullopt;
+      }
+      saw_content_length = true;
+    }
+
+    // A built-in Array body supplies a finite current byte count.  The stream
+    // enforces it on every producer push and turns later mutation/overflow
+    // into a closed HTTP/1 response or an HTTP/2 stream error.  Overridden
+    // arrays and arbitrary enumerables remain unknown-length and therefore
+    // use transport framing.
+    return observed_length;
   }
 
   std::string reason_phrase_for_status(int status_code)
@@ -1233,6 +1505,7 @@ void Vajra::rack::RubyExecutionBridge::initialize()
   rb_global_variable(&rb_value_rack_version);
   rb_global_variable(&rb_cNativeHijack);
   rb_global_variable(&rb_cNativeTlsHijackIO);
+  rb_global_variable(&rb_array_each_method);
   rb_global_variable(&rb_key_remote_addr);
   rb_global_variable(&rb_key_remote_port);
   rb_global_variable(&rb_key_request_method);
@@ -1244,8 +1517,15 @@ void Vajra::rack::RubyExecutionBridge::initialize()
   id_call = rb_intern("call");
   id_close = rb_intern("close");
   id_each = rb_intern("each");
+  id_equal = rb_intern("==");
   id_for_fd = rb_intern("for_fd");
+  id_instance_method = rb_intern("instance_method");
   id_to_s = rb_intern("to_s");
+  id_unbind = rb_intern("unbind");
+  {
+    const VALUE name = ID2SYM(id_each);
+    rb_array_each_method = rb_funcallv(rb_cArray, id_instance_method, 1, &name);
+  }
   rb_key_content_length = frozen_ruby_key("CONTENT_LENGTH");
   rb_key_content_type = frozen_ruby_key("CONTENT_TYPE");
   rb_key_path_info = frozen_ruby_key("PATH_INFO");
@@ -1296,7 +1576,6 @@ void Vajra::rack::RubyExecutionBridge::initialize()
       "TRANSFER_ENCODING", "UPGRADE", "USER_AGENT", "VIA", "WARNING", "X_FORWARDED_FOR",
       "X_FORWARDED_HOST", "X_FORWARDED_PROTO", "X_REAL_IP", "X_REQUEST_ID"};
 
-  std::unique_lock<std::shared_mutex> lock(header_cache_mutex);
   for (const char *header : common_headers)
   {
     std::string http_key = "HTTP_";
@@ -1473,7 +1752,16 @@ Vajra::response::Response Vajra::rack::RackResponseHandler::response_from_normal
     response_headers.push_back(response_header_from_ruby(rb_ary_entry(headers, index)));
   }
 
-  const int status_code = status_code_from_ruby(status);
+  int status_code = 0;
+  try
+  {
+    status_code = status_code_from_ruby(status);
+  }
+  catch (...)
+  {
+    close_rack_body(body);
+    throw;
+  }
   BodyCollectionContext response_body = response_body_from_ruby(body);
 
   Vajra::response::Response response{
@@ -1482,11 +1770,13 @@ Vajra::response::Response Vajra::rack::RackResponseHandler::response_from_normal
       "",
       Vajra::response::ConnectionBehavior::close};
   response.body_chunks = std::move(response_body.chunks);
-  response.body_file = std::move(response_body.body_file);
   return response;
 }
 
-Vajra::response::Response Vajra::rack::RackResponseHandler::response_from_rack_result(VALUE value)
+Vajra::response::Response Vajra::rack::RackResponseHandler::response_from_rack_result_head(
+    VALUE value,
+    VALUE *body_out,
+    std::shared_ptr<Vajra::response::ConnectionBufferBudget> connection_buffer_budget)
 {
   if (TYPE(value) != T_ARRAY || RARRAY_LEN(value) != 3)
   {
@@ -1512,7 +1802,129 @@ Vajra::response::Response Vajra::rack::RackResponseHandler::response_from_rack_r
     throw std::runtime_error(header_context.error_message);
   }
 
+  int status_code = 0;
+  try
+  {
+    status_code = status_code_from_ruby(status);
+  }
+  catch (...)
+  {
+    close_rack_body(body);
+    throw;
+  }
+  Vajra::response::Response response{
+      Vajra::response::Status{status_code, reason_phrase_for_status(status_code)},
+      std::move(header_context.headers),
+      "",
+      Vajra::response::ConnectionBehavior::close};
+  response.body_stream = std::make_shared<Vajra::response::ResponseBodyStream>(
+      Vajra::response::ResponseBodyStream::kDefaultCapacityBytes,
+      trusted_rack_response_body_length(body, response.headers),
+      std::move(connection_buffer_budget));
+  if (body_out != nullptr)
+  {
+    *body_out = body;
+  }
+  return response;
+}
+
+void Vajra::rack::RackResponseHandler::stream_rack_body(
+    VALUE body,
+    const std::shared_ptr<Vajra::response::ResponseBodyStream> &body_stream,
+    std::function<void()> response_ready_callback,
+    bool publish_response_before_each)
+{
+  if (!body_stream)
+  {
+    throw std::runtime_error("Rack response body stream is missing");
+  }
+
+  BodyStreamingContext streaming_context{
+      body_stream,
+      "",
+      std::move(response_ready_callback),
+      false,
+      false};
+
+  // The Rack result has already been validated into a response head and owns
+  // its bounded source.  Hand that source to the transport before invoking
+  // body.each: a producer is allowed to wait before its first yield, and an
+  // HTTP/2 peer/session cancellation must be able to wake that producer in
+  // that state.  This publication is deliberately not producer completion;
+  // mark_producer_finished() remains below, after Rack close has returned.
+  if (publish_response_before_each && streaming_context.response_ready_callback)
+  {
+    streaming_context.response_ready_callback();
+    streaming_context.response_ready_published = true;
+  }
+
+  int state = 0;
+  if (body_stream->cancelled())
+  {
+    streaming_context.cancelled = true;
+  }
+  else
+  {
+    StreamingBodyBlockCallContext body_block_context{body, &streaming_context};
+    rb_protect(protected_streaming_body_each, reinterpret_cast<VALUE>(&body_block_context), &state);
+  }
+
+  std::string error_message;
+  if (state != 0 && !streaming_context.cancelled && !body_stream->cancelled())
+  {
+    error_message = RubyExecutionBridge::exception_message(rb_errinfo());
+    rb_set_errinfo(Qnil);
+  }
+  if (error_message.empty() && !streaming_context.error_message.empty())
+  {
+    error_message = streaming_context.error_message;
+  }
+
+  state = 0;
+  rb_protect(protected_close_rack_body, body, &state);
+  if (state != 0 && !streaming_context.cancelled && !body_stream->cancelled())
+  {
+    error_message = RubyExecutionBridge::exception_message(rb_errinfo());
+    rb_set_errinfo(Qnil);
+  }
+
+  if (body_stream->cancelled())
+  {
+    // A consumer cancellation unblocks body.each before the producer has run
+    // Rack's close callback.  Publish the completion only after close so the
+    // scheduler does not admit another request onto the same Ruby worker too
+    // early.
+    body_stream->mark_producer_finished();
+    return;
+  }
+  if (!error_message.empty())
+  {
+    if (!streaming_context.response_ready_published)
+    {
+      // No response was handed off, but keep producer completion semantics
+      // uniform: body.close has run and admission may now be released.
+      body_stream->mark_producer_finished();
+      throw std::runtime_error(error_message);
+    }
+    body_stream->fail(std::move(error_message));
+    // fail() describes wire state only.  It must not imply body.close has
+    // returned: a Rack close hook may still block while this session owns its
+    // execution admission.
+    body_stream->mark_producer_finished();
+    return;
+  }
+  body_stream->finish();
+  body_stream->mark_producer_finished();
+}
+
+Vajra::response::Response Vajra::rack::RackResponseHandler::response_from_rack_result(VALUE value)
+{
+  VALUE body = Qnil;
+  Vajra::response::Response response = response_from_rack_result_head(value, &body);
+  response.body_stream.reset();
+
   BodyCollectionContext body_context;
+  int state = 0;
   try
   {
     BodyBlockCallContext body_block_context{body, &body_context};
@@ -1520,7 +1932,6 @@ Vajra::response::Response Vajra::rack::RackResponseHandler::response_from_rack_r
     rb_protect(protected_body_each, reinterpret_cast<VALUE>(&body_block_context), &state);
     if (state != 0)
     {
-      close_rack_body(body);
       throw RubyJumpTag(state);
     }
   }
@@ -1535,14 +1946,7 @@ Vajra::response::Response Vajra::rack::RackResponseHandler::response_from_rack_r
     throw std::runtime_error(body_context.error_message);
   }
 
-  const int status_code = status_code_from_ruby(status);
-  Vajra::response::Response response{
-      Vajra::response::Status{status_code, reason_phrase_for_status(status_code)},
-      std::move(header_context.headers),
-      "",
-      Vajra::response::ConnectionBehavior::close};
   response.body_chunks = std::move(body_context.chunks);
-  response.body_file = std::move(body_context.body_file);
   return response;
 }
 

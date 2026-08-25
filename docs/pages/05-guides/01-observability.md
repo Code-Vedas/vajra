@@ -54,7 +54,7 @@ Vajra.configure do |config|
 end
 ```
 
-The stats endpoint returns JSON with master state, tracing availability, scheduler pressure, worker health, worker lifecycle, request timing, execution counts, and restart/replacement counters.
+The stats endpoint returns JSON with master state, tracing availability, scheduler pressure, worker health, worker lifecycle, request timing, execution counts, HTTP/2 resource ledgers, and restart/replacement counters.
 
 The metrics endpoint returns Prometheus text exposition. It includes runtime liveness, active connections, active/idle executions, accepts, dispatches, completed requests, request timing totals, local queue depth, worker lifecycle/health states, replacement counters, timeout escalations, and unexpected exits.
 
@@ -113,10 +113,13 @@ Stats top-level fields:
 | `socket_queue_capacity` | Configured pending dispatch capacity.    |
 | `workers`               | Per-worker runtime state array.          |
 | `profiling`             | Cumulative timing and dispatch counters. |
+| `http2_resources`       | Aggregate of the worker-owned H2 queue ledgers and admission counters. |
 | `native_observability`  | Native request/span event counters.      |
 | `health_counts`         | Worker count by health state.            |
 
 Worker fields include `worker_index`, `pid`, `rss_bytes`, connection and execution counts, queue depth, availability, lifecycle/health/recovery names, accept/dispatch/receive counters, completed requests, replacement counters, timeout escalation counters, unexpected exit counters, recovery timing, and terminal replacement failure state.
+
+HTTP/2 tracked-buffer fields cover Vajra-owned queues, not total connection memory or RSS. They exclude nghttp2/HPACK state, TLS and kernel buffers, allocator overhead, and the session receive scratch buffer. `tracked_buffer_peak_bytes` is a per-worker historical peak; the top-level value sums those worker peaks and is not a simultaneous global peak. `buffer_budget_rejections` counts failed reservation attempts, not rejected streams or connections.
 
 Prometheus metric examples:
 
@@ -156,6 +159,11 @@ Metric catalog:
 | `vajra_worker_http2_execution_drain_nanoseconds_total`      | Cumulative HTTP/2 execution drain time.     |
 | `vajra_worker_http2_response_submit_nanoseconds_total`      | Cumulative HTTP/2 response submission time. |
 | `vajra_worker_http2_session_send_nanoseconds_total`         | Cumulative HTTP/2 session send time.        |
+| `vajra_worker_http2_tracked_buffer_bytes`                   | Current Vajra-owned H2 queued bytes.        |
+| `vajra_worker_http2_tracked_buffer_peak_bytes`              | Historical peak of those queued bytes.      |
+| `vajra_worker_http2_buffer_budget_rejections_total`         | Failed H2 ledger reservation attempts.      |
+| `vajra_worker_http2_execution_admission_depth`              | Current H2 execution/producers held for admission. |
+| `vajra_worker_http2_execution_admission_rejections_total`   | H2 execution admission rejections.         |
 | `vajra_worker_local_queue_depth`                            | Current worker-local queue depth.           |
 | `vajra_worker_lifecycle_state`                              | Current worker lifecycle state label.       |
 | `vajra_worker_health_state`                                 | Current worker health state label.          |

@@ -495,6 +495,8 @@ namespace
     writer.scalar<std::uint8_t>(config.trace_otel_owner ? 1 : 0);
     writer.string(config.trace_resource_attributes);
     writer.string(config.trace_propagators);
+    writer.scalar<std::uint64_t>(config.http2_max_pending_executions);
+    writer.scalar<std::uint64_t>(config.http2_max_connection_buffer_bytes);
     return writer.finish();
   }
 
@@ -542,7 +544,9 @@ namespace
         reader.string(),
         reader.scalar<std::uint8_t>() != 0,
         reader.string(),
-        reader.string()};
+        reader.string(),
+        static_cast<std::size_t>(reader.scalar<std::uint64_t>()),
+        static_cast<std::size_t>(reader.scalar<std::uint64_t>())};
     reader.ensure_complete();
     return config;
   }
@@ -566,7 +570,7 @@ namespace
                                  config.first_data_timeout_seconds,
                                  static_cast<int>(config.request_timeout_seconds)})
                            : nullptr;
-    const Vajra::request::Http2Config http2_config{
+    const Vajra::request::Http2Config http2_config = Vajra::request::Http2Config::from_runtime_options(
         config.http2_max_concurrent_streams,
         config.http2_initial_window_size,
         config.http2_max_frame_size,
@@ -574,7 +578,8 @@ namespace
         config.max_request_head_bytes,
         config.max_request_body_bytes,
         config.max_keepalive_requests,
-        config.socket_queue_capacity};
+        config.http2_max_pending_executions,
+        config.http2_max_connection_buffer_bytes);
     return std::make_shared<Vajra::Server>(
         config.port,
         config.host,

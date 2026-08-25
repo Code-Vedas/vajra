@@ -9,6 +9,10 @@ require 'json'
 require_relative 'support'
 
 RSpec.describe 'Vajra Rack environment integration', :e2e, :integration do
+  def read_http1_stream_until(socket, raw_response, marker)
+    Timeout.timeout(5) { raw_response << socket.readpartial(4096) until raw_response.include?(marker) }
+  end
+
   it 'translates native request and connection state into Rack env fields' do
     result = rack_env_request_result(
       request:
@@ -128,7 +132,10 @@ RSpec.describe 'Vajra Rack environment integration', :e2e, :integration do
     'body.close' => <<~RUBY
       body = Class.new do
         def each
-          yield "ignored"
+          # A close failure before a payload is committed can still become a
+          # normal 500 response.  Once a chunk is committed, the dedicated
+          # streaming regression below verifies that the connection is
+          # aborted instead.
         end
 
         def close
@@ -325,6 +332,85 @@ RSpec.describe 'Vajra Rack environment integration', :e2e, :integration do
     expect(snapshot).to eq(
       'encoding' => 'ASCII-8BIT',
       'bytes' => [128, 255]
+    )
+  end
+
+  it 'does not retain arbitrary Rack env header keys after requests finish' do
+    script = <<~RUBY
+      require "objspace"
+      require "vajra"
+
+      Vajra::Internal::RackExecution.install!(
+        lambda do |rack_env|
+          if rack_env.fetch("PATH_INFO") == "/string-count"
+            GC.start(full_mark: true, immediate_sweep: true)
+            [200, { "Content-Type" => "text/plain" }, [ObjectSpace.each_object(String).count.to_s]]
+          else
+            [200, { "Content-Type" => "text/plain" }, [rack_env.fetch("PATH_INFO")]]
+          end
+        end
+      )
+
+      Vajra.start
+    RUBY
+
+    request_for = lambda do |path, header_name|
+      "GET #{path} HTTP/1.1\r\n" \
+        "Host: example.test\r\n" \
+        "#{header_name}: request-local\r\n" \
+        "Connection: close\r\n\r\n"
+    end
+
+    managed_popen2e(vajra_env, *inline_ruby_command(script), chdir: VajraE2EHelpers::PACKAGE_ROOT) do |_stdin, output, wait_thread|
+      startup_output = []
+      selected_port = wait_for_banner(output, captured_lines: startup_output)
+      request = lambda do |raw_request, label|
+        socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+        socket.write(raw_request)
+        read_http_response(socket, wait_thread:, output:, request_label: label).first
+      ensure
+        socket&.close unless socket&.closed?
+      end
+
+      baseline = request.call(request_for.call('/string-count', 'X-Audit-Baseline'), 'header_cache:baseline')
+      96.times do |index|
+        response = request.call(request_for.call('/request', "X-Audit-Unique-#{index}"), "header_cache:#{index}")
+        expect(response[:body]).to eq('/request')
+      end
+      after = request.call(request_for.call('/string-count', 'X-Audit-After'), 'header_cache:after')
+
+      expect(after[:body].to_i).to be <= baseline[:body].to_i + 24
+      expect(stop_process(wait_thread).exitstatus).to eq(0)
+    ensure
+      cleanup_process(wait_thread, output)
+    end
+  end
+
+  it 'keeps concurrently supplied arbitrary headers isolated in Rack envs' do
+    script = <<~RUBY
+      require "vajra"
+
+      Vajra::Internal::RackExecution.install!(
+        lambda do |rack_env|
+          header_key = rack_env.keys.find { |key| key == "HTTP_X_AUDIT_TOKEN" }
+          [200, { "Content-Type" => "text/plain" }, ["\#{header_key.frozen?}:\#{rack_env.fetch(header_key)}"]]
+        end
+      )
+
+      Vajra.start
+    RUBY
+    requests = Array.new(32) do |index|
+      "GET /headers HTTP/1.1\r\n" \
+        "Host: example.test\r\n" \
+        "X-Audit-Token: token-#{index}\r\n" \
+        "Connection: close\r\n\r\n"
+    end
+
+    result = concurrent_rack_app_request_results(script:, requests:)
+
+    expect(result[:exitstatus]).to eq(0)
+    expect(result[:responses].map { |response| parse_http_response(response)[:body] }).to eq(
+      Array.new(32) { |index| "true:token-#{index}" }
     )
   end
 
@@ -661,5 +747,396 @@ RSpec.describe 'Vajra Rack environment integration', :e2e, :integration do
     expect(result[:exitstatus]).to eq(0)
     expect(response[:status_line]).to eq('HTTP/1.1 400 Bad Request')
     expect(response[:headers]).to include('connection' => 'close')
+  end
+
+  it 'streams an unknown Rack enumerable over HTTP/1 before the producer finishes' do
+    Dir.mktmpdir('vajra-http1-stream') do |root|
+      ready_path = File.join(root, 'ready')
+      release_path = File.join(root, 'release')
+      closed_path = File.join(root, 'closed')
+      script = <<~RUBY
+        require "vajra"
+
+        class GatedRackBody
+          def each
+            yield "first".b
+            File.binwrite(ENV.fetch("STREAM_READY_PATH"), "ready")
+            sleep 0.005 until File.exist?(ENV.fetch("STREAM_RELEASE_PATH"))
+            yield "second".b
+          end
+
+          def close
+            File.open(ENV.fetch("STREAM_CLOSED_PATH"), "a") { |file| file.puts("closed") }
+          end
+        end
+
+        Vajra::Internal::RackExecution.install!(
+          lambda do |_rack_env|
+            [200, { "Content-Type" => "text/plain" }, GatedRackBody.new]
+          end
+        )
+
+        Vajra.start(workers: 1, threads: [1, 1])
+      RUBY
+
+      managed_popen2e(
+        vajra_env(port: disposable_listener_port).merge(
+          'STREAM_READY_PATH' => ready_path,
+          'STREAM_RELEASE_PATH' => release_path,
+          'STREAM_CLOSED_PATH' => closed_path
+        ),
+        *inline_ruby_command(script),
+        chdir: VajraE2EHelpers::PACKAGE_ROOT
+      ) do |_stdin, output, wait_thread|
+        selected_port = wait_for_banner(output)
+        socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+        raw_response = String.new(encoding: Encoding::BINARY)
+        begin
+          socket.write("GET /gated HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+          read_http1_stream_until(socket, raw_response, "\r\n\r\n")
+          headers, = raw_response.split("\r\n\r\n", 2)
+          expect(headers).to start_with('HTTP/1.1 200 OK')
+          expect(headers).to include("Transfer-Encoding: chunked\r\n")
+          expect(headers).not_to include('Content-Length:')
+
+          read_http1_stream_until(socket, raw_response, "5\r\nfirst\r\n")
+          Timeout.timeout(5) { sleep 0.005 until File.exist?(ready_path) }
+          expect(raw_response).not_to include("6\r\nsecond\r\n")
+          expect(File).not_to exist(release_path)
+
+          File.binwrite(release_path, 'release')
+          read_http1_stream_until(socket, raw_response, "0\r\n\r\n")
+          expect(raw_response).to include("5\r\nfirst\r\n6\r\nsecond\r\n0\r\n\r\n")
+          Timeout.timeout(5) { sleep 0.005 until File.exist?(closed_path) }
+          expect(File.readlines(closed_path)).to eq(["closed\n"])
+        ensure
+          socket.close unless socket.closed?
+        end
+
+        status = stop_process(wait_thread)
+        expect(status.exitstatus).to eq(0), output.read
+      ensure
+        cleanup_process(wait_thread, output)
+      end
+    end
+  end
+
+  it 'closes a Rack body once and aborts an HTTP/1 stream when it raises after commit' do
+    Dir.mktmpdir('vajra-http1-stream-error') do |root|
+      closed_path = File.join(root, 'closed')
+      script = <<~RUBY
+        require "vajra"
+
+        class FailingRackBody
+          def each
+            yield "first".b
+            raise "body exploded after first chunk"
+          end
+
+          def close
+            File.open(ENV.fetch("STREAM_CLOSED_PATH"), "a") { |file| file.puts("closed") }
+          end
+        end
+
+        Vajra::Internal::RackExecution.install!(
+          lambda do |_rack_env|
+            [200, { "Content-Type" => "text/plain" }, FailingRackBody.new]
+          end
+        )
+
+        Vajra.start(workers: 1, threads: [1, 1])
+      RUBY
+
+      managed_popen2e(
+        vajra_env(port: disposable_listener_port).merge('STREAM_CLOSED_PATH' => closed_path),
+        *inline_ruby_command(script),
+        chdir: VajraE2EHelpers::PACKAGE_ROOT
+      ) do |_stdin, output, wait_thread|
+        selected_port = wait_for_banner(output)
+        socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+        raw_response = String.new(encoding: Encoding::BINARY)
+        begin
+          socket.write("GET /failure HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+          Timeout.timeout(5) do
+            loop { raw_response << socket.readpartial(4096) }
+          rescue EOFError, Errno::ECONNRESET
+            nil
+          end
+          expect(raw_response).to start_with('HTTP/1.1 200 OK')
+          expect(raw_response).to include("5\r\nfirst\r\n")
+          expect(raw_response).not_to include("0\r\n\r\n")
+          Timeout.timeout(5) { sleep 0.005 until File.exist?(closed_path) }
+          expect(File.readlines(closed_path)).to eq(["closed\n"])
+        ensure
+          socket.close unless socket.closed?
+        end
+
+        status = stop_process(wait_thread)
+        expect(status.exitstatus).to eq(0), output.read
+      ensure
+        cleanup_process(wait_thread, output)
+      end
+    end
+  end
+
+  it 'closes a Rack body once and aborts an HTTP/1 stream for a non-string chunk after commit' do
+    Dir.mktmpdir('vajra-http1-stream-non-string') do |root|
+      closed_path = File.join(root, 'closed')
+      script = <<~RUBY
+        require "vajra"
+
+        class NonStringRackBody
+          def each
+            yield "first".b
+            yield 42
+          end
+
+          def close
+            File.open(ENV.fetch("STREAM_CLOSED_PATH"), "a") { |file| file.puts("closed") }
+          end
+        end
+
+        Vajra::Internal::RackExecution.install!(
+          lambda do |_rack_env|
+            [200, { "Content-Type" => "text/plain" }, NonStringRackBody.new]
+          end
+        )
+
+        Vajra.start(workers: 1, threads: [1, 1])
+      RUBY
+
+      managed_popen2e(
+        vajra_env(port: disposable_listener_port).merge('STREAM_CLOSED_PATH' => closed_path),
+        *inline_ruby_command(script),
+        chdir: VajraE2EHelpers::PACKAGE_ROOT
+      ) do |_stdin, output, wait_thread|
+        selected_port = wait_for_banner(output)
+        socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+        raw_response = String.new(encoding: Encoding::BINARY)
+        begin
+          socket.write("GET /non-string HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+          Timeout.timeout(5) do
+            loop { raw_response << socket.readpartial(4096) }
+          rescue EOFError, Errno::ECONNRESET
+            nil
+          end
+          expect(raw_response).to start_with('HTTP/1.1 200 OK')
+          expect(raw_response).to include("5\r\nfirst\r\n")
+          expect(raw_response).not_to include("2\r\n42\r\n")
+          expect(raw_response).not_to include("0\r\n\r\n")
+          Timeout.timeout(5) { sleep 0.005 until File.exist?(closed_path) }
+          expect(File.readlines(closed_path)).to eq(["closed\n"])
+        ensure
+          socket.close unless socket.closed?
+        end
+
+        status = stop_process(wait_thread)
+        expect(status.exitstatus).to eq(0), output.read
+      ensure
+        cleanup_process(wait_thread, output)
+      end
+    end
+  end
+
+  it 'cancels a published oversized Rack body when HTTP/1 response validation falls back' do
+    Dir.mktmpdir('vajra-http1-stream-invalid-response') do |root|
+      started_path = File.join(root, 'started')
+      closed_path = File.join(root, 'closed')
+      script = <<~RUBY
+        require "vajra"
+
+        class OversizedInvalidRackBody
+          def each
+            File.binwrite(ENV.fetch("STREAM_STARTED_PATH"), "started")
+            yield "x".b * 65_537
+          end
+
+          def close
+            File.open(ENV.fetch("STREAM_CLOSED_PATH"), "a") { |file| file.puts("closed") }
+          end
+        end
+
+        Vajra::Internal::RackExecution.install!(
+          lambda do |rack_env|
+            if rack_env.fetch("PATH_INFO") == "/invalid"
+              [200, { "Bad Header" => "unsafe" }, OversizedInvalidRackBody.new]
+            else
+              [200, { "Content-Type" => "text/plain" }, ["healthy"]]
+            end
+          end
+        )
+
+        Vajra.start(workers: 1, threads: [1, 1])
+      RUBY
+
+      managed_popen2e(
+        vajra_env(port: disposable_listener_port).merge(
+          'STREAM_STARTED_PATH' => started_path,
+          'STREAM_CLOSED_PATH' => closed_path
+        ),
+        *inline_ruby_command(script),
+        chdir: VajraE2EHelpers::PACKAGE_ROOT
+      ) do |_stdin, output, wait_thread|
+        selected_port = wait_for_banner(output)
+        socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+        begin
+          socket.write("GET /invalid HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+          response, = read_http_response(socket, wait_thread:, output:, request_label: 'invalid streamed response')
+          expect(response[:status_line]).to eq('HTTP/1.1 500 Internal Server Error')
+          Timeout.timeout(5) { sleep 0.005 until File.exist?(started_path) }
+          Timeout.timeout(5) { sleep 0.005 until File.exist?(closed_path) }
+          expect(File.readlines(closed_path)).to eq(["closed\n"])
+        ensure
+          socket.close unless socket.closed?
+        end
+
+        healthy_socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+        begin
+          healthy_socket.write("GET /healthy HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+          healthy_response, = read_http_response(healthy_socket, wait_thread:, output:, request_label: 'post-cancel health check')
+          expect(healthy_response[:status_line]).to eq('HTTP/1.1 200 OK')
+          expect(healthy_response[:body]).to eq('healthy')
+        ensure
+          healthy_socket.close unless healthy_socket.closed?
+        end
+
+        status = stop_process(wait_thread)
+        expect(status.exitstatus).to eq(0), output.read
+      ensure
+        cleanup_process(wait_thread, output)
+      end
+    end
+  end
+
+  it 'keeps a matching finite Rack Content-Length and frames a mismatch as chunked' do
+    script = <<~RUBY
+      require "vajra"
+
+      Vajra::Internal::RackExecution.install!(
+        lambda do |rack_env|
+          if rack_env.fetch("PATH_INFO") == "/matching"
+            [200, { "Content-Type" => "text/plain", "Content-Length" => "5" }, ["hello".b]]
+          else
+            [200, { "Content-Type" => "text/plain", "Content-Length" => "99" }, ["hello".b]]
+          end
+        end
+      )
+
+      Vajra.start(workers: 1, threads: [1, 1])
+    RUBY
+
+    matching = rack_app_request_result(
+      script:,
+      request: "GET /matching HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+    matching_response = parse_http_response(matching[:response])
+    expect(matching[:exitstatus]).to eq(0)
+    expect(matching_response[:headers]).to include('content-length' => '5')
+    expect(matching_response[:headers]).not_to have_key('transfer-encoding')
+    expect(matching_response[:body]).to eq('hello')
+
+    mismatched = rack_app_request_result(
+      script:,
+      request: "GET /mismatched HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+    mismatched_response = parse_http_response(mismatched[:response])
+    expect(mismatched[:exitstatus]).to eq(0)
+    expect(mismatched_response[:headers]).to include('transfer-encoding' => 'chunked')
+    expect(mismatched_response[:headers]).not_to have_key('content-length')
+    expect(mismatched_response[:body]).to eq('hello')
+  end
+
+  it 'uses chunked framing when an exact Rack Array has a singleton each' do
+    Dir.mktmpdir('vajra-http1-stream-untrusted-length') do |root|
+      closed_path = File.join(root, 'closed')
+      script = <<~RUBY
+        require "vajra"
+
+        body = []
+        def body.each
+          yield "live".b
+        end
+        def body.close
+          File.open(ENV.fetch("STREAM_CLOSED_PATH"), "a") { |file| file.puts("closed") }
+        end
+
+        Vajra::Internal::RackExecution.install!(
+          lambda do |_rack_env|
+            [200, { "Content-Type" => "text/plain", "Content-Length" => "0" }, body]
+          end
+        )
+
+        Vajra.start(workers: 1, threads: [1, 1])
+      RUBY
+
+      managed_popen2e(
+        vajra_env(port: disposable_listener_port).merge('STREAM_CLOSED_PATH' => closed_path),
+        *inline_ruby_command(script),
+        chdir: VajraE2EHelpers::PACKAGE_ROOT
+      ) do |_stdin, output, wait_thread|
+        selected_port = wait_for_banner(output)
+        socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+        begin
+          socket.write("GET /divergent HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+          response, = read_http_response(socket, wait_thread:, output:, request_label: 'untrusted live Rack body')
+          expect(response[:status_line]).to eq('HTTP/1.1 200 OK')
+          expect(response[:headers]).to include('transfer-encoding' => 'chunked')
+          expect(response[:headers]).not_to have_key('content-length')
+          expect(response[:body]).to eq('live')
+          Timeout.timeout(5) { sleep 0.005 until File.exist?(closed_path) }
+          expect(File.readlines(closed_path)).to eq(["closed\n"])
+        ensure
+          socket.close unless socket.closed?
+        end
+
+        status = stop_process(wait_thread)
+        expect(status.exitstatus).to eq(0), output.read
+      ensure
+        cleanup_process(wait_thread, output)
+      end
+    end
+  end
+
+  it 'uses chunked framing when Array each is C-rebound' do
+    Dir.mktmpdir('vajra-http1-stream-c-rebound-length') do |_root|
+      script = <<~RUBY
+        require "vajra"
+
+        Array.define_method(:each, Array.instance_method(:reverse_each))
+        body = ["a".b, "bb".b]
+
+        Vajra::Internal::RackExecution.install!(
+          lambda do |_rack_env|
+            [200, { "Content-Type" => "text/plain", "Content-Length" => "3" }, body]
+          end
+        )
+
+        Vajra.start(workers: 1, threads: [1, 1])
+      RUBY
+
+      managed_popen2e(
+        vajra_env(port: disposable_listener_port),
+        *inline_ruby_command(script),
+        chdir: VajraE2EHelpers::PACKAGE_ROOT
+      ) do |_stdin, output, wait_thread|
+        selected_port = wait_for_banner(output)
+        socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+        begin
+          socket.write("GET /c-rebound HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+          response, = read_http_response(socket, wait_thread:, output:, request_label: 'C-rebound Rack Array body')
+          expect(response[:status_line]).to eq('HTTP/1.1 200 OK')
+          expect(response[:headers]).to include('transfer-encoding' => 'chunked')
+          expect(response[:headers]).not_to have_key('content-length')
+          expect(response[:body]).to eq('bba')
+        ensure
+          socket.close unless socket.closed?
+        end
+
+        status = stop_process(wait_thread)
+        expect(status.exitstatus).to eq(0), output.read
+      ensure
+        cleanup_process(wait_thread, output)
+      end
+    end
   end
 end

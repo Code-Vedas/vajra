@@ -162,12 +162,23 @@ RSpec.describe Vajra, '.start' do
         http2_max_concurrent_streams: 128,
         http2_initial_window_size: 1_048_576,
         http2_max_frame_size: 1_048_576,
-        http2_header_table_size: 4096
+        http2_header_table_size: 4096,
+        http2_max_pending_executions: 12,
+        http2_max_connection_buffer_bytes: 1_048_609
       )
 
       described_class.start(**options)
 
       expect(described_class).to have_received(:__native_start__).with(options)
+    end
+
+    it 'accepts the default HTTP/2 connection buffer budget when none is specified' do
+      allow(described_class).to receive(:__native_start__)
+      allow(Vajra::Internal::RackExecution).to receive(:configure_threads!)
+
+      described_class.start(http2: true)
+
+      expect(described_class).to have_received(:__native_start__).with(http2: true)
     end
 
     it 'rejects unknown start options' do
@@ -236,6 +247,12 @@ RSpec.describe Vajra, '.start' do
 
       expect { described_class.start(http2_max_frame_size: 16_383) }
         .to raise_error(Vajra::Error, 'Unable to start Vajra: invalid http2_max_frame_size option: 16383. Expected an integer between 16384 and 16777215')
+
+      expect { described_class.start(http2_max_pending_executions: 0) }
+        .to raise_error(Vajra::Error, 'Unable to start Vajra: invalid http2_max_pending_executions option: 0. Expected an integer between 1 and 2147483647')
+
+      expect { described_class.start(http2: true, http2_max_connection_buffer_bytes: 1_048_576) }
+        .to raise_error(Vajra::Error, 'Unable to start Vajra: http2_max_connection_buffer_bytes must hold one HTTP/2 frame plus preface/header overhead')
 
       expect { described_class.start(port: 65_536) }
         .to raise_error(Vajra::Error, 'Unable to start Vajra: invalid port option: 65536. Expected an integer between 0 and 65535')

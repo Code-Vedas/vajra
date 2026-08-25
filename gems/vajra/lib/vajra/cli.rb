@@ -41,6 +41,8 @@ module Vajra
         http2_initial_window_size
         http2_max_frame_size
         http2_header_table_size
+        http2_max_pending_executions
+        http2_max_connection_buffer_bytes
       ].freeze,
       string: %i[
         host

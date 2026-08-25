@@ -2605,7 +2605,9 @@ bool Vajra::runtime::NativeRuntime::spawn_worker_from_single_thread(
         spawn_config.http2_header_table_size,
         spawn_config.stats_path,
         spawn_config.metrics_endpoint,
-        spawn_config.debug_logging);
+        spawn_config.debug_logging,
+        spawn_config.http2_max_pending_executions,
+        spawn_config.http2_max_connection_buffer_bytes);
   }
 
   parent_control_channels.clear();
@@ -3723,13 +3725,11 @@ void Vajra::runtime::NativeRuntime::run_worker_process(
     std::size_t http2_header_table_size,
     std::string stats_path,
     std::string metrics_endpoint,
-    bool debug_logging)
+    bool debug_logging,
+    std::size_t http2_max_pending_executions,
+    std::size_t http2_max_connection_buffer_bytes)
 {
   (void)host;
-  (void)http2_max_concurrent_streams;
-  (void)http2_initial_window_size;
-  (void)http2_max_frame_size;
-  (void)http2_header_table_size;
 
   try
   {
@@ -3756,7 +3756,7 @@ void Vajra::runtime::NativeRuntime::run_worker_process(
         std::shared_ptr<const Vajra::rack::RackExecutionTransport>{},
         Vajra::rack::ControlPlaneConfig{std::move(stats_path), std::move(metrics_endpoint)});
 
-    Vajra::request::Http2Config worker_http2_config{
+    Vajra::request::Http2Config worker_http2_config = Vajra::request::Http2Config::from_runtime_options(
         http2_max_concurrent_streams,
         http2_initial_window_size,
         http2_max_frame_size,
@@ -3764,7 +3764,8 @@ void Vajra::runtime::NativeRuntime::run_worker_process(
         max_request_head_bytes,
         max_request_body_bytes,
         max_keepalive_requests,
-        socket_queue_capacity};
+        http2_max_pending_executions,
+        http2_max_connection_buffer_bytes);
 
     Vajra::request::RequestProcessor request_processor(
         max_request_head_bytes,
@@ -3937,8 +3938,17 @@ void Vajra::runtime::NativeRuntime::run_worker_process(
       close_fd_if_open(control_channel_fd);
     }
 
-    const bool rack_execution_drained = wait_for_rack_execution_idle(
+    bool rack_execution_drained = wait_for_rack_execution_idle(
         std::chrono::seconds(std::max(1, worker_timeout_seconds)));
+    if (!rack_execution_drained)
+    {
+      // A task can be waiting in rack.input.read() with no response source to
+      // drain.  Cancelling the pool fails NativeInput, which wakes that Ruby
+      // wait; give its ensure/close path a brief chance to complete before
+      // deciding whether native connection loops must be detached.
+      Vajra::rack::shutdown_same_process_rack_execution_threads();
+      rack_execution_drained = wait_for_rack_execution_idle(std::chrono::milliseconds(250));
+    }
     if (rack_execution_drained && connection_queue_state)
     {
       const bool active_connections_drained = wait_for_active_connections_idle(
@@ -4188,7 +4198,9 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
           config.socket_queue_capacity,
           config.stats_path,
           config.metrics_endpoint,
-          debug_logging};
+          debug_logging,
+          config.http2_max_pending_executions,
+          config.http2_max_connection_buffer_bytes};
       recovery_policy_ = RecoveryPolicy{kReplacementFailureLimit};
       debug_logging_.store(debug_logging, std::memory_order_release);
     }
@@ -4304,7 +4316,9 @@ void Vajra::runtime::NativeRuntime::start(const RuntimeConfig &config)
             config.http2_header_table_size,
             config.stats_path,
             config.metrics_endpoint,
-            debug_logging);
+            debug_logging,
+            config.http2_max_pending_executions,
+            config.http2_max_connection_buffer_bytes);
       }
 
       const std::shared_ptr<SharedWorkerState> worker_state =
@@ -4511,7 +4525,9 @@ void VajraNative::start(
     std::string trace_service_name,
     bool trace_otel_owner,
     std::string trace_resource_attributes,
-    std::string trace_propagators)
+    std::string trace_propagators,
+    std::size_t http2_max_pending_executions,
+    std::size_t http2_max_connection_buffer_bytes)
 {
   Vajra::runtime::NativeRuntime::instance().start(Vajra::runtime::RuntimeConfig{
       std::move(host),
@@ -4554,7 +4570,9 @@ void VajraNative::start(
       std::move(trace_service_name),
       trace_otel_owner,
       std::move(trace_resource_attributes),
-      std::move(trace_propagators)});
+      std::move(trace_propagators),
+      http2_max_pending_executions,
+      http2_max_connection_buffer_bytes});
 }
 
 void VajraNative::stop()

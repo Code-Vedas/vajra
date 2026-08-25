@@ -120,6 +120,72 @@ RSpec.describe 'Vajra lifecycle', :e2e, :integration do
     end
   end
 
+  it 'stops while Rack is blocked in rack.input.read' do
+    Dir.mktmpdir('vajra-rack-input-stop') do |root|
+      started_path = File.join(root, 'started')
+      stop_requested_path = File.join(root, 'stop-requested')
+      unblocked_path = File.join(root, 'unblocked')
+      script = <<~RUBY
+        require "vajra"
+
+        Vajra::Internal::RackExecution.install!(
+          lambda do |rack_env|
+            File.binwrite(ENV.fetch("RACK_INPUT_STARTED_PATH"), "started")
+            begin
+              rack_env.fetch("rack.input").read
+            rescue IOError => error
+              File.binwrite(ENV.fetch("RACK_INPUT_UNBLOCKED_PATH"), error.message)
+            end
+            [200, { "Content-Type" => "text/plain" }, ["stopped"]]
+          end
+        )
+
+        stopper = Thread.new do
+          sleep 0.005 until File.exist?(ENV.fetch("RACK_INPUT_STARTED_PATH"))
+          File.binwrite(ENV.fetch("RACK_INPUT_STOP_REQUESTED_PATH"), "stop")
+          Vajra.stop
+        end
+
+        Vajra.start(workers: 1, threads: [1, 1], worker_timeout: 1)
+        stopper.join
+      RUBY
+
+      managed_popen2e(
+        vajra_env(port: disposable_listener_port).merge(
+          'RACK_INPUT_STARTED_PATH' => started_path,
+          'RACK_INPUT_STOP_REQUESTED_PATH' => stop_requested_path,
+          'RACK_INPUT_UNBLOCKED_PATH' => unblocked_path
+        ),
+        *inline_ruby_command(script),
+        chdir: VajraE2EHelpers::PACKAGE_ROOT
+      ) do |_stdin, output, wait_thread|
+        selected_port = wait_for_banner(output)
+        socket = TCPSocket.new(VajraE2EHelpers::LISTENER_HOST, selected_port)
+        begin
+          # Deliberately omit the declared body.  It is just beyond the direct
+          # buffering threshold so the Rack task starts and blocks in the live
+          # NativeInput reader before the request body is complete.
+          socket.write(
+            "POST /blocked HTTP/1.1\r\n" \
+            "Host: localhost\r\n" \
+            "Content-Length: 1048577\r\n" \
+            "Connection: close\r\n\r\n"
+          )
+          Timeout.timeout(5) { sleep 0.005 until File.exist?(started_path) }
+          Timeout.timeout(5) { sleep 0.005 until File.exist?(stop_requested_path) }
+          status = wait_for_exit(wait_thread, timeout: 5)
+
+          expect(status.exitstatus).to eq(0), output.read
+          expect(File.read(unblocked_path)).to include('same-process Rack execution pool is shutting down')
+        ensure
+          socket.close unless socket.closed?
+        end
+      ensure
+        cleanup_process(wait_thread, output)
+      end
+    end
+  end
+
   it 'interrupts an idle keep-alive socket during Ctrl-C drain' do
     shutdown = keep_alive_shutdown_with_open_socket
 

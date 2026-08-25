@@ -308,6 +308,7 @@ public:
         config_(config),
         request_executor_(std::move(request_executor)),
         execution_pool_(execution_pool ? std::move(execution_pool) : std::make_shared<Http2ExecutionPool>(1)),
+        connection_buffer_budget_(std::make_shared<Vajra::rack::Http2ConnectionBufferBudget>(config_.max_connection_buffer_bytes)),
         entry_mode_(entry_mode),
         initial_bytes_(std::move(initial_bytes))
   {
@@ -335,6 +336,23 @@ public:
     nghttp2_session *raw_session = nullptr;
     check(nghttp2_session_server_new2(&raw_session, callbacks_.get(), this, options.get()), "nghttp2_session_server_new2");
     session_.reset(raw_session);
+    worker_runtime_state_ = Vajra::runtime::current_worker_runtime_state();
+    if (worker_runtime_state_)
+    {
+      connection_buffer_budget_->set_observer(
+          [worker_runtime_state = worker_runtime_state_](std::ptrdiff_t byte_delta, bool reservation_rejected)
+          {
+            Vajra::runtime::note_worker_http2_tracked_buffer_delta(
+                worker_runtime_state,
+                static_cast<std::int64_t>(byte_delta),
+                reservation_rejected);
+          });
+    }
+    if (!try_reserve_connection_buffer(initial_bytes_.size()))
+    {
+      throw std::runtime_error("HTTP/2 initial bytes exceed the connection buffer budget");
+    }
+    tracked_initial_bytes_ = initial_bytes_.size();
     if (upgrade_request)
     {
       initialize_upgrade_request(std::move(*upgrade_request));
@@ -343,7 +361,21 @@ public:
 
   ~Impl()
   {
+    cancel_response_body_streams();
     wait_for_execution_completion();
+    // A direct Rack completion may publish its response while the initial
+    // cancellation is waiting for the worker.  Cancel again after that drain
+    // so a late stream cannot fill its bounded queue after this session dies.
+    cancel_response_body_streams();
+    for (auto &entry : streams_)
+    {
+      release_stream_buffer_leases(entry.second);
+    }
+    clear_precheck_buffer();
+    clear_pending_receive_bytes();
+    release_connection_buffer(tracked_initial_bytes_);
+    tracked_initial_bytes_ = 0;
+    publish_execution_admission_depth(0);
   }
 
   void run()
@@ -352,8 +384,11 @@ public:
     send_pending();
     submit_completed_streams();
     drain_finished_executions();
+    prune_finished_response_producers();
+    update_execution_admission_depth();
     consume_drained_request_body_bytes();
     flush_http2_stream_events();
+    process_response_body_streams();
     if (deliver_paused_request_body_chunks() &&
         !pending_receive_bytes_.empty() &&
         !receive_pending_bytes())
@@ -364,16 +399,32 @@ public:
     if (!initial_bytes_.empty())
     {
       const std::string buffered = std::move(initial_bytes_);
-      if (!receive_bytes(
+      bool received_initial_bytes = false;
+      try
+      {
+        received_initial_bytes = receive_bytes(
               reinterpret_cast<const std::uint8_t *>(buffered.data()),
-              buffered.size()))
+              buffered.size());
+      }
+      catch (...)
+      {
+        release_connection_buffer(tracked_initial_bytes_);
+        tracked_initial_bytes_ = 0;
+        throw;
+      }
+      release_connection_buffer(tracked_initial_bytes_);
+      tracked_initial_bytes_ = 0;
+      if (!received_initial_bytes)
       {
         return;
       }
       submit_completed_streams();
       drain_finished_executions();
+      prune_finished_response_producers();
+      update_execution_admission_depth();
       consume_drained_request_body_bytes();
       flush_http2_stream_events();
+      process_response_body_streams();
       if (deliver_paused_request_body_chunks() &&
           !pending_receive_bytes_.empty() &&
           !receive_pending_bytes())
@@ -393,8 +444,11 @@ public:
 
       submit_completed_streams();
       drain_finished_executions();
+      prune_finished_response_producers();
+      update_execution_admission_depth();
       consume_drained_request_body_bytes();
       flush_http2_stream_events();
+      process_response_body_streams();
       if (deliver_paused_request_body_chunks() &&
           !pending_receive_bytes_.empty() &&
           !receive_pending_bytes())
@@ -487,11 +541,21 @@ public:
       }
       submit_completed_streams();
       drain_finished_executions();
+      prune_finished_response_producers();
+      update_execution_admission_depth();
       consume_drained_request_body_bytes();
       flush_http2_stream_events();
+      process_response_body_streams();
       send_pending();
     }
   }
+
+#ifdef VAJRA_RUNTIME_TESTING
+  std::size_t active_response_producer_count_for_testing() const
+  {
+    return active_response_producers_.size();
+  }
+#endif
 
 private:
   struct CallbackDeleter
@@ -532,9 +596,12 @@ private:
     std::int32_t priority_dependency = 0;
     std::int32_t priority_weight = 16;
     std::vector<ParsedHeader> headers;
+    std::size_t tracked_header_bytes = 0;
     std::size_t request_body_bytes = 0;
     std::string request_body;
+    std::size_t tracked_request_body_bytes = 0;
     std::deque<std::string> paused_request_body_chunks;
+    std::size_t tracked_paused_request_body_bytes = 0;
     std::size_t buffered_request_body_bytes_to_consume = 0;
     std::unique_ptr<RequestExecutionSession> execution_session;
     std::shared_ptr<Vajra::rack::NativeInputState> input_state_owner;
@@ -549,6 +616,10 @@ private:
     std::vector<std::string> response_body_chunks;
     std::shared_ptr<Vajra::response::ResponseBodyFile> response_body_file;
     std::size_t response_body_size = 0;
+    // Legacy, already-materialized response payloads are owned by this
+    // StreamState after a finished execution is drained. Live Rack streams
+    // keep their independent ResponseBodyStream lease instead.
+    std::size_t tracked_response_body_bytes = 0;
     std::size_t response_chunk_index = 0;
     std::size_t response_chunk_offset = 0;
     std::size_t response_body_file_offset = 0;
@@ -580,6 +651,19 @@ private:
     {
     }
 
+    ~ExecutionTask()
+    {
+      // A task can outlive the session-side stream after a peer reset.  Its
+      // own context holds the ledger alive, so this is the last-resort owner
+      // for leases that a cancellation/error path did not explicitly hand
+      // off or release.
+      if (request_context.connection_buffer_budget)
+      {
+        request_context.connection_buffer_budget->release(tracked_request_body_bytes);
+        request_context.connection_buffer_budget->release(tracked_response_body_bytes);
+      }
+    }
+
     std::int32_t stream_id;
     RequestContext request_context;
     std::unique_ptr<RequestExecutionSession> execution_session;
@@ -587,6 +671,8 @@ private:
     std::chrono::steady_clock::time_point enqueued_at;
     std::int64_t queue_wait_nanoseconds = 0;
     bool queue_capacity_rejected = false;
+    std::size_t tracked_request_body_bytes = 0;
+    std::size_t tracked_response_body_bytes = 0;
     Vajra::response::Response response{
         Vajra::response::Status{200, "OK"},
         {},
@@ -682,9 +768,27 @@ private:
       return 0;
     }
 
-    const std::string header_name = bytes_to_string(name, name_length);
-    const std::string header_value = bytes_to_string(value, value_length);
-    impl->record_header(stream, header_name, header_value);
+    const std::size_t header_bytes = name_length + value_length;
+    if (!impl->try_reserve_connection_buffer(header_bytes))
+    {
+      stream.invalid = true;
+      impl->reset_stream(frame->hd.stream_id, NGHTTP2_ENHANCE_YOUR_CALM);
+      return 0;
+    }
+    stream.tracked_header_bytes += header_bytes;
+    try
+    {
+      const std::string header_name = bytes_to_string(name, name_length);
+      const std::string header_value = bytes_to_string(value, value_length);
+      impl->record_header(stream, header_name, header_value);
+    }
+    catch (...)
+    {
+      impl->release_connection_buffer(header_bytes);
+      stream.tracked_header_bytes -= header_bytes;
+      stream.invalid = true;
+      impl->reset_stream(frame->hd.stream_id, NGHTTP2_INTERNAL_ERROR);
+    }
     return 0;
   }
 
@@ -770,9 +874,27 @@ private:
             stream.buffered_request_body_bytes_to_consume += length;
             return 0;
           }
-          stream.paused_request_body_chunks.emplace_back(
-              reinterpret_cast<const char *>(data),
-              length);
+          if (!impl->try_reserve_connection_buffer(length))
+          {
+            // Do not copy an additional DATA frame once the session ledger is
+            // full.  The stream is reset rather than retaining an uncharged
+            // paused chunk indefinitely.
+            stream.invalid = true;
+            impl->reset_stream(stream_id, NGHTTP2_ENHANCE_YOUR_CALM);
+            return 0;
+          }
+          try
+          {
+            stream.paused_request_body_chunks.emplace_back(
+                reinterpret_cast<const char *>(data),
+                length);
+          }
+          catch (...)
+          {
+            impl->release_connection_buffer(length);
+            throw;
+          }
+          stream.tracked_paused_request_body_bytes += length;
           return NGHTTP2_ERR_PAUSE;
         }
       }
@@ -785,7 +907,24 @@ private:
     }
     else
     {
-      stream.request_body.append(reinterpret_cast<const char *>(data), length);
+      if (!impl->try_reserve_connection_buffer(length))
+      {
+        stream.invalid = true;
+        impl->reset_stream(stream_id, NGHTTP2_ENHANCE_YOUR_CALM);
+        return 0;
+      }
+      try
+      {
+        stream.request_body.append(reinterpret_cast<const char *>(data), length);
+      }
+      catch (...)
+      {
+        impl->release_connection_buffer(length);
+        stream.invalid = true;
+        impl->reset_stream(stream_id, NGHTTP2_INTERNAL_ERROR);
+        return 0;
+      }
+      stream.tracked_request_body_bytes += length;
       if (impl->direct_body_flow_control_can_be_released(stream))
       {
         stream.buffered_request_body_bytes_to_consume += length;
@@ -873,10 +1012,6 @@ private:
         {
           impl->start_streaming_execution_session(frame->hd.stream_id, stream);
         }
-        else
-        {
-          impl->reserve_deferred_body_capacity(stream);
-        }
       }
     }
     else if (frame->hd.type == NGHTTP2_HEADERS && (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) != 0)
@@ -934,6 +1069,14 @@ private:
       {
         Vajra::rack::http2_stream_reset(stream->second.http2_stream_state.get(), error_code);
       }
+    }
+    if (stream != impl->streams_.end() && Vajra::response::response_has_body_stream(stream->second.response))
+    {
+      stream->second.response.body_stream->cancel();
+    }
+    if (stream != impl->streams_.end())
+    {
+      impl->release_stream_buffer_leases(stream->second);
     }
     impl->remember_closed_stream(stream_id);
     impl->streams_.erase(stream_id);
@@ -1001,6 +1144,34 @@ private:
       return static_cast<ssize_t>(copied);
     }
 
+    if (Vajra::response::response_has_body_stream(stream.response))
+    {
+      length = impl->outbound_window_capacity(stream_id, length);
+      if (length == 0)
+      {
+        return NGHTTP2_ERR_DEFERRED;
+      }
+
+      const Vajra::response::ResponseBodyStream::ReadResult result =
+          stream.response.body_stream->read(reinterpret_cast<char *>(buffer), length, false);
+      if (result.status == Vajra::response::ResponseBodyStream::ReadStatus::data)
+      {
+        impl->note_priority_bytes_sent(stream_id, result.size);
+        return static_cast<ssize_t>(result.size);
+      }
+      if (result.status == Vajra::response::ResponseBodyStream::ReadStatus::pending)
+      {
+        return NGHTTP2_ERR_DEFERRED;
+      }
+      if (result.status == Vajra::response::ResponseBodyStream::ReadStatus::complete)
+      {
+        *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+        impl->resume_priority_deferred_streams();
+        return 0;
+      }
+      return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+    }
+
     const bool has_remaining = stream_has_remaining_response_body(stream);
     if (has_remaining)
     {
@@ -1012,9 +1183,23 @@ private:
     }
 
     std::size_t copied = 0;
+    std::size_t released_legacy_response_bytes = 0;
+    const auto release_completed_legacy_chunks = [&]()
+    {
+      if (released_legacy_response_bytes == 0)
+      {
+        return;
+      }
+      const std::size_t released = std::min(
+          released_legacy_response_bytes,
+          stream.tracked_response_body_bytes);
+      impl->release_connection_buffer(released);
+      stream.tracked_response_body_bytes -= released;
+      released_legacy_response_bytes = 0;
+    };
     while (copied < length && stream.response_chunk_index < stream.response_body_chunks.size())
     {
-      const std::string &chunk = stream.response_body_chunks[stream.response_chunk_index];
+      std::string &chunk = stream.response_body_chunks[stream.response_chunk_index];
       const std::size_t available = chunk.size() - stream.response_chunk_offset;
       const std::size_t chunk_copied = std::min(length - copied, available);
       if (chunk_copied > 0)
@@ -1025,6 +1210,11 @@ private:
       }
       if (stream.response_chunk_offset >= chunk.size())
       {
+        // This is a materialized compatibility path rather than the Rack
+        // stream path. Drop each fully sent chunk immediately so its lease
+        // and backing allocation do not survive until the stream closes.
+        released_legacy_response_bytes += chunk.size();
+        std::string().swap(chunk);
         ++stream.response_chunk_index;
         stream.response_chunk_offset = 0;
       }
@@ -1036,23 +1226,27 @@ private:
       const std::size_t file_read_size = std::min(length - copied, remaining_file_bytes);
       if (std::fseek(stream.response_body_file->file, static_cast<long>(stream.response_body_file_offset), SEEK_SET) != 0)
       {
-        return NGHTTP2_ERR_CALLBACK_FAILURE;
+        release_completed_legacy_chunks();
+        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
       }
       const std::size_t read = std::fread(buffer + copied, 1, file_read_size, stream.response_body_file->file);
       if (read == 0 && file_read_size > 0)
       {
-        return NGHTTP2_ERR_CALLBACK_FAILURE;
+        release_completed_legacy_chunks();
+        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
       }
       stream.response_body_file_offset += read;
       copied += read;
       if (read < file_read_size && std::ferror(stream.response_body_file->file) != 0)
       {
-        return NGHTTP2_ERR_CALLBACK_FAILURE;
+        release_completed_legacy_chunks();
+        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
       }
     }
     const bool body_complete =
         stream.response_chunk_index >= stream.response_body_chunks.size() &&
         (!stream.response_body_file || stream.response_body_file_offset >= stream.response_body_size);
+    release_completed_legacy_chunks();
     if (body_complete)
     {
       if (stream.http2_stream_state && stream.tunnel_accepted && !stream.tunnel_end_stream_queued)
@@ -1069,6 +1263,7 @@ private:
     }
     if (copied > 0)
     {
+      release_completed_legacy_chunks();
       impl->note_priority_bytes_sent(stream_id, copied);
     }
     return static_cast<ssize_t>(copied);
@@ -1243,9 +1438,13 @@ private:
     }
     if (static_cast<std::size_t>(consumed) != length)
     {
-      pending_receive_bytes_.assign(
-          data + static_cast<std::size_t>(consumed),
-          data + length);
+      if (!assign_pending_receive_bytes(
+              data + static_cast<std::size_t>(consumed),
+              length - static_cast<std::size_t>(consumed)))
+      {
+        write_goaway(NGHTTP2_ENHANCE_YOUR_CALM);
+        return false;
+      }
       return true;
     }
     if (resume_deferred_data_pending_)
@@ -1273,12 +1472,10 @@ private:
       }
       if (static_cast<std::size_t>(consumed) < pending_receive_bytes_.size())
       {
-        pending_receive_bytes_.erase(
-            pending_receive_bytes_.begin(),
-            pending_receive_bytes_.begin() + static_cast<std::ptrdiff_t>(consumed));
+        erase_pending_receive_prefix(static_cast<std::size_t>(consumed));
         return true;
       }
-      pending_receive_bytes_.clear();
+      clear_pending_receive_bytes();
     }
     return true;
   }
@@ -1292,6 +1489,8 @@ private:
       {
         if (!stream.execution_session)
         {
+          release_connection_buffer(stream.tracked_paused_request_body_bytes);
+          stream.tracked_paused_request_body_bytes = 0;
           stream.paused_request_body_chunks.clear();
           break;
         }
@@ -1303,21 +1502,38 @@ private:
               Vajra::rack::native_input_closed(stream.input_state_owner.get()))
           {
             stream.buffered_request_body_bytes_to_consume += chunk.size();
+            release_connection_buffer(chunk.size());
+            stream.tracked_paused_request_body_bytes -= chunk.size();
             stream.paused_request_body_chunks.pop_front();
             continue;
           }
 
-          if (!stream.execution_session->try_append_request_body_bytes(chunk.data(), chunk.size()))
+          const bool appended = stream.input_state_owner
+                                    ? Vajra::rack::native_input_try_append_reserved(
+                                          stream.input_state_owner.get(),
+                                          chunk.data(),
+                                          chunk.size())
+                                    : stream.execution_session->try_append_request_body_bytes(
+                                          chunk.data(),
+                                          chunk.size());
+          if (!appended)
           {
             return false;
           }
           stream.buffered_request_body_bytes_to_consume += chunk.size();
+          if (!stream.input_state_owner)
+          {
+            release_connection_buffer(chunk.size());
+          }
+          stream.tracked_paused_request_body_bytes -= chunk.size();
           stream.paused_request_body_chunks.pop_front();
         }
         catch (...)
         {
           stream.invalid = true;
           stream.execution_session.reset();
+          release_connection_buffer(stream.tracked_paused_request_body_bytes);
+          stream.tracked_paused_request_body_bytes = 0;
           stream.paused_request_body_chunks.clear();
           reset_stream(entry.first, NGHTTP2_REFUSED_STREAM);
           break;
@@ -1374,13 +1590,248 @@ private:
 
     last_request_stream_id_ = 1;
     highest_observed_request_stream_id_ = 1;
-    initial_bytes_ = std::move(upgrade_request.trailing_bytes);
+    if (!assign_initial_bytes(std::move(upgrade_request.trailing_bytes)))
+    {
+      throw std::runtime_error("HTTP/2 upgrade bytes exceed the connection buffer budget");
+    }
     complete_stream(1);
   }
 
   StreamState &stream_for(std::int32_t stream_id)
   {
     return streams_[stream_id];
+  }
+
+  bool try_reserve_connection_buffer(std::size_t bytes)
+  {
+    return !connection_buffer_budget_ || connection_buffer_budget_->try_reserve(bytes);
+  }
+
+  void release_connection_buffer(std::size_t bytes)
+  {
+    if (connection_buffer_budget_ && bytes > 0)
+    {
+      connection_buffer_budget_->release(bytes);
+    }
+  }
+
+  void release_stream_buffer_leases(StreamState &stream)
+  {
+    release_connection_buffer(stream.tracked_header_bytes);
+    stream.tracked_header_bytes = 0;
+    release_connection_buffer(stream.tracked_request_body_bytes);
+    stream.tracked_request_body_bytes = 0;
+    release_connection_buffer(stream.tracked_paused_request_body_bytes);
+    stream.tracked_paused_request_body_bytes = 0;
+    release_connection_buffer(stream.tracked_response_body_bytes);
+    stream.tracked_response_body_bytes = 0;
+  }
+
+  void release_task_buffer_leases(ExecutionTask &task)
+  {
+    release_connection_buffer(task.tracked_request_body_bytes);
+    task.tracked_request_body_bytes = 0;
+    release_connection_buffer(task.tracked_response_body_bytes);
+    task.tracked_response_body_bytes = 0;
+  }
+
+  static void canonicalize_response_body(Vajra::response::Response &response)
+  {
+    // Response has public representation fields for backwards compatibility,
+    // but a transport owns exactly one of them.  Discard inactive allocations
+    // before a task enters the session-owned finished queue; otherwise a
+    // malformed custom executor result could retain unleased bytes behind a
+    // live stream or file body.
+    if (Vajra::response::response_has_body_stream(response))
+    {
+      std::string().swap(response.body);
+      std::vector<std::string>().swap(response.body_chunks);
+      response.body_file.reset();
+      return;
+    }
+    if (Vajra::response::response_has_body_chunks(response))
+    {
+      std::string().swap(response.body);
+      response.body_file.reset();
+      return;
+    }
+    if (!response.body.empty())
+    {
+      response.body_file.reset();
+    }
+  }
+
+  static bool legacy_response_buffered_bytes(
+      const Vajra::response::Response &response,
+      std::size_t *body_bytes)
+  {
+    // Live sources account each queued chunk themselves. Their known length
+    // is framing metadata, not a materialized allocation to reserve here.
+    if (Vajra::response::response_has_body_stream(response) ||
+        Vajra::response::response_has_body_file(response))
+    {
+      *body_bytes = 0;
+      return true;
+    }
+    if (!Vajra::response::response_has_body_chunks(response))
+    {
+      *body_bytes = response.body.size();
+      return true;
+    }
+
+    std::size_t total = 0;
+    for (const std::string &chunk : response.body_chunks)
+    {
+      if (chunk.size() > std::numeric_limits<std::size_t>::max() - total)
+      {
+        return false;
+      }
+      total += chunk.size();
+    }
+    *body_bytes = total;
+    return true;
+  }
+
+  void prepare_finished_execution(ExecutionTask &task)
+  {
+    canonicalize_response_body(task.response);
+    if (Vajra::response::response_has_body_stream(task.response) &&
+        !task.response.body_stream->attach_connection_buffer_budget(connection_buffer_budget_))
+    {
+      task.response.body_stream->cancel();
+      task.response = fallback_response(503, "");
+    }
+
+    std::size_t body_bytes = 0;
+    if (!legacy_response_buffered_bytes(task.response, &body_bytes))
+    {
+      task.response = fallback_response(503, "");
+      return;
+    }
+    if (body_bytes == 0)
+    {
+      return;
+    }
+    if (!try_reserve_connection_buffer(body_bytes))
+    {
+      // The application has already materialized this legacy response.  Do
+      // not retain it in the finished queue without a lease: discard it for
+      // an empty, bounded overload response instead.
+      if (Vajra::response::response_has_body_stream(task.response))
+      {
+        task.response.body_stream->cancel();
+      }
+      task.response = fallback_response(503, "");
+      return;
+    }
+    task.tracked_response_body_bytes = body_bytes;
+  }
+
+  bool assign_initial_bytes(std::string bytes)
+  {
+    release_connection_buffer(tracked_initial_bytes_);
+    tracked_initial_bytes_ = 0;
+    if (!try_reserve_connection_buffer(bytes.size()))
+    {
+      return false;
+    }
+    initial_bytes_ = std::move(bytes);
+    tracked_initial_bytes_ = initial_bytes_.size();
+    return true;
+  }
+
+  bool append_precheck_buffer(const std::uint8_t *data, std::size_t length)
+  {
+    if (length == 0)
+    {
+      return true;
+    }
+    if (!try_reserve_connection_buffer(length))
+    {
+      return false;
+    }
+    try
+    {
+      precheck_buffer_.insert(precheck_buffer_.end(), data, data + length);
+      tracked_precheck_buffer_bytes_ += length;
+      return true;
+    }
+    catch (...)
+    {
+      release_connection_buffer(length);
+      throw;
+    }
+  }
+
+  bool assign_precheck_buffer(const std::uint8_t *data, std::size_t length)
+  {
+    clear_precheck_buffer();
+    return append_precheck_buffer(data, length);
+  }
+
+  void erase_precheck_buffer_prefix(std::size_t length)
+  {
+    const std::size_t erased = std::min(length, precheck_buffer_.size());
+    if (erased == 0)
+    {
+      return;
+    }
+    precheck_buffer_.erase(
+        precheck_buffer_.begin(),
+        precheck_buffer_.begin() + static_cast<std::ptrdiff_t>(erased));
+    release_connection_buffer(erased);
+    tracked_precheck_buffer_bytes_ -= erased;
+  }
+
+  void clear_precheck_buffer()
+  {
+    precheck_buffer_.clear();
+    release_connection_buffer(tracked_precheck_buffer_bytes_);
+    tracked_precheck_buffer_bytes_ = 0;
+  }
+
+  bool assign_pending_receive_bytes(const std::uint8_t *data, std::size_t length)
+  {
+    // nghttp2 normally leaves this queue empty before a new deferred suffix
+    // is installed. Preserve that invariant defensively so a replacement
+    // cannot retain the previous allocation with a stale lease.
+    clear_pending_receive_bytes();
+    if (!try_reserve_connection_buffer(length))
+    {
+      return false;
+    }
+    try
+    {
+      pending_receive_bytes_.assign(data, data + length);
+      tracked_pending_receive_bytes_ += length;
+      return true;
+    }
+    catch (...)
+    {
+      release_connection_buffer(length);
+      throw;
+    }
+  }
+
+  void erase_pending_receive_prefix(std::size_t length)
+  {
+    const std::size_t erased = std::min(length, pending_receive_bytes_.size());
+    if (erased == 0)
+    {
+      return;
+    }
+    pending_receive_bytes_.erase(
+        pending_receive_bytes_.begin(),
+        pending_receive_bytes_.begin() + static_cast<std::ptrdiff_t>(erased));
+    release_connection_buffer(erased);
+    tracked_pending_receive_bytes_ -= erased;
+  }
+
+  void clear_pending_receive_bytes()
+  {
+    pending_receive_bytes_.clear();
+    release_connection_buffer(tracked_pending_receive_bytes_);
+    tracked_pending_receive_bytes_ = 0;
   }
 
   bool precheck_frames(const std::uint8_t *data, std::size_t length)
@@ -1396,7 +1847,11 @@ private:
       return precheck_complete_frames(data + offset, length - offset);
     }
 
-    precheck_buffer_.insert(precheck_buffer_.end(), data + offset, data + length);
+    if (!append_precheck_buffer(data + offset, length - offset))
+    {
+      write_goaway(NGHTTP2_ENHANCE_YOUR_CALM);
+      return true;
+    }
     offset = 0;
     constexpr std::string_view preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
     if (!client_preface_seen_)
@@ -1408,7 +1863,7 @@ private:
       if (std::memcmp(precheck_buffer_.data(), preface.data(), preface.size()) != 0)
       {
         write_goaway(NGHTTP2_PROTOCOL_ERROR);
-        precheck_buffer_.clear();
+        clear_precheck_buffer();
         return true;
       }
       client_preface_seen_ = true;
@@ -1425,7 +1880,7 @@ private:
       const std::int32_t stream_id = frame_stream_id(frame);
       if (precheck_frame_header(frame_type, stream_id, frame_length))
       {
-        precheck_buffer_.clear();
+        clear_precheck_buffer();
         return true;
       }
       if (offset + kHttp2FrameHeaderBytes + frame_length > precheck_buffer_.size())
@@ -1434,14 +1889,14 @@ private:
         {
           const std::size_t available_payload = precheck_buffer_.size() - offset - kHttp2FrameHeaderBytes;
           precheck_skip_payload_bytes_ = frame_length - available_payload;
-          precheck_buffer_.clear();
+          clear_precheck_buffer();
         }
         break;
       }
 
       if (precheck_frame_payload(frame_type, stream_id, frame_flags, frame + kHttp2FrameHeaderBytes, frame_length, stream_window_deltas))
       {
-        precheck_buffer_.clear();
+        clear_precheck_buffer();
         return true;
       }
       offset += kHttp2FrameHeaderBytes + frame_length;
@@ -1449,7 +1904,7 @@ private:
 
     if (offset > 0)
     {
-      precheck_buffer_.erase(precheck_buffer_.begin(), precheck_buffer_.begin() + static_cast<std::ptrdiff_t>(offset));
+      erase_precheck_buffer_prefix(offset);
     }
     return false;
   }
@@ -1473,7 +1928,11 @@ private:
       {
         if (precheck_frame_needs_payload(frame_type, frame_flags))
         {
-          precheck_buffer_.assign(frame, data + length);
+          if (!assign_precheck_buffer(frame, static_cast<std::size_t>(data + length - frame)))
+          {
+            write_goaway(NGHTTP2_ENHANCE_YOUR_CALM);
+            return true;
+          }
         }
         else
         {
@@ -1492,7 +1951,11 @@ private:
 
     if (offset < length)
     {
-      precheck_buffer_.assign(data + offset, data + length);
+      if (!assign_precheck_buffer(data + offset, length - offset))
+      {
+        write_goaway(NGHTTP2_ENHANCE_YOUR_CALM);
+        return true;
+      }
     }
     return false;
   }
@@ -2002,6 +2465,11 @@ private:
 
   bool stream_has_ready_outbound_data(StreamState &stream)
   {
+    if (Vajra::response::response_has_body_stream(stream.response) &&
+        (stream.response.body_stream->has_buffered_data() || stream.response.body_stream->terminal()))
+    {
+      return true;
+    }
     if (stream_has_remaining_response_body(stream))
     {
       return true;
@@ -2024,6 +2492,10 @@ private:
 
   static bool stream_has_remaining_response_body(const StreamState &stream)
   {
+    if (Vajra::response::response_has_body_stream(stream.response))
+    {
+      return stream.response.body_stream->has_buffered_data() || !stream.response.body_stream->terminal();
+    }
     return stream.response_chunk_index < stream.response_body_chunks.size() ||
            (stream.response_body_file && stream.response_body_file_offset < stream.response_body_size);
   }
@@ -2144,6 +2616,7 @@ private:
     {
       auto state = std::make_shared<Vajra::rack::Http2StreamState>();
       state->stream_id = stream_id;
+      state->connection_buffer_budget = connection_buffer_budget_;
       state->protocol = stream.protocol;
       state->websocket = stream.protocol == "websocket";
       stream.http2_stream_state = std::move(state);
@@ -2248,18 +2721,6 @@ private:
            *content_length <= kHttp2DirectBodyBytes;
   }
 
-  void reserve_deferred_body_capacity(StreamState &stream) const
-  {
-    const std::optional<std::size_t> content_length = declared_content_length(stream);
-    if (content_length &&
-        *content_length <= config_.max_request_body_bytes &&
-        *content_length <= kHttp2DirectBodyBytes &&
-        stream.request_body.capacity() < *content_length)
-    {
-      stream.request_body.reserve(*content_length);
-    }
-  }
-
   RequestContext request_context_for(StreamState &stream) const
   {
     if (!authority_host_consistent(stream))
@@ -2277,10 +2738,9 @@ private:
         ParsedRequest{ParsedRequestLine{stream.method, stream.path, "HTTP/2"}, stream.headers},
         socket_context_,
         connection_.fd(),
-        "",
-        nullptr,
-        nullptr};
+        ""};
     request_context.http2_stream = stream.http2_stream_state;
+    request_context.connection_buffer_budget = connection_buffer_budget_;
     return request_context;
   }
 
@@ -2310,6 +2770,17 @@ private:
       if (stream.execution_session)
       {
         stream.input_state_owner = stream.execution_session->native_input_state_owner();
+        if (stream.input_state_owner &&
+            !Vajra::rack::native_input_set_connection_buffer_budget(
+                stream.input_state_owner.get(),
+                connection_buffer_budget_))
+        {
+          stream.execution_session->fail_request_body("HTTP/2 connection buffer budget exhausted");
+          stream.execution_session.reset();
+          stream.execution_start_failed = true;
+          stream.response = fallback_response(503, "Service Unavailable");
+          return false;
+        }
       }
       return true;
     }
@@ -2343,8 +2814,28 @@ private:
 
     if (stream.execution_session && !stream.request_body.empty())
     {
-      stream.execution_session->append_request_body_bytes(stream.request_body.data(), stream.request_body.size());
+      const std::size_t body_size = stream.request_body.size();
+      if (stream.input_state_owner)
+      {
+        if (!Vajra::rack::native_input_try_append_reserved(
+                stream.input_state_owner.get(),
+                stream.request_body.data(),
+                body_size))
+        {
+          stream.execution_session->fail_request_body("HTTP/2 request input is unavailable");
+          stream.execution_session.reset();
+          stream.invalid = true;
+          reset_stream(stream_id, NGHTTP2_REFUSED_STREAM);
+          return false;
+        }
+      }
+      else
+      {
+        stream.execution_session->append_request_body_bytes(stream.request_body.data(), body_size);
+        release_connection_buffer(body_size);
+      }
       stream.request_body.clear();
+      stream.tracked_request_body_bytes = 0;
     }
     return true;
   }
@@ -2375,6 +2866,11 @@ private:
         std::move(request_context),
         std::move(stream.execution_session),
         stream.started_at);
+    if (direct_execution)
+    {
+      task->tracked_request_body_bytes = stream.tracked_request_body_bytes;
+      stream.tracked_request_body_bytes = 0;
+    }
     if (stream.execution_start_failed)
     {
       task->queue_capacity_rejected = stream.queue_capacity_rejected;
@@ -2405,6 +2901,7 @@ private:
 
   void enqueue_finished_execution(const std::shared_ptr<ExecutionTask> &task)
   {
+    prepare_finished_execution(*task);
     pending_execution_count_.fetch_add(1, std::memory_order_acq_rel);
     {
       std::lock_guard<std::mutex> lock(finished_executions_mutex_);
@@ -2547,6 +3044,7 @@ private:
                     << std::endl;
           task->response = fallback_response(500, "Internal Server Error");
         }
+        prepare_finished_execution(*task);
         {
           std::lock_guard<std::mutex> lock(finished_executions_mutex_);
           finished_executions_.push_back(task);
@@ -2597,6 +3095,7 @@ private:
                 "OK",
                 Vajra::response::ConnectionBehavior::close};
           }
+          prepare_finished_execution(*task);
           {
             std::lock_guard<std::mutex> lock(finished_executions_mutex_);
             finished_executions_.push_back(task);
@@ -2622,10 +3121,74 @@ private:
     return request_executor_ && request_executor_->async_execution_supported();
   }
 
-  bool async_execution_saturated() const
+  // A direct Rack executor publishes its response as soon as its enumerable
+  // yields for the first time, but it remains occupied until body.each and
+  // body.close return.  Keep that producer in the same admission budget as a
+  // queued execution; otherwise a slow peer could release the H2 limit at the
+  // first byte and strand every Ruby worker behind full body queues.
+  void prune_finished_response_producers()
   {
-    return config_.max_pending_executions > 0 &&
-           pending_execution_count_.load(std::memory_order_acquire) >= config_.max_pending_executions;
+    active_response_producers_.erase(
+        std::remove_if(
+            active_response_producers_.begin(),
+            active_response_producers_.end(),
+            [](const std::shared_ptr<Vajra::response::ResponseBodyStream> &body_stream)
+            { return !body_stream || body_stream->producer_finished(); }),
+        active_response_producers_.end());
+  }
+
+  void retain_response_producer(
+      const std::shared_ptr<Vajra::response::ResponseBodyStream> &body_stream)
+  {
+    if (!body_stream || body_stream->producer_finished())
+    {
+      return;
+    }
+    const auto existing = std::find_if(
+        active_response_producers_.begin(),
+        active_response_producers_.end(),
+        [&body_stream](const std::shared_ptr<Vajra::response::ResponseBodyStream> &active)
+        { return active == body_stream; });
+    if (existing == active_response_producers_.end())
+    {
+      active_response_producers_.push_back(body_stream);
+    }
+  }
+
+  void publish_execution_admission_depth(std::size_t depth)
+  {
+    if (depth == reported_execution_admission_depth_)
+    {
+      return;
+    }
+    const std::int64_t delta =
+        static_cast<std::int64_t>(depth) - static_cast<std::int64_t>(reported_execution_admission_depth_);
+    Vajra::runtime::note_worker_http2_execution_admission_depth_delta(worker_runtime_state_, delta);
+    reported_execution_admission_depth_ = depth;
+  }
+
+  void update_execution_admission_depth()
+  {
+    publish_execution_admission_depth(
+        pending_execution_count_.load(std::memory_order_acquire) + active_response_producers_.size());
+  }
+
+  bool async_execution_saturated()
+  {
+    prune_finished_response_producers();
+    update_execution_admission_depth();
+    if (config_.max_pending_executions == 0)
+    {
+      return false;
+    }
+    const bool saturated = pending_execution_count_.load(std::memory_order_acquire) +
+                           active_response_producers_.size() >=
+                       config_.max_pending_executions;
+    if (saturated)
+    {
+      Vajra::runtime::note_worker_http2_execution_admission_rejection(worker_runtime_state_);
+    }
+    return saturated;
   }
 
   bool has_finished_executions() const
@@ -2666,6 +3229,11 @@ private:
       {
         return true;
       }
+      if (Vajra::response::response_has_body_stream(stream.response) &&
+          (!stream.response.body_stream->terminal() || stream.response.body_stream->has_buffered_data()))
+      {
+        return true;
+      }
       if (stream.http2_stream_state)
       {
         std::lock_guard<std::mutex> lock(stream.http2_stream_state->mutex);
@@ -2677,6 +3245,13 @@ private:
         {
           return true;
         }
+      }
+    }
+    for (const auto &body_stream : active_response_producers_)
+    {
+      if (body_stream && !body_stream->producer_finished())
+      {
+        return true;
       }
     }
     return false;
@@ -2708,11 +3283,19 @@ private:
       auto stream = streams_.find(task->stream_id);
       if (stream == streams_.end())
       {
+        if (Vajra::response::response_has_body_stream(task->response))
+        {
+          const std::shared_ptr<Vajra::response::ResponseBodyStream> body_stream = task->response.body_stream;
+          body_stream->cancel();
+          retain_response_producer(body_stream);
+        }
+        release_task_buffer_leases(*task);
         --pending_execution_count_;
         continue;
       }
       Vajra::runtime::note_worker_http2_execution_queue_wait_time(task->queue_wait_nanoseconds);
       complete_execution(*task, stream->second);
+      release_task_buffer_leases(*task);
       --pending_execution_count_;
     }
     Vajra::runtime::note_worker_http2_execution_drain_time(elapsed_nanoseconds(started_at));
@@ -2732,6 +3315,7 @@ private:
           stream.invalid ||
           rejected_stream_ids_.find(stream_id) != rejected_stream_ids_.end() ||
           !stream.response_body_chunks.empty() ||
+          Vajra::response::response_has_body_stream(stream.response) ||
           stream.tunnel_accepted)
       {
         continue;
@@ -2757,6 +3341,12 @@ private:
 
   void complete_execution(ExecutionTask &task, StreamState &stream)
   {
+    if (Vajra::response::response_has_body_stream(task.response) &&
+        !task.response.body_stream->attach_connection_buffer_budget(connection_buffer_budget_))
+    {
+      task.response.body_stream->cancel();
+      task.response = fallback_response(503, "");
+    }
     if (stream.http2_stream_state)
     {
       flush_http2_stream_events();
@@ -2793,6 +3383,13 @@ private:
       }
     }
 
+    // Retain the source separately from StreamState.  StreamState can be
+    // erased by a client RST before the Ruby producer has unwound, and that
+    // producer must still occupy admission until its each/close path ends.
+    const std::shared_ptr<Vajra::response::ResponseBodyStream> response_producer =
+        task.response.body_stream;
+    stream.tracked_response_body_bytes = task.tracked_response_body_bytes;
+    task.tracked_response_body_bytes = 0;
     stream.response = std::move(task.response);
     stream.response_body_chunks.clear();
     stream.response_body_file.reset();
@@ -2814,14 +3411,26 @@ private:
     stream.response_body_file_offset = 0;
     if (!validate_http2_response_or_replace_with_fallback(stream))
     {
+      release_connection_buffer(stream.tracked_response_body_bytes);
+      stream.tracked_response_body_bytes = 0;
       stream.response_body_chunks.clear();
       stream.response_body_file.reset();
       stream.response_body_size = Vajra::response::response_body_size(stream.response);
       if (!stream.response.body.empty())
       {
-        stream.response_body_chunks.push_back(stream.response.body);
+        if (try_reserve_connection_buffer(stream.response.body.size()))
+        {
+          stream.tracked_response_body_bytes = stream.response.body.size();
+          stream.response_body_chunks.push_back(std::move(stream.response.body));
+        }
+        else
+        {
+          stream.response = fallback_response(503, "");
+          stream.response_body_size = 0;
+        }
       }
     }
+    retain_response_producer(response_producer);
     submit_response(task.stream_id, stream);
     Vajra::runtime::note_worker_request_completed();
     Vajra::runtime::note_worker_request_time(
@@ -2856,6 +3465,7 @@ private:
     while (has_pending_executions())
     {
       drain_finished_executions();
+      cancel_response_body_streams();
       flush_http2_stream_events();
       if (has_pending_executions())
       {
@@ -3044,6 +3654,10 @@ private:
       return true;
     }
 
+    if (Vajra::response::response_has_body_stream(stream.response))
+    {
+      stream.response.body_stream->cancel();
+    }
     stream.response = fallback_response(500, "Internal Server Error");
     stream.response_chunk_index = 0;
     stream.response_chunk_offset = 0;
@@ -3067,7 +3681,9 @@ private:
       owned_headers.push_back(OwnedHttp2Header{lower_ascii(header.name), header.value});
     }
     const bool status_forbids_body = Vajra::response::status_forbids_message_body(stream.response.status.code);
-    if (stream.response_body_size > 0 && !status_forbids_body)
+    if ((!Vajra::response::response_has_body_stream(stream.response) ||
+         Vajra::response::response_body_stream_has_known_length(stream.response)) &&
+        !status_forbids_body)
     {
       owned_headers.push_back(OwnedHttp2Header{"content-length", std::to_string(stream.response_body_size)});
     }
@@ -3083,8 +3699,10 @@ private:
     provider.source.ptr = nullptr;
     provider.read_callback = data_read_callback;
     const bool suppress_response_body = stream.method == "HEAD" || status_forbids_body;
+    const bool has_response_body_provider =
+        Vajra::response::response_has_body_stream(stream.response) || stream.response_body_size > 0;
     const nghttp2_data_provider *provider_ptr =
-        stream.response_body_size == 0 || suppress_response_body ? nullptr : &provider;
+        !has_response_body_provider || suppress_response_body ? nullptr : &provider;
     check(
         nghttp2_submit_response(
             session_.get(),
@@ -3102,7 +3720,13 @@ private:
     {
       const std::int32_t stream_id = entry.first;
       const StreamState &stream = entry.second;
-      if (stream_has_remaining_response_body(stream) ||
+      const bool response_stream_ready =
+          Vajra::response::response_has_body_stream(stream.response) &&
+          (stream.response.body_stream->has_buffered_data() || stream.response.body_stream->terminal());
+      const bool legacy_response_body_ready =
+          !Vajra::response::response_has_body_stream(stream.response) &&
+          stream_has_remaining_response_body(stream);
+      if (response_stream_ready || legacy_response_body_ready ||
           (stream.http2_stream_state && stream.tunnel_data_provider_active))
       {
         const int result = nghttp2_session_resume_data(session_.get(), stream_id);
@@ -3110,6 +3734,69 @@ private:
         {
           check(result, "nghttp2_session_resume_data");
         }
+      }
+    }
+  }
+
+  void process_response_body_streams()
+  {
+    std::array<char, Vajra::response::ResponseBodyStream::kMaximumChunkBytes> discard_buffer;
+    for (auto &entry : streams_)
+    {
+      const std::int32_t stream_id = entry.first;
+      StreamState &stream = entry.second;
+      if (!Vajra::response::response_has_body_stream(stream.response))
+      {
+        continue;
+      }
+
+      const bool status_forbids_body = Vajra::response::status_forbids_message_body(stream.response.status.code);
+      const bool suppress_body = stream.method == "HEAD" || status_forbids_body;
+      if (!suppress_body)
+      {
+        continue;
+      }
+
+      for (;;)
+      {
+        const Vajra::response::ResponseBodyStream::ReadResult result =
+            stream.response.body_stream->read(discard_buffer.data(), discard_buffer.size(), false);
+        if (result.status == Vajra::response::ResponseBodyStream::ReadStatus::data)
+        {
+          if (status_forbids_body)
+          {
+            stream.response.body_stream->cancel();
+            reset_stream(stream_id, NGHTTP2_INTERNAL_ERROR);
+            break;
+          }
+          continue;
+        }
+        if (result.status == Vajra::response::ResponseBodyStream::ReadStatus::failed ||
+            result.status == Vajra::response::ResponseBodyStream::ReadStatus::cancelled)
+        {
+          reset_stream(stream_id, NGHTTP2_INTERNAL_ERROR);
+        }
+        break;
+      }
+    }
+    resume_deferred_data();
+  }
+
+  void cancel_response_body_streams()
+  {
+    for (auto &entry : streams_)
+    {
+      StreamState &stream = entry.second;
+      if (Vajra::response::response_has_body_stream(stream.response))
+      {
+        stream.response.body_stream->cancel();
+      }
+    }
+    for (const auto &body_stream : active_response_producers_)
+    {
+      if (body_stream)
+      {
+        body_stream->cancel();
       }
     }
   }
@@ -3303,14 +3990,22 @@ private:
   Http2Config config_;
   std::shared_ptr<const RequestExecutor> request_executor_;
   std::shared_ptr<Http2ExecutionPool> execution_pool_;
+  std::shared_ptr<Vajra::rack::Http2ConnectionBufferBudget> connection_buffer_budget_;
+  Vajra::runtime::WorkerRuntimeState *worker_runtime_state_ = nullptr;
+  std::size_t reported_execution_admission_depth_ = 0;
   std::unique_ptr<nghttp2_session_callbacks, CallbackDeleter> callbacks_;
   std::unique_ptr<nghttp2_session, SessionDeleter> session_;
   std::unordered_map<std::int32_t, StreamState> streams_;
+  // Session-thread-owned.  Sources remain here after their HTTP/2 stream is
+  // closed so response-ready does not masquerade as producer completion for
+  // admission control.
+  std::vector<std::shared_ptr<Vajra::response::ResponseBodyStream>> active_response_producers_;
   std::unordered_map<std::int32_t, PriorityNode> priority_tree_;
   std::unordered_set<std::int32_t> rejected_stream_ids_;
   std::unordered_set<std::int32_t> closed_stream_ids_;
   std::deque<std::int32_t> closed_stream_order_;
   std::vector<std::uint8_t> precheck_buffer_;
+  std::size_t tracked_precheck_buffer_bytes_ = 0;
   std::size_t precheck_skip_payload_bytes_ = 0;
   std::vector<std::int32_t> completed_stream_ids_;
   std::vector<std::shared_ptr<ExecutionTask>> finished_executions_;
@@ -3322,11 +4017,13 @@ private:
   std::int32_t highest_observed_request_stream_id_ = 0;
   EntryMode entry_mode_ = EntryMode::client_preface;
   std::string initial_bytes_;
+  std::size_t tracked_initial_bytes_ = 0;
   bool goaway_submitted_ = false;
   bool peer_goaway_received_ = false;
   bool client_preface_seen_ = false;
   bool resume_deferred_data_pending_ = false;
   std::vector<std::uint8_t> pending_receive_bytes_;
+  std::size_t tracked_pending_receive_bytes_ = 0;
 };
 
 Vajra::request::Http2Session::Http2Session(
@@ -3387,3 +4084,10 @@ void Vajra::request::Http2Session::run()
 {
   impl_->run();
 }
+
+#ifdef VAJRA_RUNTIME_TESTING
+std::size_t Vajra::request::Http2Session::active_response_producer_count_for_testing() const
+{
+  return impl_->active_response_producer_count_for_testing();
+}
+#endif

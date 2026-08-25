@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RUBY_VERSION: 3.4.3
+  RUBY_VERSION: 3.4.10
 
 jobs:
   verify_release:
@@ -38,10 +38,10 @@ jobs:
       id-token: write
     environment: release
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: ruby/setup-ruby@v1
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
         with:
           ruby-version: ${{ env.RUBY_VERSION }}
           bundler-cache: true
@@ -57,6 +57,14 @@ jobs:
           fi
       - name: Configure RubyGems Credentials
         uses: rubygems/configure-rubygems-credentials@dc5a8d8553e6ee01fc26761a49e99e733d17954a
+      - name: Record build provenance
+        run: scripts/write-build-provenance "${RUNNER_TEMP}/vajra-build-provenance.json"
+      - name: Upload build provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: vajra-build-provenance-${{ github.ref_name }}
+          path: ${{ runner.temp }}/vajra-build-provenance.json
+          if-no-files-found: error
       - name: Build and push gem
         working-directory: ${{ github.workspace }}/gems/vajra
         run: |

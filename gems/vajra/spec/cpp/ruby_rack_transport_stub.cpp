@@ -4,6 +4,7 @@
 // LICENSE file in the root directory of this source tree.
 
 #include "../../ext/vajra/rack/ruby_rack_transport.hpp"
+#include "../../ext/vajra/rack/native_input.hpp"
 
 #include <memory>
 #include <optional>
@@ -49,7 +50,8 @@ namespace
         const std::string &,
         Vajra::platform::SocketHandle,
         std::shared_ptr<Vajra::rack::Http2StreamState>,
-        std::shared_ptr<Vajra::rack::NativeHijackTransport>) const override
+        std::shared_ptr<Vajra::rack::NativeHijackTransport>,
+        std::shared_ptr<Vajra::response::ConnectionBufferBudget>) const override
     {
       return std::nullopt;
     }
@@ -85,4 +87,19 @@ std::optional<Vajra::response::Response> Vajra::rack::execute_current_thread_rac
     platform::SocketHandle)
 {
   throw std::logic_error("Ruby Rack transport is unavailable in native C++ tests");
+}
+
+bool Vajra::rack::native_input_try_append_reserved(NativeInputState *, const char *, std::size_t)
+{
+  // The native C++ target deliberately does not link Ruby's NativeInput
+  // implementation. A test which needs a real rack.input must use the Ruby
+  // integration target rather than silently accepting an unowned transfer.
+  return false;
+}
+
+bool Vajra::rack::native_input_set_connection_buffer_budget(
+    NativeInputState *,
+    std::shared_ptr<Vajra::response::ConnectionBufferBudget>)
+{
+  return false;
 }

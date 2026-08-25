@@ -65,20 +65,23 @@ namespace Vajra
           const std::string &request_body,
           platform::SocketHandle client_fd,
           std::shared_ptr<Http2StreamState> http2_stream = nullptr,
-          std::shared_ptr<NativeHijackTransport> native_hijack_transport = nullptr) const = 0;
+          std::shared_ptr<NativeHijackTransport> native_hijack_transport = nullptr,
+          std::shared_ptr<Vajra::response::ConnectionBufferBudget> connection_buffer_budget = nullptr) const = 0;
       virtual std::optional<Vajra::response::Response> execute(
           const std::vector<request::RackEnvEntry> &env_entries,
           std::string &&request_body,
           platform::SocketHandle client_fd,
           std::shared_ptr<Http2StreamState> http2_stream = nullptr,
-          std::shared_ptr<NativeHijackTransport> native_hijack_transport = nullptr) const
+          std::shared_ptr<NativeHijackTransport> native_hijack_transport = nullptr,
+          std::shared_ptr<Vajra::response::ConnectionBufferBudget> connection_buffer_budget = nullptr) const
       {
         return execute(
             env_entries,
             static_cast<const std::string &>(request_body),
             client_fd,
             std::move(http2_stream),
-            std::move(native_hijack_transport));
+            std::move(native_hijack_transport),
+            std::move(connection_buffer_budget));
       }
       virtual bool execute_async(
           std::vector<request::RackEnvEntry> env_entries,
@@ -86,7 +89,8 @@ namespace Vajra
           platform::SocketHandle client_fd,
           std::shared_ptr<Http2StreamState> http2_stream,
           std::shared_ptr<NativeHijackTransport> native_hijack_transport,
-          request::RequestExecutor::CompletionCallback callback) const
+          request::RequestExecutor::CompletionCallback callback,
+          std::shared_ptr<Vajra::response::ConnectionBufferBudget> connection_buffer_budget = nullptr) const
       {
         (void)env_entries;
         (void)request_body;
@@ -94,6 +98,7 @@ namespace Vajra
         (void)http2_stream;
         (void)native_hijack_transport;
         (void)callback;
+        (void)connection_buffer_budget;
         return false;
       }
       virtual std::string stats_payload_json() const;

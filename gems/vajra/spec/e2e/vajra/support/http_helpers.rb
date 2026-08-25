@@ -9,7 +9,7 @@ require 'fileutils'
 require 'tmpdir'
 
 module VajraE2EHttpHelpers
-  def parse_http_response(response)
+  def parse_http_response(response, decode_chunked: true)
     headers, body = response.split("\r\n\r\n", 2)
     raise ArgumentError, "incomplete HTTP response: #{response.inspect}" if body.nil?
 
@@ -21,6 +21,8 @@ module VajraE2EHttpHelpers
 
       [name.downcase, value.strip]
     end
+
+    body = decode_complete_http_chunked_body(body) if decode_chunked && http_chunked_transfer_encoding?(headers)
 
     { raw: response, status_line:, headers: parsed_headers, body: }
   end
@@ -39,11 +41,17 @@ module VajraE2EHttpHelpers
       response << socket.readpartial(4096) until response.include?("\r\n\r\n")
 
       headers, body = response.split("\r\n\r\n", 2)
-      content_length = http_content_length(headers)
+      if http_chunked_transfer_encoding?(headers)
+        raw_body, decoded_body, trailing_bytes = read_http_chunked_body(socket, body)
+        parsed = parse_http_response("#{headers}\r\n\r\n#{decoded_body}", decode_chunked: false)
+        parsed[:raw] = "#{headers}\r\n\r\n#{raw_body}"
+        [parsed, trailing_bytes]
+      else
+        content_length = http_content_length(headers)
+        body << socket.readpartial(4096) while body.bytesize < content_length
 
-      body << socket.readpartial(4096) while body.bytesize < content_length
-
-      [parse_http_response(http_complete_response(headers, body, content_length)), http_trailing_bytes(body, content_length)]
+        [parse_http_response(http_complete_response(headers, body, content_length)), http_trailing_bytes(body, content_length)]
+      end
     end
   rescue EOFError, Errno::ECONNRESET, Errno::ECONNABORTED => e
     raise e.class, http_read_failure_message(e, request_label, wait_thread, output, buffered_bytes, response), e.backtrace
@@ -73,6 +81,86 @@ module VajraE2EHttpHelpers
     return 0 unless content_length_header
 
     Integer(content_length_header.split(':', 2).last.strip)
+  end
+
+  def http_chunked_transfer_encoding?(headers)
+    headers.lines.any? do |line|
+      name, value = line.split(':', 2)
+      name&.casecmp?('transfer-encoding') && value.to_s.split(',').any? { |token| token.strip.casecmp?('chunked') }
+    end
+  end
+
+  def read_http_chunked_body(socket, initial_body)
+    buffered = String.new(initial_body, encoding: Encoding::BINARY)
+    raw_body = String.new(encoding: Encoding::BINARY)
+    decoded_body = String.new(encoding: Encoding::BINARY)
+
+    loop do
+      line = read_http_chunked_line(socket, buffered)
+      raw_body << line << "\r\n".b
+      chunk_length = Integer(line.split(';', 2).first, 16)
+      if chunk_length.zero?
+        loop do
+          trailer = read_http_chunked_line(socket, buffered)
+          raw_body << trailer << "\r\n".b
+          break if trailer.empty?
+        end
+        return [raw_body, decoded_body, buffered]
+      end
+
+      buffered << socket.readpartial(4096) while buffered.bytesize < chunk_length + 2
+      decoded_body << buffered.byteslice(0, chunk_length)
+      raw_body << buffered.slice!(0, chunk_length)
+      delimiter = buffered.slice!(0, 2)
+      raise ArgumentError, "invalid chunk delimiter: #{delimiter.inspect}" unless delimiter == "\r\n"
+
+      raw_body << delimiter
+    end
+  end
+
+  def read_http_chunked_line(socket, buffered)
+    buffered << socket.readpartial(4096) until (delimiter = buffered.index("\r\n"))
+
+    buffered.slice!(0, delimiter).tap { buffered.slice!(0, 2) }
+  end
+
+  # `read_http_response` decodes chunks while it is reading a socket.  Several
+  # Rack integration helpers intentionally retain the raw wire message for
+  # assertions, so parse that complete message here as well.  This keeps those
+  # callers focused on the decoded HTTP entity when a live Rack source uses
+  # chunked framing instead of a pre-advertised Content-Length.
+  def decode_complete_http_chunked_body(body)
+    buffered = String.new(body, encoding: Encoding::BINARY)
+    decoded_body = String.new(encoding: Encoding::BINARY)
+
+    loop do
+      delimiter = buffered.index("\r\n")
+      raise ArgumentError, 'incomplete chunk length in HTTP response' if delimiter.nil?
+
+      line = buffered.slice!(0, delimiter)
+      buffered.slice!(0, 2)
+      chunk_length = Integer(line.split(';', 2).first, 16)
+      if chunk_length.zero?
+        loop do
+          trailer_delimiter = buffered.index("\r\n")
+          raise ArgumentError, 'incomplete chunk trailer in HTTP response' if trailer_delimiter.nil?
+
+          trailer = buffered.slice!(0, trailer_delimiter)
+          buffered.slice!(0, 2)
+          return decoded_body if trailer.empty?
+        end
+      end
+
+      raise ArgumentError, 'incomplete chunk payload in HTTP response' if buffered.bytesize < chunk_length + 2
+
+      decoded_body << buffered.slice!(0, chunk_length)
+      delimiter_bytes = buffered.slice!(0, 2)
+      raise ArgumentError, "invalid chunk delimiter: #{delimiter_bytes.inspect}" unless delimiter_bytes == "\r\n"
+    end
+  rescue ArgumentError => e
+    raise e if e.message.include?('HTTP response')
+
+    raise ArgumentError, "invalid chunk length in HTTP response: #{e.message}"
   end
 
   def http_complete_response(headers, body, content_length)

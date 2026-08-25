@@ -31,8 +31,14 @@ namespace Vajra
 {
   namespace rack
   {
+    // Kept as a Rack-facing alias for extended CONNECT.  The actual ledger
+    // also backs normal H2 request/response sources, which can outlive this
+    // Rack wrapper after an HTTP/2 stream has closed.
+    using Http2ConnectionBufferBudget = Vajra::response::ConnectionBufferBudget;
+
     struct Http2StreamState
     {
+      ~Http2StreamState();
       mutable std::mutex mutex;
       std::condition_variable data_condition;
       std::condition_variable capacity_condition;
@@ -42,6 +48,11 @@ namespace Vajra
       std::vector<Vajra::response::Header> accept_headers;
       std::size_t inbound_bytes = 0;
       std::size_t outbound_bytes = 0;
+      // Chunks retain their allocation until fully consumed; offsets avoid an
+      // O(n) erase/memmove on every partial HTTP/2 read or DATA provider pull.
+      std::size_t inbound_front_offset = 0;
+      std::size_t outbound_front_offset = 0;
+      std::shared_ptr<Http2ConnectionBufferBudget> connection_buffer_budget;
       std::size_t high_watermark = 1024 * 1024;
       std::size_t low_watermark = 512 * 1024;
       std::int32_t stream_id = 0;

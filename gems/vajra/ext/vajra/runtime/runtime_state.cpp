@@ -769,6 +769,67 @@ void Vajra::runtime::note_worker_http2_session_send_time(std::int64_t nanosecond
   add_installed_worker_nanoseconds(&WorkerRuntimeState::http2_session_send_nanoseconds, nanoseconds);
 }
 
+void Vajra::runtime::note_worker_http2_tracked_buffer_delta(
+    WorkerRuntimeState *state,
+    std::int64_t byte_delta,
+    bool reservation_rejected)
+{
+  if (state == nullptr)
+  {
+    return;
+  }
+  if (reservation_rejected)
+  {
+    state->http2_buffer_budget_rejections.fetch_add(1, std::memory_order_acq_rel);
+  }
+  if (byte_delta == 0)
+  {
+    return;
+  }
+
+  const std::int64_t current =
+      state->http2_tracked_buffer_bytes.fetch_add(byte_delta, std::memory_order_acq_rel) + byte_delta;
+  if (current < 0)
+  {
+    state->http2_tracked_buffer_bytes.store(0, std::memory_order_release);
+    return;
+  }
+  std::uint64_t peak = state->http2_tracked_buffer_peak_bytes.load(std::memory_order_acquire);
+  const std::uint64_t current_unsigned = static_cast<std::uint64_t>(current);
+  while (current_unsigned > peak &&
+         !state->http2_tracked_buffer_peak_bytes.compare_exchange_weak(
+             peak,
+             current_unsigned,
+             std::memory_order_acq_rel,
+             std::memory_order_acquire))
+  {
+  }
+}
+
+void Vajra::runtime::note_worker_http2_execution_admission_depth_delta(
+    WorkerRuntimeState *state,
+    std::int64_t depth_delta)
+{
+  if (state == nullptr || depth_delta == 0)
+  {
+    return;
+  }
+  const std::int64_t current =
+      state->http2_execution_admission_depth.fetch_add(depth_delta, std::memory_order_acq_rel) + depth_delta;
+  if (current < 0)
+  {
+    state->http2_execution_admission_depth.store(0, std::memory_order_release);
+  }
+}
+
+void Vajra::runtime::note_worker_http2_execution_admission_rejection(WorkerRuntimeState *state)
+{
+  if (state != nullptr)
+  {
+    state->http2_execution_admission_rejections.fetch_add(1, std::memory_order_acq_rel);
+  }
+}
+
 void Vajra::runtime::note_worker_request_completed()
 {
   if (installed_worker_state != nullptr)
@@ -867,6 +928,11 @@ std::string Vajra::runtime::runtime_stats_payload_json()
   std::uint64_t total_dispatches = 0;
   std::uint64_t total_receives = 0;
   std::uint64_t total_fd_transfer_failures = 0;
+  std::int64_t total_http2_tracked_buffer_bytes = 0;
+  std::uint64_t total_http2_tracked_buffer_peak_bytes = 0;
+  std::uint64_t total_http2_buffer_budget_rejections = 0;
+  std::int64_t total_http2_execution_admission_depth = 0;
+  std::uint64_t total_http2_execution_admission_rejections = 0;
 
   std::ostringstream payload;
   payload << '{'
@@ -927,6 +993,11 @@ std::string Vajra::runtime::runtime_stats_payload_json()
     total_dispatches += worker.dispatch_count.load(std::memory_order_acquire);
     total_receives += worker.receive_count.load(std::memory_order_acquire);
     total_fd_transfer_failures += worker.fd_transfer_failures.load(std::memory_order_acquire);
+    total_http2_tracked_buffer_bytes += worker.http2_tracked_buffer_bytes.load(std::memory_order_acquire);
+    total_http2_tracked_buffer_peak_bytes += worker.http2_tracked_buffer_peak_bytes.load(std::memory_order_acquire);
+    total_http2_buffer_budget_rejections += worker.http2_buffer_budget_rejections.load(std::memory_order_acquire);
+    total_http2_execution_admission_depth += worker.http2_execution_admission_depth.load(std::memory_order_acquire);
+    total_http2_execution_admission_rejections += worker.http2_execution_admission_rejections.load(std::memory_order_acquire);
 
     payload << '{'
             << "\"worker_index\":" << index << ','
@@ -936,6 +1007,11 @@ std::string Vajra::runtime::runtime_stats_payload_json()
             << "\"active_execution_count\":" << worker.active_execution_count.load(std::memory_order_acquire) << ','
             << "\"idle_execution_count\":" << worker.idle_execution_count.load(std::memory_order_acquire) << ','
             << "\"local_queue_depth\":" << worker.local_queue_depth.load(std::memory_order_acquire) << ','
+            << "\"http2_tracked_buffer_bytes\":" << worker.http2_tracked_buffer_bytes.load(std::memory_order_acquire) << ','
+            << "\"http2_tracked_buffer_peak_bytes\":" << worker.http2_tracked_buffer_peak_bytes.load(std::memory_order_acquire) << ','
+            << "\"http2_buffer_budget_rejections\":" << worker.http2_buffer_budget_rejections.load(std::memory_order_acquire) << ','
+            << "\"http2_execution_admission_depth\":" << worker.http2_execution_admission_depth.load(std::memory_order_acquire) << ','
+            << "\"http2_execution_admission_rejections\":" << worker.http2_execution_admission_rejections.load(std::memory_order_acquire) << ','
             << "\"available\":" << (worker.available.load(std::memory_order_acquire) ? "true" : "false") << ','
             << "\"lifecycle_state_name\":"
             << escaped_json_string(lifecycle_state_name(static_cast<WorkerLifecycleState>(
@@ -988,6 +1064,13 @@ std::string Vajra::runtime::runtime_stats_payload_json()
           << "\"dispatch_count\":" << total_dispatches << ','
           << "\"receive_count\":" << total_receives << ','
           << "\"fd_transfer_failures\":" << total_fd_transfer_failures
+          << "},"
+          << "\"http2_resources\":{"
+          << "\"tracked_buffer_bytes\":" << total_http2_tracked_buffer_bytes << ','
+          << "\"tracked_buffer_peak_bytes\":" << total_http2_tracked_buffer_peak_bytes << ','
+          << "\"buffer_budget_rejections\":" << total_http2_buffer_budget_rejections << ','
+          << "\"execution_admission_depth\":" << total_http2_execution_admission_depth << ','
+          << "\"execution_admission_rejections\":" << total_http2_execution_admission_rejections
           << "},"
           << "\"native_observability\":{"
           << "\"request_events_total\":" << Vajra::runtime::runtime_native_request_observability_events_total() << ','
@@ -1065,6 +1148,16 @@ std::string Vajra::runtime::runtime_metrics_payload_text()
             << worker.http2_session_send_nanoseconds.load(std::memory_order_acquire) << '\n';
     payload << "vajra_worker_local_queue_depth{worker=\"" << index << "\"} "
             << worker.local_queue_depth.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_http2_tracked_buffer_bytes{worker=\"" << index << "\"} "
+            << worker.http2_tracked_buffer_bytes.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_http2_tracked_buffer_peak_bytes{worker=\"" << index << "\"} "
+            << worker.http2_tracked_buffer_peak_bytes.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_http2_buffer_budget_rejections_total{worker=\"" << index << "\"} "
+            << worker.http2_buffer_budget_rejections.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_http2_execution_admission_depth{worker=\"" << index << "\"} "
+            << worker.http2_execution_admission_depth.load(std::memory_order_acquire) << '\n';
+    payload << "vajra_worker_http2_execution_admission_rejections_total{worker=\"" << index << "\"} "
+            << worker.http2_execution_admission_rejections.load(std::memory_order_acquire) << '\n';
     payload << "vajra_worker_lifecycle_state{worker=\"" << index << "\",state=\""
             << worker_lifecycle_state_name(
                    static_cast<WorkerLifecycleState>(worker.lifecycle_state.load(std::memory_order_acquire)))

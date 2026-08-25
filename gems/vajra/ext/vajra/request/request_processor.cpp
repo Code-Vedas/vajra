@@ -976,6 +976,13 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
     }
 
     Vajra::response::Response response;
+    const auto cancel_early_response_stream = [&response]()
+    {
+        if (Vajra::response::response_has_body_stream(response))
+        {
+            response.body_stream->cancel();
+        }
+    };
     try
     {
         const auto rack_finish_started_at = std::chrono::steady_clock::now();
@@ -995,6 +1002,7 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
     }
     catch (const HeadError &error)
     {
+        cancel_early_response_stream();
         const auto rejection_response = response_writer_.request_head_failure_response(error.kind());
         const bool response_sent = reject_request_head(connection, error, rejection_response);
         const auto event = access_event_for(
@@ -1014,6 +1022,7 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
     }
     catch (const QueueCapacityError &error)
     {
+        cancel_early_response_stream();
         const auto rejection_response = response_writer_.queue_capacity_response();
         const bool response_sent = reject_request_queue_capacity(connection, error, rejection_response);
         const auto event = access_event_for(
@@ -1028,6 +1037,7 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
     }
     catch (const RequestTimeoutError &error)
     {
+        cancel_early_response_stream();
         const auto rejection_response = response_writer_.request_timeout_response();
         const bool response_sent = reject_request_timeout(connection, error, rejection_response);
         const auto event = access_event_for(
@@ -1042,6 +1052,7 @@ Vajra::request::RequestProcessingResult Vajra::request::RequestProcessor::handle
     }
     catch (const std::exception &error)
     {
+        cancel_early_response_stream();
         const auto rejection_response = response_writer_.internal_server_error_response();
         const bool response_sent = reject_request_execution(connection, error, rejection_response);
         const auto event = access_event_for(

@@ -15,10 +15,12 @@
 #include "runtime/traceparent.hpp"
 #include "ruby/thread.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -42,11 +44,27 @@ namespace
     std::shared_ptr<Vajra::rack::NativeInputState> input_state;
     std::shared_ptr<Vajra::rack::NativeHijackState> hijack_state;
     std::shared_ptr<Vajra::rack::Http2StreamState> http2_stream;
+    std::shared_ptr<Vajra::response::ConnectionBufferBudget> connection_buffer_budget;
     std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport;
     std::optional<Vajra::response::Response> response;
     std::string error_message;
     bool use_native_app = false;
+    std::function<void(const Vajra::response::Response &)> response_ready_callback;
+    bool response_ready_published = false;
+    bool publish_response_before_each = true;
   };
+
+  using ResponseReadyCallback = std::function<void(const Vajra::response::Response &)>;
+
+  void publish_response_ready(ExecutionCallContext *context)
+  {
+    if (context->response_ready_published || !context->response || !context->response_ready_callback)
+    {
+      return;
+    }
+    context->response_ready_published = true;
+    context->response_ready_callback(*context->response);
+  }
 
   struct ResponseNormalizationContext
   {
@@ -234,7 +252,24 @@ namespace
           return Qnil;
         }
         Vajra::rack::RubyExecutionBridge::commit_native_hijack(context->hijack_state);
-        context->response = Vajra::rack::RackResponseHandler::response_from_rack_result(result);
+        if (context->response_ready_callback)
+        {
+          VALUE response_body = Qnil;
+          context->response = Vajra::rack::RackResponseHandler::response_from_rack_result_head(
+              result,
+              &response_body,
+              context->connection_buffer_budget);
+          Vajra::rack::RackResponseHandler::stream_rack_body(
+              response_body,
+              context->response->body_stream,
+              [context]()
+              { publish_response_ready(context); },
+              context->publish_response_before_each);
+        }
+        else
+        {
+          context->response = Vajra::rack::RackResponseHandler::response_from_rack_result(result);
+        }
         if (close_rack_input_after_app)
         {
           Vajra::rack::RubyExecutionBridge::close_rack_input(env);
@@ -354,6 +389,7 @@ namespace
       }
 
       context->response = std::move(normalization_context.response);
+      publish_response_ready(context);
     }
 
     profiling_cleanup();
@@ -369,15 +405,33 @@ namespace
       std::string request_body,
       Vajra::platform::SocketHandle client_fd,
       std::shared_ptr<Vajra::rack::Http2StreamState> http2_stream,
+      std::shared_ptr<Vajra::response::ConnectionBufferBudget> connection_buffer_budget,
       std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport,
-      bool acquire_gvl)
+      bool acquire_gvl,
+      ResponseReadyCallback response_ready_callback = nullptr,
+      bool publish_response_before_each = true)
   {
     if (!rack_execution_callback_installed_flag.load(std::memory_order_acquire))
     {
       return std::nullopt;
     }
 
-    ExecutionCallContext context{&env_entries, &request_body, Qnil, client_fd, nullptr, nullptr, std::move(http2_stream), std::move(native_hijack_transport), std::nullopt, ""};
+    ExecutionCallContext context{
+        &env_entries,
+        &request_body,
+        Qnil,
+        client_fd,
+        nullptr,
+        nullptr,
+        std::move(http2_stream),
+        std::move(connection_buffer_budget),
+        std::move(native_hijack_transport),
+        std::nullopt,
+        "",
+        false,
+        std::move(response_ready_callback),
+        false,
+        publish_response_before_each};
     context.use_native_app = rack_execution_app_installed_flag.load(std::memory_order_acquire);
     if (acquire_gvl)
     {
@@ -402,8 +456,11 @@ namespace
       Vajra::platform::SocketHandle client_fd,
       std::shared_ptr<Vajra::rack::NativeInputState> input_state,
       std::shared_ptr<Vajra::rack::Http2StreamState> http2_stream,
+      std::shared_ptr<Vajra::response::ConnectionBufferBudget> connection_buffer_budget,
       std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport,
-      bool acquire_gvl)
+      bool acquire_gvl,
+      ResponseReadyCallback response_ready_callback = nullptr,
+      bool publish_response_before_each = true)
   {
     if (!rack_execution_callback_installed_flag.load(std::memory_order_acquire))
     {
@@ -411,7 +468,22 @@ namespace
     }
 
     std::string empty_body;
-    ExecutionCallContext context{&env_entries, &empty_body, rack_input, client_fd, std::move(input_state), nullptr, std::move(http2_stream), std::move(native_hijack_transport), std::nullopt, ""};
+    ExecutionCallContext context{
+        &env_entries,
+        &empty_body,
+        rack_input,
+        client_fd,
+        std::move(input_state),
+        nullptr,
+        std::move(http2_stream),
+        std::move(connection_buffer_budget),
+        std::move(native_hijack_transport),
+        std::nullopt,
+        "",
+        false,
+        std::move(response_ready_callback),
+        false,
+        publish_response_before_each};
     context.use_native_app = rack_execution_app_installed_flag.load(std::memory_order_acquire);
     if (!NIL_P(context.rack_input))
     {
@@ -468,7 +540,11 @@ namespace
             client_fd_,
             input_state_,
             nullptr,
+            nullptr,
             native_hijack_transport_,
+            false,
+            [this](const Vajra::response::Response &response)
+            { publish_response_ready(response); },
             false));
       }
       catch (const std::exception &error)
@@ -483,7 +559,27 @@ namespace
 
     void cancel(const std::string &message)
     {
-      complete_with_error(message);
+      std::shared_ptr<Vajra::response::ResponseBodyStream> body_stream;
+      {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        cancelled_ = true;
+        body_stream = response_body_stream_;
+        if (!response_ready_)
+        {
+          error_message_ = message;
+          response_ready_ = true;
+        }
+        completed_ = true;
+      }
+      if (body_stream)
+      {
+        body_stream->cancel();
+      }
+      // A Rack worker can be parked in rack.input.read() before it has a
+      // response body stream to cancel.  Wake that wait as part of task
+      // cancellation so pool shutdown cannot strand the only Ruby worker.
+      Vajra::rack::native_input_fail(input_state_.get(), message);
+      condition_.notify_all();
     }
 
     void wait()
@@ -491,6 +587,13 @@ namespace
       std::unique_lock<std::mutex> lock(mutex_);
       condition_.wait(lock, [this]()
                       { return completed_; });
+    }
+
+    void wait_response()
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      condition_.wait(lock, [this]()
+                      { return response_ready_ || completed_; });
     }
 
     bool completed() const
@@ -512,13 +615,53 @@ namespace
     }
 
   private:
-    void complete_with_response(std::optional<Vajra::response::Response> response)
+    void publish_response_ready(const Vajra::response::Response &response)
     {
+      std::shared_ptr<Vajra::response::ResponseBodyStream> body_stream_to_cancel;
       {
         const std::lock_guard<std::mutex> lock(mutex_);
-        response_ = std::move(response);
+        if (response_ready_)
+        {
+          if (cancelled_)
+          {
+            body_stream_to_cancel = response.body_stream;
+          }
+        }
+        else
+        {
+          response_ = response;
+          response_body_stream_ = response.body_stream;
+          response_ready_ = true;
+          if (cancelled_)
+          {
+            body_stream_to_cancel = response_body_stream_;
+          }
+        }
+      }
+      if (body_stream_to_cancel)
+      {
+        body_stream_to_cancel->cancel();
+      }
+      condition_.notify_all();
+    }
+
+    void complete_with_response(std::optional<Vajra::response::Response> response)
+    {
+      if (response)
+      {
+        publish_response_ready(*response);
+      }
+      {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        if (!response_ready_)
+        {
+          response_ = std::move(response);
+          response_body_stream_ = response_ ? response_->body_stream : nullptr;
+          response_ready_ = true;
+        }
         completed_ = true;
       }
+      close_input_noexcept();
       condition_.notify_all();
     }
 
@@ -527,9 +670,22 @@ namespace
       {
         const std::lock_guard<std::mutex> lock(mutex_);
         error_message_ = std::move(message);
+        response_ready_ = true;
         completed_ = true;
       }
+      close_input_noexcept();
       condition_.notify_all();
+    }
+
+    void close_input_noexcept() noexcept
+    {
+      try
+      {
+        Vajra::rack::native_input_close(input_state_.get());
+      }
+      catch (...)
+      {
+      }
     }
 
     std::vector<Vajra::request::RackEnvEntry> env_entries_;
@@ -539,8 +695,11 @@ namespace
     mutable std::mutex mutex_;
     std::condition_variable condition_;
     std::optional<Vajra::response::Response> response_;
+    std::shared_ptr<Vajra::response::ResponseBodyStream> response_body_stream_;
     std::string error_message_;
+    bool response_ready_ = false;
     bool completed_ = false;
+    bool cancelled_ = false;
   };
 
   class SameProcessDirectRackTask final
@@ -552,12 +711,14 @@ namespace
         Vajra::platform::SocketHandle client_fd,
         std::shared_ptr<Vajra::rack::Http2StreamState> http2_stream = nullptr,
         std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport = nullptr,
+        std::shared_ptr<Vajra::response::ConnectionBufferBudget> connection_buffer_budget = nullptr,
         Vajra::request::RequestExecutor::CompletionCallback callback = nullptr)
         : env_entries_(std::move(env_entries)),
           request_body_(std::move(request_body)),
           client_fd_(client_fd),
           http2_stream_(std::move(http2_stream)),
           native_hijack_transport_(std::move(native_hijack_transport)),
+          connection_buffer_budget_(std::move(connection_buffer_budget)),
           callback_(std::move(callback)),
           enqueued_at_(std::chrono::steady_clock::now())
     {
@@ -572,8 +733,13 @@ namespace
             request_body_,
             client_fd_,
             http2_stream_,
+            connection_buffer_budget_,
             native_hijack_transport_,
-            false));
+            false,
+            ResponseReadyCallback(
+                [this](const Vajra::response::Response &response)
+                { publish_response_ready(response); }),
+            static_cast<bool>(callback_)));
       }
       catch (const std::exception &error)
       {
@@ -587,7 +753,29 @@ namespace
 
     void cancel(const std::string &message)
     {
-      complete_with_error(message);
+      std::shared_ptr<Vajra::response::ResponseBodyStream> body_stream;
+      bool notify_error = false;
+      {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        cancelled_ = true;
+        body_stream = response_body_stream_;
+        if (!response_ready_)
+        {
+          error_message_ = message;
+          response_ready_ = true;
+          notify_error = static_cast<bool>(callback_);
+        }
+        completed_ = true;
+      }
+      if (body_stream)
+      {
+        body_stream->cancel();
+      }
+      if (notify_error)
+      {
+        callback_(std::nullopt, message, elapsed_queue_wait_nanoseconds());
+      }
+      condition_.notify_all();
     }
 
     void wait()
@@ -595,6 +783,13 @@ namespace
       std::unique_lock<std::mutex> lock(mutex_);
       condition_.wait(lock, [this]()
                       { return completed_; });
+    }
+
+    void wait_response()
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      condition_.wait(lock, [this]()
+                      { return response_ready_ || completed_; });
     }
 
     std::optional<Vajra::response::Response> take_response()
@@ -610,19 +805,59 @@ namespace
     }
 
   private:
+    void publish_response_ready(const Vajra::response::Response &response)
+    {
+      std::shared_ptr<Vajra::response::ResponseBodyStream> body_stream_to_cancel;
+      bool notify_response = false;
+      {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        if (response_ready_)
+        {
+          if (cancelled_)
+          {
+            body_stream_to_cancel = response.body_stream;
+          }
+        }
+        else
+        {
+          response_ = response;
+          response_body_stream_ = response.body_stream;
+          response_ready_ = true;
+          if (cancelled_)
+          {
+            body_stream_to_cancel = response_body_stream_;
+          }
+          else
+          {
+            notify_response = static_cast<bool>(callback_);
+          }
+        }
+      }
+      if (body_stream_to_cancel)
+      {
+        body_stream_to_cancel->cancel();
+      }
+      if (notify_response)
+      {
+        callback_(response, "", elapsed_queue_wait_nanoseconds());
+      }
+      condition_.notify_all();
+    }
+
     void complete_with_response(std::optional<Vajra::response::Response> response)
     {
-      if (callback_)
+      if (response)
       {
-        callback_(
-            std::move(response),
-            "",
-            elapsed_queue_wait_nanoseconds());
-        return;
+        publish_response_ready(*response);
       }
       {
         const std::lock_guard<std::mutex> lock(mutex_);
-        response_ = std::move(response);
+        if (!response_ready_)
+        {
+          response_ = std::move(response);
+          response_body_stream_ = response_ ? response_->body_stream : nullptr;
+          response_ready_ = true;
+        }
         completed_ = true;
       }
       condition_.notify_all();
@@ -630,18 +865,23 @@ namespace
 
     void complete_with_error(std::string message)
     {
-      if (callback_)
+      bool notify_error = false;
+      {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        if (!response_ready_)
+        {
+          error_message_ = message;
+          response_ready_ = true;
+          notify_error = static_cast<bool>(callback_);
+        }
+        completed_ = true;
+      }
+      if (notify_error)
       {
         callback_(
             std::nullopt,
             std::move(message),
             elapsed_queue_wait_nanoseconds());
-        return;
-      }
-      {
-        const std::lock_guard<std::mutex> lock(mutex_);
-        error_message_ = std::move(message);
-        completed_ = true;
       }
       condition_.notify_all();
     }
@@ -658,13 +898,17 @@ namespace
     Vajra::platform::SocketHandle client_fd_ = Vajra::platform::kInvalidSocket;
     std::shared_ptr<Vajra::rack::Http2StreamState> http2_stream_;
     std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport_;
+    std::shared_ptr<Vajra::response::ConnectionBufferBudget> connection_buffer_budget_;
     Vajra::request::RequestExecutor::CompletionCallback callback_;
     std::chrono::steady_clock::time_point enqueued_at_;
     mutable std::mutex mutex_;
     std::condition_variable condition_;
     std::optional<Vajra::response::Response> response_;
+    std::shared_ptr<Vajra::response::ResponseBodyStream> response_body_stream_;
     std::string error_message_;
+    bool response_ready_ = false;
     bool completed_ = false;
+    bool cancelled_ = false;
   };
 
   class SameProcessRackExecutionPool final
@@ -697,6 +941,7 @@ namespace
       std::lock_guard<std::mutex> lock(mutex_);
       threads_.clear();
       tasks_.clear();
+      active_tasks_.clear();
       active_task_count_ = 0;
       closed_ = false;
       while (threads_.size() < desired_thread_count_)
@@ -708,10 +953,21 @@ namespace
 
     void shutdown()
     {
+      std::vector<QueuedTask> tasks_to_cancel;
       {
         const std::lock_guard<std::mutex> lock(mutex_);
         closed_ = true;
+        tasks_to_cancel.insert(tasks_to_cancel.end(), tasks_.begin(), tasks_.end());
+        tasks_.clear();
+        tasks_to_cancel.insert(tasks_to_cancel.end(), active_tasks_.begin(), active_tasks_.end());
         threads_.clear();
+      }
+      for (const QueuedTask &task : tasks_to_cancel)
+      {
+        if (task.task && task.cancel != nullptr)
+        {
+          task.cancel(task.task, "same-process Rack execution pool is shutting down");
+        }
       }
       condition_.notify_all();
     }
@@ -770,23 +1026,44 @@ namespace
     struct WaitContext
     {
       SameProcessRackExecutionPool *pool;
-      QueuedTask task;
+      bool ran = false;
     };
 
     static void *wait_for_task_without_gvl(void *data)
     {
       auto *context = static_cast<WaitContext *>(data);
+      context->ran = true;
       std::unique_lock<std::mutex> lock(context->pool->mutex_);
-      context->pool->condition_.wait(lock, [context]()
-                                     { return context->pool->closed_ || !context->pool->tasks_.empty(); });
-      if (context->pool->tasks_.empty())
-      {
-        return nullptr;
-      }
-      context->task = std::move(context->pool->tasks_.front());
-      context->pool->tasks_.pop_front();
-      ++context->pool->active_task_count_;
+      // Do not install RUBY_UBF_IO here.  Ruby can otherwise long-jump through
+      // a C++ task owner while interrupting the condition-variable wait.  A
+      // short predicate wait keeps asynchronous Ruby interrupts observable at
+      // the safe, owner-free boundary in worker_thread below.
+      context->pool->condition_.wait_for(
+          lock,
+          std::chrono::milliseconds(5),
+          [context]()
+          { return context->pool->closed_ || !context->pool->tasks_.empty(); });
       return nullptr;
+    }
+
+    bool take_next_task(QueuedTask &task)
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (tasks_.empty())
+      {
+        return false;
+      }
+      task = std::move(tasks_.front());
+      tasks_.pop_front();
+      active_tasks_.push_back(task);
+      ++active_task_count_;
+      return true;
+    }
+
+    bool closed()
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      return closed_;
     }
 
     static VALUE worker_thread(void *data)
@@ -794,29 +1071,51 @@ namespace
       auto *pool = static_cast<SameProcessRackExecutionPool *>(data);
       for (;;)
       {
-        WaitContext context{pool, QueuedTask{}};
-        rb_thread_call_without_gvl(wait_for_task_without_gvl, &context, RUBY_UBF_IO, nullptr);
-        if (!context.task.task)
+        // Keep only POD state over this no-GVL call.  `without_gvl2` declines
+        // entry when an interrupt is pending; check it before a shared_ptr is
+        // constructed on this frame.
+        WaitContext context{pool, false};
+        rb_thread_call_without_gvl2(wait_for_task_without_gvl, &context, nullptr, nullptr);
+        if (!context.ran)
         {
-          break;
+          rb_thread_check_ints();
+          continue;
+        }
+        rb_thread_check_ints();
+
+        QueuedTask task;
+        if (!pool->take_next_task(task))
+        {
+          if (pool->closed())
+          {
+            break;
+          }
+          continue;
         }
         try
         {
-          context.task.execute(context.task.task);
+          task.execute(task.task);
         }
         catch (...)
         {
-          context.task.cancel(context.task.task, "Rack request execution failed with an unknown native error");
+          task.cancel(task.task, "Rack request execution failed with an unknown native error");
         }
-        pool->task_finished();
+        pool->task_finished(task);
       }
       return Qnil;
     }
 
-    void task_finished()
+    void task_finished(const QueuedTask &task)
     {
       {
         std::lock_guard<std::mutex> lock(mutex_);
+        active_tasks_.erase(
+            std::remove_if(
+                active_tasks_.begin(),
+                active_tasks_.end(),
+                [&task](const QueuedTask &active)
+                { return active.task == task.task; }),
+            active_tasks_.end());
         if (active_task_count_ > 0)
         {
           --active_task_count_;
@@ -828,6 +1127,7 @@ namespace
     std::mutex mutex_;
     std::condition_variable condition_;
     std::deque<QueuedTask> tasks_;
+    std::vector<QueuedTask> active_tasks_;
     std::vector<VALUE> threads_;
     bool closed_ = true;
     std::size_t desired_thread_count_ = 1;
@@ -859,12 +1159,16 @@ namespace
 
     ~SameProcessRackExecutionSession() override
     {
-      if (!body_finished_)
+      if (!finished_)
       {
-        fail_noexcept("request body stream closed before completion");
+        if (!body_finished_)
+        {
+          fail_noexcept("request body stream closed before completion");
+        }
+        task_->cancel("request execution session closed before response completion");
+        wait_noexcept();
+        close_noexcept();
       }
-      wait_noexcept();
-      close_noexcept();
     }
 
     Vajra::rack::NativeInputState *native_input_state() override
@@ -913,13 +1217,15 @@ namespace
     std::optional<Vajra::response::Response> finish() override
     {
       finish_request_body();
-      task_->wait();
+      task_->wait_response();
       finished_ = true;
       const std::string error_message = task_->error_message();
       std::optional<Vajra::response::Response> response = task_->take_response();
-      close_noexcept();
       if (!error_message.empty())
       {
+        task_->cancel(error_message);
+        wait_noexcept();
+        close_noexcept();
         throw std::runtime_error(error_message);
       }
       return response;
@@ -994,7 +1300,8 @@ namespace
         const std::string &request_body,
         Vajra::platform::SocketHandle client_fd,
         std::shared_ptr<Vajra::rack::Http2StreamState> http2_stream = nullptr,
-        std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport = nullptr) const override
+        std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport = nullptr,
+        std::shared_ptr<Vajra::response::ConnectionBufferBudget> connection_buffer_budget = nullptr) const override
     {
       if (!rack_execution_callback_installed_flag.load(std::memory_order_acquire))
       {
@@ -1009,9 +1316,10 @@ namespace
           request_body,
           client_fd,
           std::move(http2_stream),
-          std::move(native_hijack_transport));
+          std::move(native_hijack_transport),
+          std::move(connection_buffer_budget));
       same_process_execution_pool().enqueue(task);
-      task->wait();
+      task->wait_response();
       const std::string error_message = task->error_message();
       if (!error_message.empty())
       {
@@ -1029,7 +1337,8 @@ namespace
         std::string &&request_body,
         Vajra::platform::SocketHandle client_fd,
         std::shared_ptr<Vajra::rack::Http2StreamState> http2_stream = nullptr,
-        std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport = nullptr) const override
+        std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport = nullptr,
+        std::shared_ptr<Vajra::response::ConnectionBufferBudget> connection_buffer_budget = nullptr) const override
     {
       if (!rack_execution_callback_installed_flag.load(std::memory_order_acquire))
       {
@@ -1044,9 +1353,10 @@ namespace
           std::move(request_body),
           client_fd,
           std::move(http2_stream),
-          std::move(native_hijack_transport));
+          std::move(native_hijack_transport),
+          std::move(connection_buffer_budget));
       same_process_execution_pool().enqueue(task);
-      task->wait();
+      task->wait_response();
       const std::string error_message = task->error_message();
       if (!error_message.empty())
       {
@@ -1065,7 +1375,8 @@ namespace
         Vajra::platform::SocketHandle client_fd,
         std::shared_ptr<Vajra::rack::Http2StreamState> http2_stream,
         std::shared_ptr<Vajra::rack::NativeHijackTransport> native_hijack_transport,
-        Vajra::request::RequestExecutor::CompletionCallback callback) const override
+        Vajra::request::RequestExecutor::CompletionCallback callback,
+        std::shared_ptr<Vajra::response::ConnectionBufferBudget> connection_buffer_budget = nullptr) const override
     {
       if (!rack_execution_callback_installed_flag.load(std::memory_order_acquire))
       {
@@ -1081,6 +1392,7 @@ namespace
           client_fd,
           std::move(http2_stream),
           std::move(native_hijack_transport),
+          std::move(connection_buffer_budget),
           std::move(callback));
       same_process_execution_pool().enqueue(task);
       return true;
@@ -1160,7 +1472,7 @@ std::optional<Vajra::response::Response> Vajra::rack::execute_current_thread_rac
     const std::string &request_body,
     Vajra::platform::SocketHandle client_fd)
 {
-  return execute_rack_request(env_entries, request_body, client_fd, nullptr, nullptr, false);
+  return execute_rack_request(env_entries, request_body, client_fd, nullptr, nullptr, nullptr, false);
 }
 
 std::optional<Vajra::response::Response> Vajra::rack::execute_current_thread_rack_request(
@@ -1169,5 +1481,5 @@ std::optional<Vajra::response::Response> Vajra::rack::execute_current_thread_rac
     Vajra::platform::SocketHandle client_fd,
     std::shared_ptr<Vajra::rack::NativeInputState> input_state)
 {
-  return execute_rack_request(env_entries, rack_input, client_fd, std::move(input_state), nullptr, nullptr, false);
+  return execute_rack_request(env_entries, rack_input, client_fd, std::move(input_state), nullptr, nullptr, nullptr, false);
 }

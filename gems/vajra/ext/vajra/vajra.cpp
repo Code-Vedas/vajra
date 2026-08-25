@@ -95,7 +95,9 @@ namespace
           config.trace_service_name,
           config.trace_otel_owner,
           config.trace_resource_attributes,
-          config.trace_propagators);
+          config.trace_propagators,
+          config.http2_max_pending_executions,
+          config.http2_max_connection_buffer_bytes);
     }
     catch (const std::exception &error)
     {

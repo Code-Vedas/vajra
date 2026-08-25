@@ -10,7 +10,7 @@ env:
   BUNDLE_PATH: ${{ github.workspace }}/vendor/bundle
   BUNDLE_JOBS: "4"
   BUNDLE_RETRY: "3"
-  RUBY_VERSION: 3.4.3
+  RUBY_VERSION: 3.4.10
 
 on:
   workflow_call:
@@ -24,25 +24,80 @@ on:
         required: false
 
 jobs:
+  dependency_audit:
+    name: Bundler Audit
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: ${{ env.RUBY_VERSION }}
+          bundler-cache: false
+      - name: Install bundler-audit
+        run: gem install bundler-audit --version 0.9.3 --no-document
+      - name: Refresh advisory database
+        run: bundler-audit update
+      - name: Audit all Bundler lockfiles
+        run: |
+          bundler-audit check gems/vajra
+          bundler-audit check gems/vajra/performance
+          bundler-audit check docs
+          bundler-audit check danger
+
+  native_sanitizers:
+    name: Native ASan and UBSan
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential clang cmake libssl-dev pkg-config
+      - name: Run native sanitizer tests
+        run: gems/vajra/bin/ctest-sanitized
+
+  fuzz_native_parsers:
+    name: Native parser libFuzzer
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Clang and native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            clang cmake libssl-dev pkg-config
+      - name: Fuzz bounded native parser corpora
+        env:
+          FUZZ_RUNS: "1000"
+        run: gems/vajra/bin/fuzz-native-parsers
+
   rubocop:
     name: RuboCop · Ruby 3.4
     permissions:
       contents: read
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install apt packages
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
             build-essential cmake git libyaml-dev pkg-config
       - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
         with:
           ruby-version: "3.4"
           bundler-cache: false
       - name: Restore bundle cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ env.BUNDLE_PATH }}
           key: ${{ runner.os }}-ruby-3.4-bundle-${{ hashFiles('gems/vajra/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
@@ -61,19 +116,19 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install apt packages
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
             build-essential clang git libyaml-dev pkg-config
       - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
         with:
           ruby-version: "3.4"
           bundler-cache: false
       - name: Restore bundle cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ env.BUNDLE_PATH }}
           key: ${{ runner.os }}-ruby-3.4-bundle-${{ hashFiles('gems/vajra/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
@@ -95,7 +150,7 @@ jobs:
     permissions:
       contents: read
     runs-on: ${{ matrix.os }}
-    needs: [rubocop, reek]
+    needs: [dependency_audit, rubocop, reek]
     strategy:
       fail-fast: false
       matrix:
@@ -119,7 +174,7 @@ jobs:
           - os: windows-2022
             ruby_version: "4.0"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install apt packages
         if: runner.os == 'Linux'
         run: |
@@ -130,7 +185,7 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install cmake libyaml openssl@3 pkg-config
       - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
         with:
           ruby-version: ${{ matrix.ruby_version }}
           bundler-cache: false
@@ -145,7 +200,7 @@ jobs:
           mingw-w64-ucrt-x86_64-toolchain
           make
       - name: Restore bundle cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ env.BUNDLE_PATH }}
           key: ${{ runner.os }}-ruby-${{ matrix.ruby_version }}-bundle-${{ hashFiles('gems/vajra/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
@@ -175,7 +230,7 @@ jobs:
         run: scripts/run-rspec-unit-all
       - name: Publish coverage to Qlty
         if: inputs.upload_coverage && runner.os == 'Linux' && matrix.ruby_version == '3.4'
-        uses: qltysh/qlty-action/coverage@v2
+        uses: qltysh/qlty-action/coverage@08a0a862c159eae9b9003081da6663d96efef637 # v2
         with:
           token: ${{ secrets.QLTY_COVERAGE_TOKEN }}
           files: |
@@ -186,7 +241,7 @@ jobs:
     permissions:
       contents: read
     runs-on: ${{ matrix.os }}
-    needs: [rubocop, reek]
+    needs: [dependency_audit, rubocop, reek]
     strategy:
       fail-fast: false
       matrix:
@@ -210,7 +265,7 @@ jobs:
           - os: windows-2022
             ruby_version: "4.0"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install apt packages
         if: runner.os == 'Linux'
         run: |
@@ -234,7 +289,7 @@ jobs:
           tar --extract --gzip --file "${archive}" --directory "${RUNNER_TEMP}" h2spec
           sudo install --mode 0755 "${RUNNER_TEMP}/h2spec" /usr/local/bin/h2spec
       - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
         with:
           ruby-version: ${{ matrix.ruby_version }}
           bundler-cache: false
@@ -249,7 +304,7 @@ jobs:
           mingw-w64-ucrt-x86_64-toolchain
           make
       - name: Restore bundle cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ env.BUNDLE_PATH }}
           key: ${{ runner.os }}-ruby-${{ matrix.ruby_version }}-bundle-${{ hashFiles('gems/vajra/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
@@ -287,21 +342,21 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    needs: [rubocop, reek]
+    needs: [dependency_audit, rubocop, reek]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install apt packages
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
             build-essential cmake git libyaml-dev pkg-config
       - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
         with:
           ruby-version: ${{ env.RUBY_VERSION }}
           bundler-cache: false
       - name: Restore bundle cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ env.BUNDLE_PATH }}
           key: ${{ runner.os }}-ruby-${{ env.RUBY_VERSION }}-bundle-${{ hashFiles('gems/vajra/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
@@ -321,21 +376,21 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    needs: [rubocop, reek]
+    needs: [dependency_audit, rubocop, reek]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install apt packages
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
             build-essential git libyaml-dev pkg-config
       - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
         with:
           ruby-version: ${{ env.RUBY_VERSION }}
           bundler-cache: false
       - name: Restore bundle cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ env.BUNDLE_PATH }}
           key: ${{ runner.os }}-ruby-${{ env.RUBY_VERSION }}-bundle-${{ hashFiles('gems/vajra/Gemfile.lock', 'docs/Gemfile.lock', 'danger/Gemfile.lock') }}
